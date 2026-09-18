@@ -72,6 +72,27 @@ const NOTICE_TYPES = [
   ['异常公告', ['异常公告', '流标', '废标', '终止公告']]
 ];
 
+/**
+ * 项目类词（公众号文章用）。
+ *
+ * 为什么需要：公众号里大量是"行业资讯"而不是招标公告，只按地域收会把
+ * "新疆某厂检修""新疆旅游推介"之类无关内容也收进来。命中这些词才说明
+ * **跟工程项目有关**（这是"新疆 + 项目类词"口径的另一半）。
+ */
+const PROJECT_KEYWORDS = [
+  '项目', '工程', '采购', '招标', '投标', '中标', '询价', '竞标', 'EPC', '总承包',
+  '装置', '管线', '管道', '扩建', '改建', '改造', '新建', '技改', '检修', '大修',
+  '产能', '投产', '开工', '奠基', '验收', '调试', '安装', '供货', '设备', '物资',
+  '阀门', '球阀', '闸阀', '蝶阀', '截止阀', '止回阀', '调节阀', '安全阀', '疏水阀',
+  '仪表', '自控', '管件', '法兰', '泵', '压缩机', '换热器', '储罐', '罐区'
+];
+
+/** 命中任一即算"跟项目有关" */
+function pickProjectHits(text) {
+  const hay = String(text || '');
+  return PROJECT_KEYWORDS.filter((k) => hay.includes(k));
+}
+
 /* ------------------------------------------------------------------ */
 /* 字段抽取                                                            */
 /* ------------------------------------------------------------------ */
@@ -420,8 +441,128 @@ function extractFromMail(parsed, opt) {
   return { ok: true, info };
 }
 
-/** 从文本推断行业（用于与客户画像对齐） */
-function pickIndustry(text) {
+/* ------------------------------------------------------------------ */
+/* 公众号文章 / RSS 条目抽取                                            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 从一篇公众号文章（或 RSS 条目）抽取信息。
+ *
+ * 与 extractFromMail 的差别：
+ *   1. **不需要原文链接判空**：文章本身就是来源，链接由调用方保证
+ *   2. 口径换成"地域 + 项目类词"（公众号资讯多，只按地域收会太吵）
+ *   3. 类型默认记「资讯」（命中公告类词才写具体公告类型）—— 便于暂存区区分，
+ *      避免把行业资讯当成招标公告混进项目库
+ *   4. 多一个打分（match_score 的来源）：地域命中 + 项目词命中 + 抽到结构化字段
+ *
+ * @param {object} art    { url, title, account, publish_time, text }
+ * @param {object} opt
+ *   sourceName, filterMode('region'|'region+project'|'keyword'), keywords(数组),
+ *   customers(库内客户), isArticle(默认 true)
+ * @returns {{ok:boolean, info?:object, reason?:string}}
+ */
+function extractFromArticle(art, opt) {
+  const o = opt || {};
+  const a = art || {};
+  const title = String(a.title || '').trim();
+  const text = String(a.text || '');
+  const hay = title + '\n' + text;
+  const reject = (reason) => ({ ok: false, reason });
+
+  if (!a.url) return reject('缺少原文链接，无法溯源');
+  if (!text && !title) return reject('文章内容为空');
+
+  const mode = o.filterMode || 'region+project';
+
+  /* 1) 地域：只要新疆（三种口径都要过这一关） */
+  const region = pickRegion(hay);
+  const xj = isXinjiang(region, hay);
+  if (o.requireXinjiang !== false && !xj) return reject('非新疆本地项目');
+
+  /* 2) 项目类词 / 关键词 */
+  const projectHits = pickProjectHits(hay);
+  const keywords = Array.isArray(o.keywords) && o.keywords.length ? o.keywords : VALVE_KEYWORDS;
+  const keywordHits = keywords.filter((k) => hay.includes(k));
+
+  if (mode === 'region+project' && !projectHits.length) {
+    return reject('未命中项目类词（更像行业资讯而非项目信息）');
+  }
+  if (mode === 'keyword' && !keywordHits.length) {
+    return reject('未命中设定关键词');
+  }
+
+  /* 3) 字段抽取 */
+  const orgs = pickOrganizations(hay);
+  const dates = pickDates(hay);
+  const amount = pickAmount(hay);
+  const personal = detectPersonalInfo(hay);
+  const noticeType = pickNoticeType(hay, title);
+  const projectName = pickProjectName(hay, title);
+
+  /* 4) 打分：让暂存区能把"最像商机的"排前面 */
+  let score = 0;
+  const scoreNote = [];
+  if (region && xj) { score += 30; scoreNote.push('新疆地区'); }
+  score += Math.min(projectHits.length, 5) * 4; scoreNote.push(`项目词${projectHits.length}个`);
+  score += Math.min(keywordHits.length, 5) * 6; scoreNote.push(`阀门词${keywordHits.length}个`);
+  if (projectName) { score += 10; scoreNote.push('抽到项目名'); }
+  if (amount != null) { score += 10; scoreNote.push('抽到金额'); }
+  if (orgs.tenderee) { score += 8; scoreNote.push('抽到招标人'); }
+  if (dates.publish_date || dates.bid_date) { score += 6; scoreNote.push('抽到日期'); }
+  if (noticeType && noticeType !== '资讯') { score += 12; scoreNote.push('像公告'); }
+  if (personal.has) { score -= 10; scoreNote.push('含个人信息(-)'); }
+
+  const match = matchCustomer({
+    tenderee: orgs.tenderee,
+    project_name: projectName,
+    title,
+    agency: orgs.agency,
+    design_institute: orgs.design_institute,
+    region_code: region ? region.code : ''
+  }, o.customers || []);
+  score += Math.min(match.score, 60) / 2;
+
+  const info = {
+    title: title || projectName || '(无标题)',
+    project_name: projectName,
+    project_code: pickProjectCode(hay),
+    region_code: region ? region.code : '',
+    region_name: region ? region.name : '',
+    location: region ? (region.locationText || '') : '',
+    amount,
+    industry: pickIndustry(hay),
+    tenderee: orgs.tenderee,
+    agency: orgs.agency,
+    design_institute: orgs.design_institute,
+    bid_date: dates.bid_date,
+    publish_date: dates.publish_date || String(a.publish_time || '').slice(0, 10),
+    /* 资讯与公告区分：抽不到具体公告类型（或只抽到"其他"）就记「资讯」，
+       这样暂存区一眼能看出"这是行业资讯，不是招标公告" */
+    notice_type: (noticeType && noticeType !== '其他') ? noticeType : '资讯',
+    source_url: a.url,
+    source_platform: [a.account ? '微信公众号 · ' + a.account : '', o.sourceName || '']
+      .filter(Boolean).join(' / ') || '微信公众号',
+    keyword_hits: keywordHits,
+    project_hits: projectHits.slice(0, 12),
+    has_personal_info: personal.has,
+    personal_fields: personal.fields,
+    /* 摘要第一行写清来源与发布时间 —— 公众号文章的"邮件字段"是空的，
+       把来源信息放进摘要里，审核时一眼能看出这是哪个号什么时候发的 */
+    raw_excerpt: [
+      [a.account ? `公众号：${a.account}` : '', o.sourceName ? `来源：${o.sourceName}` : '',
+        a.publish_time ? `发布：${a.publish_time}` : ''].filter(Boolean).join(' · '),
+      buildExcerpt(hay)
+    ].filter(Boolean).join('\n'),
+    match,
+    score: Math.max(0, Math.round(score)),
+    score_note: scoreNote.join('、'),
+    published_at: a.publish_time || ''
+  };
+
+  return { ok: true, info };
+}
+
+/** 从文本推断行业（用于与客户画像对齐） */function pickIndustry(text) {
   const MAP = [
     ['石油', ['石油', '石化', '炼化', '油田', '油气', '天然气']],
     ['化工', ['化工', '化学', '煤化工', '化肥', 'PVC', '氯碱']],
@@ -472,9 +613,12 @@ function noticeKey(info) {
 
 module.exports = {
   VALVE_KEYWORDS,
+  PROJECT_KEYWORDS,
   XINJIANG_REGIONS,
   NOTICE_TYPES,
   extractFromMail,
+  extractFromArticle,
+  pickProjectHits,
   detectPersonalInfo,
   matchCustomer,
   pickRegion,

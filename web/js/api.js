@@ -286,6 +286,8 @@ window.CRM = window.CRM || {};
     testCollectSource: (id) => request('POST', `/api/collect/sources/${id}/test`),
     collectRun: (opt) => request('POST', '/api/collect/run',
       { ignoreInterval: !!(opt && opt.ignore_interval) }),
+    /* 粘贴公众号链接采集（人工发起，仍受限速与每日上限） */
+    collectWechatPaste: (data) => request('POST', '/api/collect/wechat/paste', data || {}),
     collectStaging: (params) => request('GET', '/api/collect/staging?' + toQuery(params || {})),
     collectStagingDetail: (id) => request('GET', `/api/collect/staging/${id}`),
     reviewStaging: (id, data) => request('POST', `/api/collect/staging/${id}/review`, data),

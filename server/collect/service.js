@@ -1,30 +1,37 @@
 /**
- * 招标信息采集引擎（邮件订阅解析路线）
+ * 招标信息采集引擎
  *
- * 流程（对应附录 A.8 的七步，按订阅路线落地）：
- *   1. 配置校验      来源必须启用、类型必须是 subscription、凭据齐全
+ * 两条路线（都是"读你订阅/主动提供的内容"，不做全站爬取）：
+ *   A. 邮件订阅解析（type='subscription'）—— 招标平台的关键词推送邮件
+ *   B. 公众号 / RSS（type='rss'，以及"粘贴链接"手工入口）——
+ *      公众号文章页是公开页，拿到链接就能读正文；发现环节靠粘贴链接或订阅 RSS
+ *
+ * 共同流程（对应附录 A.8 的七步）：
+ *   1. 配置校验      来源必须启用、类型在白名单里、凭据/地址齐全
  *   2. 调度判定      每 24 小时一次；当日已跑过则跳过（A.7）
- *   3. 只读拉取      EXAMINE + BODY.PEEK，绝不改动邮箱状态
- *   4. 解析抽取      MIME → 文本 → 结构化字段
+ *   3. 只读拉取      邮件走 EXAMINE + BODY.PEEK；文章/RSS 只 GET 公开页面
+ *   4. 解析抽取      MIME → 文本；HTML → 正文 → 结构化字段
  *   5. 个人信息检测  命中则标记，但**绝不把个人信息写入任何字段**
- *   6. 客户匹配打分  与库内客户/设计院/最终用户名称比对
- *   7. 增量写入暂存区 按公告编号去重，内容有变才覆盖，否则整条跳过
+ *   6. 匹配打分      与库内客户比对；公众号文章另加"地域+项目词+字段"综合分
+ *   7. 增量写入暂存区 按公告编号/链接去重，内容有变才覆盖，否则整条跳过
  *
  * 之后由人工在界面审核，确认后才写入正式项目库（未经确认绝不入正式库）。
  *
  * 铁律（附录 A.5）在代码级强制：
- *   - 白名单制：只有 type='subscription' 有实现，其余类型一律拒绝执行
+ *   - 白名单制：只有下面列出的类型有实现，其余类型一律拒绝执行
  *   - 默认关闭：enabled=0 直接拒绝
- *   - 只读：不使用任何会改动邮箱状态的 IMAP 命令
+ *   - 只读：不使用任何会改动邮箱状态的 IMAP 命令；不绕登录、不破验证码
  */
 'use strict';
 
 const mail = require('./mail.js');
 const extract = require('./extract.js');
+const wechat = require('./wechat.js');
+const rss = require('./rss.js');
 const { ImapClient, PROVIDERS } = require('./imap.js');
 
-/** 允许执行的来源类型白名单（当前只实现邮件订阅） */
-const ALLOWED_SOURCE_TYPES = ['subscription'];
+/** 允许执行的来源类型白名单 */
+const ALLOWED_SOURCE_TYPES = ['subscription', 'rss'];
 /** 调度间隔：24 小时（附录 A.7 已确认） */
 const INTERVAL_HOURS = 24;
 /** 单次采集最多处理的邮件数（克制原则：不整箱拉取） */
@@ -33,6 +40,14 @@ const MAX_MAILS_PER_RUN = 80;
 const MAX_FAIL_STREAK = 3;
 /** 审计日志保留天数（附录 A.8：≥180 天） */
 const LOG_KEEP_DAYS = 200;
+
+/** 抓取限速与上限（方案已确认：间隔 3 秒 / 每轮 30 篇 / 每日 200 篇） */
+const FETCH_INTERVAL_MS = 3000;
+const MAX_ARTICLES_PER_RUN = 30;
+const MAX_ARTICLES_PER_DAY = 200;
+
+/** 地域口径（方案 §3.1） */
+const FILTER_MODES = ['region', 'region+project', 'keyword'];
 
 /* ------------------------------------------------------------------ */
 /* 工具                                                                */
@@ -103,6 +118,11 @@ function listSources(db) {
       keywords: cfg.keywords || '',
       regionOnly: cfg.regionOnly !== false,
       sinceDays: Number(cfg.sinceDays || 30),
+      /* 公众号 / RSS 来源的配置（界面编辑时要用；订阅地址本身不是凭据，可以回显） */
+      url: cfg.url || '',
+      filterMode: cfg.filterMode || 'region+project',
+      maxPerRun: Number(cfg.maxPerRun || 30),
+      fetchArticle: cfg.fetchArticle !== false,
       last_run_at: r.last_run_at,
       last_status: r.last_status,
       last_message: r.last_message,
@@ -173,18 +193,40 @@ function saveSource(db, payload) {
   const provider = String(payload.provider || 'custom');
   const preset = PROVIDERS[provider] || PROVIDERS.custom;
   const port = Number(payload.port || preset.port || 993);
-  const cfg = {
-    provider,
-    host: String(payload.host || preset.host || '').trim(),
-    port,
-    /* 993 走隐式 TLS；143 通常配 STARTTLS，本实现不启用 STARTTLS，因此按明文处理并提示用户优先用 993 */
-    secure: payload.secure === undefined ? port !== 143 : !!payload.secure,
-    user: String(payload.user || '').trim(),
-    mailbox: String(payload.mailbox || 'INBOX').trim() || 'INBOX',
-    keywords: String(payload.keywords || '').trim(),
-    regionOnly: payload.regionOnly !== false,
-    sinceDays: Math.min(Math.max(Number(payload.sinceDays) || 30, 1), 365)
-  };
+
+  let cfg;
+  if (type === 'rss') {
+    /* 公众号 / RSS 订阅：只需要一个订阅地址 + 收文口径 */
+    const url = String(payload.url || '').trim();
+    if (!/^https?:\/\//i.test(url)) {
+      const e = new Error('订阅地址必须以 http:// 或 https:// 开头');
+      e.status = 400; e.code = 'URL_REQUIRED';
+      throw e;
+    }
+    cfg = {
+      url,
+      keywords: String(payload.keywords || '').trim(),
+      filterMode: FILTER_MODES.includes(String(payload.filterMode))
+        ? String(payload.filterMode) : 'region+project',
+      maxPerRun: Math.min(Math.max(Number(payload.maxPerRun) || 30, 1), MAX_ARTICLES_PER_RUN),
+      sinceDays: Math.min(Math.max(Number(payload.sinceDays) || 30, 1), 365),
+      /* 订阅源只给摘要时，是否再按链接抓一次正文（公众号链接才有意义） */
+      fetchArticle: payload.fetchArticle !== false
+    };
+  } else {
+    cfg = {
+      provider,
+      host: String(payload.host || preset.host || '').trim(),
+      port,
+      /* 993 走隐式 TLS；143 通常配 STARTTLS，本实现不启用 STARTTLS，因此按明文处理并提示用户优先用 993 */
+      secure: payload.secure === undefined ? port !== 143 : !!payload.secure,
+      user: String(payload.user || '').trim(),
+      mailbox: String(payload.mailbox || 'INBOX').trim() || 'INBOX',
+      keywords: String(payload.keywords || '').trim(),
+      regionOnly: payload.regionOnly !== false,
+      sinceDays: Math.min(Math.max(Number(payload.sinceDays) || 30, 1), 365)
+    };
+  }
 
   /* 凭据处理：空串=保持不变；有值=更新；显式 clearCredential=清除 */
   let oldCfg = {};
@@ -284,9 +326,10 @@ function upsertStaging(db, info, meta) {
     raw_excerpt: info.raw_excerpt || '',
     has_personal_info: info.has_personal_info ? 1 : 0,
     personal_fields: (info.personal_fields || []).join('、'),
-    keyword_hits: (info.keyword_hits || []).join('、'),
+    keyword_hits: (info.keyword_hits || []).concat(info.project_hits ? info.project_hits.slice(0, 8) : []).join('、'),
     matched_customer: (info.match && info.match.customer) || '',
-    match_score: (info.match && info.match.score) || 0,
+    /* 公众号文章用自己算的综合分（地域+项目词+结构化字段），邮件仍用客户匹配分 */
+    match_score: info.score != null ? Number(info.score) : ((info.match && info.match.score) || 0),
     content_hash: hash
   };
 
@@ -429,6 +472,27 @@ async function runOneSource(db, src, opt) {
   if (!src.enabled && !o.force) {
     return fail('来源未启用');
   }
+
+  /* 公众号 / RSS 走另一条流水线（读订阅源 + 抓文章正文） */
+  if (src.type === 'rss') {
+    if (!cfg.url) return fail('订阅地址未配置');
+    /* 2) 调度判定 */
+    if (!o.force && !isDue(src)) {
+      const next = nextRunAt(src);
+      writeLog(db, Object.assign({}, context, {
+        action: 'collect_skip_interval',
+        message: `未到采集时间，跳过（下次：${next}）`
+      }));
+      return {
+        sourceId: src.id, sourceName: name, status: 'skipped',
+        message: `距上次采集不足 24 小时，跳过（下次：${next}）`,
+        nextRunAt: next,
+        new_count: 0, updated_count: 0, skipped_count: 0, rejected_count: 0, mails: 0
+      };
+    }
+    return runRssSource(db, src, context, o);
+  }
+
   if (!cfg.user || !cfg.pass) {
     return fail('邮箱账号或授权码未配置');
   }
@@ -586,6 +650,374 @@ async function runOneSource(db, src, opt) {
   return Object.assign({
     sourceId: src.id, sourceName: name, status: 'ok',
     message: msg, mails: mails.length, rejectReasons, nextRunAt: nextRunAt({ last_run_at: now() })
+  }, stats);
+}
+
+/* ------------------------------------------------------------------ */
+/* 公众号 / RSS 路线                                                   */
+/* ------------------------------------------------------------------ */
+
+/** 读设置项（用于"每日抓取计数"，不建新表） */
+function readSetting(db, key) {
+  try {
+    const r = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
+    return r && r.value ? String(r.value) : '';
+  } catch (_) {
+    return '';
+  }
+}
+
+function writeSetting(db, key, value, remark) {
+  db.prepare(`INSERT INTO settings (key, value, remark, updated_at) VALUES (?, ?, ?, ?)
+              ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`)
+    .run(key, String(value), remark || '', now());
+}
+
+/** 今天已经抓了多少篇（按实际请求计数，含被拒的） */
+function todayFetchCount(db) {
+  const day = now().slice(0, 10);
+  if (readSetting(db, 'collect_wechat_day') !== day) return 0;
+  return Number(readSetting(db, 'collect_wechat_count')) || 0;
+}
+
+function bumpFetchCount(db, by) {
+  const day = now().slice(0, 10);
+  const cur = readSetting(db, 'collect_wechat_day') === day ? (Number(readSetting(db, 'collect_wechat_count')) || 0) : 0;
+  writeSetting(db, 'collect_wechat_day', day, '公众号抓取计数日期（内部使用）');
+  writeSetting(db, 'collect_wechat_count', cur + (Number(by) || 0), '公众号当日抓取篇数（内部使用）');
+  return cur + (Number(by) || 0);
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** 抓一篇公众号文章并抽取；返回 { ok, info, reason, blocked, gone } */
+async function grabArticle(db, url, opt) {
+  const o = opt || {};
+  const art = await wechat.fetchArticle(url, {
+    timeout: o.timeout,
+    extraHosts: wechat.readExtraHosts(db)
+  });
+  if (!art.ok) {
+    return { ok: false, blocked: !!art.blocked, gone: !!art.gone, reason: art.error || '抓取失败' };
+  }
+  const customers = o.customers || db.prepare(
+    `SELECT id, name, short_name, end_user, design_institute, region_code
+     FROM customers WHERE deleted_at IS NULL`
+  ).all().map(plain);
+
+  const r = extract.extractFromArticle({
+    url: art.url, title: art.title, account: art.account, publish_time: art.publish_time, text: art.text
+  }, {
+    sourceName: o.sourceName || '',
+    customers,
+    filterMode: o.filterMode || 'region+project',
+    keywords: o.keywords && o.keywords.length ? o.keywords : undefined,
+    requireXinjiang: o.requireXinjiang !== false
+  });
+  return Object.assign({ article: art }, r);
+}
+
+/**
+ * 粘贴链接采集（人工发现 → 软件抓取 → 暂存区）
+ *
+ * 与定时采集的区别：这是**人主动发起**的动作，不受 24 小时节流限制，
+ * 但同样受限速（每篇间隔 3 秒）与每日上限（200 篇）约束；
+ * 命中风控页立即停止后续请求（不清空已完成的结果）。
+ *
+ * @param {object} opt { urls:[], sourceId, sourceName, filterMode, force, timeout }
+ */
+async function collectByUrls(db, opt) {
+  const o = opt || {};
+  const input = Array.isArray(o.urls) ? o.urls : [];
+  const started = now();
+  const customers = db.prepare(
+    `SELECT id, name, short_name, end_user, design_institute, region_code
+     FROM customers WHERE deleted_at IS NULL`
+  ).all().map(plain);
+
+  /* 归一化 + 去重 + 只留公众号链接 */
+  const extraHosts = wechat.readExtraHosts(db);
+  const seen = new Set();
+  const queue = [];
+  const results = [];
+  for (const raw of input) {
+    const u = String(raw || '').trim();
+    if (!u) continue;
+    if (!wechat.isWechatUrl(u, extraHosts)) {
+      results.push({ url: u, status: 'invalid', reason: '不是微信公众号文章链接' });
+      continue;
+    }
+    const norm = wechat.normalizeUrl(u);
+    if (seen.has(norm)) {
+      results.push({ url: norm, status: 'invalid', reason: '同一批里有重复链接，已跳过' });
+      continue;
+    }
+    seen.add(norm);
+    queue.push(norm);
+  }
+
+  if (!queue.length) {
+    return { ran: 0, results, message: input.length ? '没有可抓取的公众号链接' : '没有提供链接', startedAt: started, finishedAt: now() };
+  }
+
+  /* 上限控制 */
+  const dayLeft = Math.max(0, MAX_ARTICLES_PER_DAY - todayFetchCount(db));
+  if (dayLeft <= 0) {
+    return {
+      ran: 0, results, blocked: false,
+      message: `今日抓取已达上限（${MAX_ARTICLES_PER_DAY} 篇），请明天再试`,
+      startedAt: started, finishedAt: now()
+    };
+  }
+  const batch = queue.slice(0, Math.min(MAX_ARTICLES_PER_RUN, dayLeft));
+  const overflow = queue.length - batch.length;
+
+  const sourceId = o.sourceId ? Number(o.sourceId) : null;
+  const sourceName = String(o.sourceName || '粘贴链接（公众号）');
+  const sourceLabel = sourceId
+    ? ((readSourceFull(db, sourceId) || {}).name || sourceName)
+    : sourceName;
+
+  const stats = { new: 0, updated: 0, skipped: 0, rejected: 0 };
+  const rejectReasons = {};
+  let blocked = false;
+
+  for (let i = 0; i < batch.length; i++) {
+    const url = batch[i];
+    if (i > 0) await sleep(FETCH_INTERVAL_MS);          // 限速：每篇之间停一下
+    bumpFetchCount(db, 1);
+
+    let r;
+    try {
+      r = await grabArticle(db, url, {
+        customers, sourceName: sourceLabel,
+        filterMode: o.filterMode, timeout: o.timeout
+      });
+    } catch (e) {
+      r = { ok: false, reason: '抓取异常：' + (e.message || e) };
+    }
+
+    if (!r.ok) {
+      if (r.blocked) {
+        blocked = true;
+        results.push({ url, status: 'blocked', reason: r.reason });
+        writeLog(db, {
+          source_id: sourceId, source_name: sourceLabel, level: 'warn', action: 'wechat_blocked',
+          message: '微信提示访问异常，已停止本次抓取（稍后再试或减少篇数）'
+        });
+        break;                                         // 立即停止，不硬闯
+      }
+      const status = r.gone ? 'gone' : 'rejected';
+      if (status === 'rejected') {
+        stats.rejected++;
+        rejectReasons[r.reason] = (rejectReasons[r.reason] || 0) + 1;
+      }
+      results.push({ url, status, reason: r.reason, title: (r.article && r.article.title) || '' });
+      continue;
+    }
+
+    const key = extract.noticeKey(r.info);
+    const dupKey = key || ('url:' + url);
+    if (seen.has('staged:' + dupKey)) { stats.skipped++; results.push({ url, status: 'duplicate', reason: '同一批里已收过' }); continue; }
+    seen.add('staged:' + dupKey);
+
+    const up = upsertStaging(db, r.info, {
+      sourceId,
+      sourceName: sourceLabel,
+      /* 公众号没有邮件字段，把"发布账号"放这里便于识别来源 */
+      subject: '',
+      from: (r.article && r.article.account) || '',
+      mailDate: (r.article && r.article.publish_time) || ''
+    });
+    if (up.action === 'new') stats.new++;
+    else if (up.action === 'updated') stats.updated++;
+    else stats.skipped++;
+
+    results.push({
+      url, status: up.action, staging_id: up.id,
+      title: r.info.title, region: r.info.region_name,
+      notice_type: r.info.notice_type, score: r.info.score,
+      account: (r.article && r.article.account) || ''
+    });
+  }
+
+  const msg = `抓取 ${results.filter((x) => ['new', 'updated', 'skipped'].includes(x.status)).length} 篇，`
+    + `新增 ${stats.new} 条，更新 ${stats.updated} 条，跳过 ${stats.skipped} 条，`
+    + `不符合条件 ${stats.rejected} 条`
+    + (blocked ? '（中途被微信风控中断）' : '')
+    + (overflow > 0 ? `（本轮上限 ${MAX_ARTICLES_PER_RUN} 篇，还有 ${overflow} 条未处理）` : '');
+
+  writeLog(db, {
+    source_id: sourceId, source_name: sourceLabel,
+    level: blocked ? 'warn' : 'info', action: 'wechat_paste', message: msg,
+    detail: { rejected: rejectReasons, overflow, dayUsed: todayFetchCount(db) },
+    item_count: stats.new + stats.updated
+  });
+
+  return {
+    ran: 1, sourceId, sourceName: sourceLabel, message: msg,
+    blocked, overflow, dayUsed: todayFetchCount(db), dayLimit: MAX_ARTICLES_PER_DAY,
+    rejectReasons, results, startedAt: started, finishedAt: now(),
+    new_count: stats.new, updated_count: stats.updated,
+    skipped_count: stats.skipped, rejected_count: stats.rejected
+  };
+}
+
+/**
+ * RSS / 公众号订阅源的一次采集。
+ * 订阅源里可能是公众号文章链接（再抓一次正文），也可能直接给全文。
+ */
+async function runRssSource(db, src, context, opt) {
+  const o = opt || {};
+  const cfg = src.cfg || {};
+  const keywords = String(cfg.keywords || '').split(/[,，、\s]+/).map((s) => s.trim()).filter(Boolean);
+  const maxPerRun = Math.min(Number(cfg.maxPerRun) || 30, MAX_ARTICLES_PER_RUN);
+
+  const fail = (message, detail) => {
+    const streak = Number(src.fail_streak || 0) + 1;
+    const paused = streak >= MAX_FAIL_STREAK;
+    db.prepare(
+      `UPDATE collect_sources
+       SET last_run_at = ?, last_status = ?, last_message = ?, fail_streak = ?,
+           enabled = CASE WHEN ? = 1 THEN 0 ELSE enabled END, updated_at = ?
+       WHERE id = ?`
+    ).run(now(), 'failed', message, streak, paused ? 1 : 0, now(), src.id);
+    writeLog(db, Object.assign({}, context, {
+      level: 'error', action: 'collect_failed',
+      message: paused ? `${message}（连续失败 ${streak} 次，已自动暂停该来源）` : message,
+      detail: detail || ''
+    }));
+    return {
+      sourceId: src.id, sourceName: src.name, status: 'failed',
+      message: paused ? `${message}（已自动暂停）` : message,
+      new_count: 0, updated_count: 0, skipped_count: 0, rejected_count: 0, mails: 0,
+      failStreak: streak, paused
+    };
+  };
+
+  const feed = await rss.fetchFeed(cfg.url, { timeout: o.timeout || 15000, maxItems: maxPerRun });
+  if (!feed.ok) {
+    return fail('读取订阅失败：' + feed.error, feed.error);
+  }
+
+  const sinceDays = Math.min(Math.max(Number(cfg.sinceDays) || 30, 1), 365);
+  const since = new Date(Date.now() - sinceDays * 86400000);
+  const items = feed.items.slice(0, maxPerRun);
+
+  const customers = db.prepare(
+    `SELECT id, name, short_name, end_user, design_institute, region_code
+     FROM customers WHERE deleted_at IS NULL`
+  ).all().map(plain);
+
+  const stats = { new_count: 0, updated_count: 0, skipped_count: 0, rejected_count: 0 };
+  const rejectReasons = {};
+  const seen = new Set();
+  let fetched = 0;
+  let blocked = false;
+
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i];
+    /* 时间窗过滤（条目没给时间就不过滤，交给下面的地域/项目词判定） */
+    if (it.date) {
+      const d = new Date(it.date.replace(' ', 'T'));
+      if (!Number.isNaN(d.getTime()) && d < since) { stats.skipped_count++; continue; }
+    }
+
+    let art;
+    const isWx = wechat.isWechatUrl(it.link, wechat.readExtraHosts(db));
+    if (isWx && cfg.fetchArticle !== false) {
+      /* 抓正文：受限速与每日上限约束 */
+      if (todayFetchCount(db) >= MAX_ARTICLES_PER_DAY || fetched >= maxPerRun) {
+        stats.skipped_count++;
+        continue;
+      }
+      if (fetched > 0) await sleep(FETCH_INTERVAL_MS);
+      bumpFetchCount(db, 1);
+      fetched++;
+      try {
+        art = await wechat.fetchArticle(it.link, {
+          timeout: o.timeout,
+          extraHosts: wechat.readExtraHosts(db)
+        });
+      } catch (e) {
+        art = { ok: false, error: '抓取异常：' + (e.message || e) };
+      }
+      if (!art.ok) {
+        if (art.blocked) {
+          blocked = true;
+          writeLog(db, Object.assign({}, context, {
+            level: 'warn', action: 'wechat_blocked',
+            message: '微信提示访问异常，已停止本次抓取'
+          }));
+          break;
+        }
+        stats.rejected_count++;
+        const why = art.gone ? '文章不可访问' : (art.error || '抓取失败');
+        rejectReasons[why] = (rejectReasons[why] || 0) + 1;
+        continue;
+      }
+    } else {
+      /* 非公众号链接或源已给全文：直接用条目内容。
+         注意：RSS 的 description/content 里**经常是 HTML**（CDATA 包着 <p> 之类），
+         必须先转成纯文本，否则标签会混进"项目名称/项目编号"这类抽取值里。 */
+      const rawText = [it.title, it.content || it.summary].filter(Boolean).join('\n');
+      const text = /<[a-z!/][\s\S]*>/i.test(rawText) ? mail.htmlToText(rawText) : rawText;
+      art = {
+        ok: true, url: it.link || feed.url,
+        title: it.title, account: '', publish_time: it.date,
+        text
+      };
+      if (!art.text) { stats.rejected_count++; rejectReasons['条目没有内容'] = (rejectReasons['条目没有内容'] || 0) + 1; continue; }
+    }
+
+    const r = extract.extractFromArticle(art, {
+      sourceName: src.name,
+      customers,
+      filterMode: cfg.filterMode || 'region+project',
+      keywords: keywords.length ? keywords : undefined,
+      requireXinjiang: true
+    });
+
+    if (!r.ok) {
+      stats.rejected_count++;
+      rejectReasons[r.reason] = (rejectReasons[r.reason] || 0) + 1;
+      continue;
+    }
+
+    const key = extract.noticeKey(r.info) || ('url:' + r.info.source_url);
+    if (seen.has(key)) { stats.skipped_count++; continue; }
+    seen.add(key);
+
+    const up = upsertStaging(db, r.info, {
+      sourceId: src.id, sourceName: src.name,
+      subject: '', from: art.account || '', mailDate: art.publish_time || it.date || ''
+    });
+    if (up.action === 'new') stats.new_count++;
+    else if (up.action === 'updated') stats.updated_count++;
+    else stats.skipped_count++;
+  }
+
+  const msg = `订阅「${feed.title || src.name}」共 ${items.length} 条，抓正文 ${fetched} 篇；`
+    + `新增 ${stats.new_count} 条，更新 ${stats.updated_count} 条，跳过 ${stats.skipped_count} 条，`
+    + `不符合条件 ${stats.rejected_count} 条` + (blocked ? '（中途被微信风控中断）' : '');
+
+  db.prepare(
+    `UPDATE collect_sources
+     SET last_run_at = ?, last_status = 'ok', last_message = ?, last_new_count = ?,
+         last_upd_count = ?, fail_streak = 0, updated_at = ?
+     WHERE id = ?`
+  ).run(now(), msg, stats.new_count, stats.updated_count, now(), src.id);
+
+  writeLog(db, Object.assign({}, context, {
+    action: 'collect_ok', message: msg,
+    detail: { rejected: rejectReasons, feed: feed.url, format: feed.format, blocked },
+    item_count: stats.new_count + stats.updated_count
+  }));
+
+  return Object.assign({
+    sourceId: src.id, sourceName: src.name, status: 'ok',
+    message: msg, mails: 0, fetched, blocked, rejectReasons,
+    nextRunAt: nextRunAt({ last_run_at: now() })
   }, stats);
 }
 
@@ -847,9 +1279,16 @@ module.exports = {
   INTERVAL_HOURS,
   MAX_FAIL_STREAK,
   LOG_KEEP_DAYS,
+  FETCH_INTERVAL_MS,
+  MAX_ARTICLES_PER_RUN,
+  MAX_ARTICLES_PER_DAY,
+  FILTER_MODES,
   ALLOWED_SOURCE_TYPES,
   runCollect,
   runOneSource,
+  collectByUrls,
+  grabArticle,
+  todayFetchCount,
   isDue,
   nextRunAt,
   listSources,

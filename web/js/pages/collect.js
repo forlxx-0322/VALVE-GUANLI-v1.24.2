@@ -41,6 +41,12 @@ window.CRM = window.CRM || {};
         sourceForm: null,
         sourceOpen: false,
         savingSource: false,
+
+        /* 粘贴链接采集（公众号） */
+        pasteOpen: false,
+        pasteText: '',
+        pasting: false,
+        pasteResult: null,
         testing: false,
 
         /* 日志 */
@@ -161,14 +167,72 @@ window.CRM = window.CRM || {};
         }
       },
 
+      /* ---------------- 粘贴链接采集（公众号） ---------------- */
+      openPaste() {
+        this.pasteText = '';
+        this.pasteResult = null;
+        this.pasteOpen = true;
+      },
+
+      /**
+       * 提交粘贴的链接。
+       * 服务端会逐条抓取并抽取，命中风控页会立即停下（结果里会说明）。
+       */
+      async doPaste() {
+        const lines = String(this.pasteText || '').split(/[\r\n]+/).map((s) => s.trim()).filter(Boolean);
+        if (!lines.length) { CRM.toast('请先粘贴公众号文章链接（一行一条）', 'error'); return; }
+        this.pasting = true;
+        this.pasteResult = null;
+        try {
+          const r = await CRM.api.collectWechatPaste({ urls: lines });
+          this.pasteResult = r;
+          CRM.toast(r.message || '抓取完成', r.blocked ? 'warn' : 'success', 6000);
+          await this.loadAll();
+        } catch (e) {
+          CRM.toast(e.message || '抓取失败', 'error');
+        } finally {
+          this.pasting = false;
+        }
+      },
+
+      pasteStatusText(st) {
+        return {
+          new: '已收进暂存区', updated: '已更新', skipped: '已收过（跳过）',
+          duplicate: '本批重复', rejected: '不符合条件', gone: '文章不可访问',
+          invalid: '链接无效', blocked: '触发风控，已停止'
+        }[st] || st;
+      },
+
+      pasteStatusClass(st) {
+        if (st === 'new') return 'tag success';
+        if (st === 'updated') return 'tag';
+        if (st === 'blocked') return 'tag danger';
+        if (st === 'rejected' || st === 'gone' || st === 'invalid' || st === 'duplicate') return 'tag muted';
+        return 'tag';
+      },
+
       /* ---------------- 来源 ---------------- */
       openSource(s) {
         this.sourceForm = s ? Object.assign({ pass: '' }, s) : {
-          id: null, name: '', provider: 'qq', host: '', port: 993, secure: true,
+          id: null, name: '', type: 'subscription', provider: 'qq', host: '', port: 993, secure: true,
           user: '', pass: '', mailbox: 'INBOX',
-          keywords: '阀门,球阀,闸阀,蝶阀', regionOnly: true, sinceDays: 30, enabled: false
+          keywords: '阀门,球阀,闸阀,蝶阀', regionOnly: true, sinceDays: 30, enabled: false,
+          /* 公众号 / RSS 用 */
+          url: '', filterMode: 'region+project', maxPerRun: 30
         };
+        if (!this.sourceForm.type) this.sourceForm.type = 'subscription';
+        if (!this.sourceForm.filterMode) this.sourceForm.filterMode = 'region+project';
         this.sourceOpen = true;
+      },
+
+      /** 切换采集方式时补齐该方式需要的默认值 */
+      onTypeChange() {
+        if (this.sourceForm.type === 'rss') {
+          this.sourceForm.maxPerRun = this.sourceForm.maxPerRun || 30;
+          this.sourceForm.filterMode = this.sourceForm.filterMode || 'region+project';
+        } else if (!this.sourceForm.host) {
+          this.onProviderChange();
+        }
       },
 
       onProviderChange() {
@@ -402,6 +466,8 @@ window.CRM = window.CRM || {};
               </button>
               <button class="btn btn-sm" :disabled="running || !(summary && summary.enabled)"
                       title="忽略 24 小时间隔，强制再采集一次" @click="runNow(true)">强制采集</button>
+              <button class="btn btn-sm btn-primary" title="把公众号文章链接粘进来，直接抓取并抽取"
+                      @click="openPaste">粘贴链接采集</button>
             </div>
           </div>
         </div>
@@ -727,22 +793,72 @@ window.CRM = window.CRM || {};
             <div class="drawer-head">
               <div>
                 <div class="drawer-title">{{ sourceForm.id ? '编辑采集来源' : '新增采集来源' }}</div>
-                <div class="drawer-sub">填邮箱与授权码即可；来源默认停用，确认无误后再启用</div>
+                <div class="drawer-sub">
+                  {{ sourceForm.type === 'rss'
+                    ? '订阅一个 RSS/Atom 地址（可放公众号转 RSS 的地址）；默认停用，确认无误后再启用'
+                    : '填邮箱与授权码即可；来源默认停用，确认无误后再启用' }}
+                </div>
               </div>
               <button class="icon-btn" @click="sourceOpen = false">✕</button>
             </div>
             <div class="drawer-body">
-              <div class="note" style="margin-bottom:14px">
+              <div v-if="sourceForm.type !== 'rss'" class="note" style="margin-bottom:14px">
                 <c-icon name="alert" :size="16" />
                 <div style="font-size:var(--fs-sm)">
                   <strong>授权码不是邮箱登录密码。</strong>{{ sourceHint }}
                 </div>
               </div>
+              <div v-else class="note" style="margin-bottom:14px">
+                <c-icon name="alert" :size="16" />
+                <div style="font-size:var(--fs-sm)">
+                  本软件<strong>只读你填的这个订阅地址</strong>：订阅源里若是公众号文章链接，
+                  会按链接再抓一次正文（每篇间隔 3 秒）。<br>
+                  公众号本身没有面向个人的列表接口，所以"公众号 → RSS"这一步需要你自己解决
+                  （例如另跑一个 wewe-rss 之类的工具），本软件不代管你的账号。
+                </div>
+              </div>
 
               <div class="form-grid">
                 <c-field v-model="sourceForm.name" label="来源名称" required
-                         placeholder="例如：新疆公共资源交易网 · 邮件订阅" :span="2" />
+                         :placeholder="sourceForm.type === 'rss' ? '例如：某公众号 · RSS 订阅' : '例如：新疆公共资源交易网 · 邮件订阅'"
+                         :span="2" />
 
+                <div class="field" :span="2">
+                  <label class="field-label">采集方式</label>
+                  <select class="input" v-model="sourceForm.type" @change="onTypeChange">
+                    <option value="subscription">订阅邮件（招标平台的关键词推送）</option>
+                    <option value="rss">公众号 / RSS 订阅</option>
+                  </select>
+                  <div class="field-hint">两种方式都是"读你订阅的内容"，不做全站爬取</div>
+                </div>
+
+                <!-- ===== RSS / 公众号 ===== -->
+                <template v-if="sourceForm.type === 'rss'">
+                  <c-field v-model="sourceForm.url" label="订阅地址" required :span="2"
+                           placeholder="以 http 开头的 RSS / Atom 地址" />
+                  <div class="field">
+                    <label class="field-label">收文口径</label>
+                    <select class="input" v-model="sourceForm.filterMode">
+                      <option value="region+project">新疆 + 项目类词（推荐）</option>
+                      <option value="region">只要新疆（最宽，资讯也收）</option>
+                      <option value="keyword">只认下面的关键词（最严）</option>
+                    </select>
+                    <div class="field-hint">项目类词指项目/工程/采购/招标/中标/EPC/装置/管线/改造/阀门…</div>
+                  </div>
+                  <c-field v-model.number="sourceForm.maxPerRun" label="每次最多取几篇" type="number"
+                           hint="最多 30 篇；每篇公众号正文之间会停 3 秒" />
+                  <c-field v-model="sourceForm.keywords" label="关键词（口径选"只认关键词"时生效）" :span="2"
+                           placeholder="例如：阀门,球阀,闸阀,蝶阀" />
+                  <div class="field" :span="2">
+                    <label class="field-label">启用状态</label>
+                    <div class="switch" @click="sourceForm.enabled = !sourceForm.enabled">
+                      <input type="checkbox" :checked="sourceForm.enabled" readonly />
+                      <span class="switch-text">{{ sourceForm.enabled ? '已启用（会联网采集）' : '已停用（零网络请求）' }}</span>
+                    </div>
+                  </div>
+                </template>
+
+                <template v-else>
                 <div class="field">
                   <label class="field-label">邮箱服务商</label>
                   <select class="input" v-model="sourceForm.provider" @change="onProviderChange">
@@ -776,9 +892,10 @@ window.CRM = window.CRM || {};
                     <span class="switch-text">{{ sourceForm.enabled ? '已启用（会联网采集）' : '已停用（零网络请求）' }}</span>
                   </div>
                 </div>
+                </template>
               </div>
 
-              <div class="note warn mt-4">
+              <div v-if="sourceForm.type !== 'rss'" class="note warn mt-4">
                 <c-icon name="alert" :size="16" />
                 <div style="font-size:var(--fs-xs)">
                   软件以<strong>只读方式</strong>读取邮件：使用 EXAMINE + BODY.PEEK，
@@ -793,6 +910,82 @@ window.CRM = window.CRM || {};
               </button>
             </div>
           </div>
+        </div>
+
+        <!-- ============ 粘贴链接采集（公众号） ============ -->
+        <div v-if="pasteOpen" class="drawer-mask" @click.self="pasteOpen = false">
+          <aside class="drawer" style="width:760px">
+            <header class="drawer-head">
+              <div>
+                <div class="drawer-title">粘贴链接采集（微信公众号）</div>
+                <div class="drawer-sub">
+                  在微信里打开文章 → 右上角「…」→ 复制链接 → 粘到这里（一行一条）
+                </div>
+              </div>
+              <button class="icon-btn" title="关闭" @click="pasteOpen = false">✕</button>
+            </header>
+            <div class="drawer-body">
+              <div class="field">
+                <label class="field-label">公众号文章链接</label>
+                <textarea class="input" rows="6" v-model="pasteText"
+                          placeholder="一行一条，例如：mp.weixin.qq.com/s?__biz=…（从微信里复制来的完整链接）"></textarea>
+                <div class="field-hint">
+                  一次最多 30 篇；每篇之间会停 3 秒（克制原则，避免被微信风控），所以 5 篇大约要等 15 秒
+                </div>
+              </div>
+
+              <div class="note mt-3">
+                <c-icon name="alert" :size="15" />
+                <div style="font-size:var(--fs-xs)">
+                  只抓<strong>公开可访问</strong>的文章页，不带你的账号凭据、不绕验证；
+                  命中微信「环境异常」提示时会<strong>立即停止</strong>，已抓到的照常入暂存区。<br>
+                  收文口径：<strong>新疆地区 + 项目类词</strong>（项目/工程/采购/招标/中标/EPC/装置/管线/
+                  改造/阀门/管件…），纯资讯不收；抓到的内容先进<strong>待审核</strong>，你确认后才进项目库。
+                </div>
+              </div>
+
+              <div v-if="pasteResult" class="mt-4">
+                <div class="field-label">抓取结果</div>
+                <div class="note" style="margin-bottom:8px">
+                  <div style="font-size:var(--fs-xs)">
+                    {{ pasteResult.message }}
+                    <span v-if="pasteResult.dayUsed != null" class="muted">
+                      （今日已抓 {{ pasteResult.dayUsed }} / {{ pasteResult.dayLimit }} 篇）
+                    </span>
+                  </div>
+                </div>
+                <div class="table-wrap">
+                  <table class="data-table">
+                    <thead>
+                      <tr>
+                        <th style="width:110px">结果</th>
+                        <th>文章 / 链接</th>
+                        <th style="width:110px">地区</th>
+                        <th style="width:160px">说明</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="(r, i) in (pasteResult.results || [])" :key="i">
+                        <td><span :class="pasteStatusClass(r.status)">{{ pasteStatusText(r.status) }}</span></td>
+                        <td>
+                          <div>{{ r.title || '—' }}</div>
+                          <div class="muted" style="font-size:var(--fs-xxs,11px);word-break:break-all">{{ r.url }}</div>
+                        </td>
+                        <td>{{ r.region || '—' }}</td>
+                        <td class="muted" style="font-size:var(--fs-xs)">{{ r.reason || (r.score ? '得分 ' + r.score : '') }}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+            <div class="drawer-foot">
+              <button class="btn" @click="pasteOpen = false">关闭</button>
+              <button class="btn btn-primary" :disabled="pasting" @click="doPaste">
+                {{ pasting ? '抓取中…（每篇间隔 3 秒）' : '开始抓取' }}
+              </button>
+            </div>
+          </aside>
         </div>
       </div>`
   };

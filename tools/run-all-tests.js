@@ -63,9 +63,11 @@ const SUITES = [
   ['报价内置列改名与删除', 'tools/test-quotation-builtin-columns.js'],
   /* 1.18 删列安全性：逐列删除，验证不影响其它功能 */
   ['报价删列安全性（穷举）', 'tools/test-quotation-delete-column-safety.js'],
+  /* 1.19 招标采集：公众号 / RSS（本地模拟文章页与订阅源，不碰真实网络） */
+  ['公众号粘贴链接采集', 'tools/test-wechat-collect.js'],
+  ['公众号 / RSS 订阅来源', 'tools/test-collect-rss.js'],
   /* 招标采集模块：不联网，用本地模拟 IMAP 服务器跑真实协议 */
-  ['招标采集 · MIME 解析', 'tools/test-collect-mail.js'],
-  ['招标采集 · IMAP 客户端', 'tools/test-collect-imap.js'],
+  ['招标采集 · MIME 解析', 'tools/test-collect-mail.js'],  ['招标采集 · IMAP 客户端', 'tools/test-collect-imap.js'],
   ['招标采集 · 信息抽取', 'tools/test-collect-extract.js'],
   ['招标采集 · 采集引擎', 'tools/test-collect-engine.js'],
   ['招标采集 · 接口层', 'tools/test-collect-api.js'],

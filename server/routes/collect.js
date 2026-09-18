@@ -9,6 +9,7 @@
  *   DELETE /api/collect/sources/:id          删除来源
  *   POST   /api/collect/sources/:id/test     测试连接（只连邮箱读一次，不写库）
  *   POST   /api/collect/run                  立即采集（仍受 24 小时节流约束）
+ *   POST   /api/collect/wechat/paste         粘贴公众号链接采集（人工发起，受限速与每日上限）
  *   GET    /api/collect/staging              暂存区列表（待审核）
  *   GET    /api/collect/staging/:id          暂存详情
  *   POST   /api/collect/staging/:id/review   审核：approve 入正式库 / reject 忽略
@@ -89,6 +90,25 @@ module.exports = async function collectRoutes(ctx) {
       return fail(400, 'CONNECT_FAILED', res.message || '连接失败');
     }
     return fail(404, 'API_NOT_FOUND', '接口不存在：' + pathname);
+  }
+
+  /* ---------------- 粘贴链接采集（公众号文章） ---------------- */
+  /* 人工发起：不受 24 小时节流限制，但仍受限速与每日上限约束 */
+  if (action === 'wechat' && seg(segments, 3) === 'paste' && method === 'POST') {
+    const p = body || {};
+    const urls = Array.isArray(p.urls)
+      ? p.urls
+      : String(p.text || p.urls || '').split(/[\r\n]+/).map((s) => s.trim());
+    const list = urls.map((s) => String(s).trim()).filter(Boolean);
+    if (!list.length) return fail(400, 'URLS_REQUIRED', '请至少粘贴一条公众号文章链接');
+    const r = await collect.collectByUrls(db, {
+      urls: list,
+      sourceId: p.source_id ? Number(p.source_id) : null,
+      sourceName: p.source_name || '',
+      filterMode: p.filterMode,
+      timeout: Number(p.timeout) || 15000
+    });
+    return ok(r);
   }
 
   /* ---------------- 立即采集 ---------------- */
