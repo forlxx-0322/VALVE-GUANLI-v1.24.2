@@ -177,19 +177,47 @@ window.CRM = window.CRM || {};
       /**
        * 提交粘贴的链接。
        * 服务端会逐条抓取并抽取，命中风控页会立即停下（结果里会说明）。
+       * force=true 时口径没命中的也收进暂存区（人工看过、确认要留）。
        */
-      async doPaste() {
+      async doPaste(force) {
         const lines = String(this.pasteText || '').split(/[\r\n]+/).map((s) => s.trim()).filter(Boolean);
         if (!lines.length) { CRM.toast('请先粘贴公众号文章链接（一行一条）', 'error'); return; }
+        if (force && !this.pasteResult) {
+          CRM.toast('请先抓取一次；"仍收下"是把上一次没命中的收进来', 'error', 5000);
+          return;
+        }
         this.pasting = true;
-        this.pasteResult = null;
+        const prev = this.pasteResult;
+        this.pasteResult = force ? prev : null;
         try {
-          const r = await CRM.api.collectWechatPaste({ urls: lines });
+          const r = await CRM.api.collectWechatPaste({ urls: lines, force: !!force });
           this.pasteResult = r;
           CRM.toast(r.message || '抓取完成', r.blocked ? 'warn' : 'success', 6000);
           await this.loadAll();
         } catch (e) {
           CRM.toast(e.message || '抓取失败', 'error');
+        } finally {
+          this.pasting = false;
+        }
+      },
+
+      /** 单条"仍收下"：只重跑这一条 */
+      async forceOne(row) {
+        if (!row || !row.url) return;
+        this.pasting = true;
+        try {
+          const r = await CRM.api.collectWechatPaste({ urls: [row.url], force: true });
+          const one = (r.results || [])[0] || {};
+          row.status = one.status || row.status;
+          row.forced = !!one.forced;
+          row.reason = one.staging_id
+            ? `人工收下（原：${one.forced_reason || row.reason || '口径未命中'}）`
+            : (one.reason || row.reason);
+          CRM.toast(one.staging_id ? '已按人工判断收进待审核' : '仍然没抓到（可能是文章不可访问）',
+            one.staging_id ? 'success' : 'error', 5000);
+          await this.loadAll();
+        } catch (e) {
+          CRM.toast(e.message || '操作失败', 'error');
         } finally {
           this.pasting = false;
         }
@@ -940,7 +968,10 @@ window.CRM = window.CRM || {};
                   只抓<strong>公开可访问</strong>的文章页，不带你的账号凭据、不绕验证；
                   命中微信「环境异常」提示时会<strong>立即停止</strong>，已抓到的照常入暂存区。<br>
                   收文口径：<strong>新疆地区 + 项目类词</strong>（项目/工程/采购/招标/中标/EPC/装置/管线/
-                  改造/阀门/管件…），纯资讯不收；抓到的内容先进<strong>待审核</strong>，你确认后才进项目库。
+                  改造/阀门/管件…）。<strong>只要文章里出现新疆的地州/县市就会收</strong>；
+                  通篇只提到「新疆」二字、没有具体地州的也会收（标为"仅省级"，得分较低，排后面）。<br>
+                  确实该留但没命中的，点那一行的<strong>「仍收下」</strong>
+                  或底部「把未命中的也收下」—— 收进来同样先进<strong>待审核</strong>。
                 </div>
               </div>
 
@@ -961,7 +992,8 @@ window.CRM = window.CRM || {};
                         <th style="width:110px">结果</th>
                         <th>文章 / 链接</th>
                         <th style="width:110px">地区</th>
-                        <th style="width:160px">说明</th>
+                        <th style="width:200px">说明</th>
+                        <th style="width:90px">操作</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -973,6 +1005,12 @@ window.CRM = window.CRM || {};
                         </td>
                         <td>{{ r.region || '—' }}</td>
                         <td class="muted" style="font-size:var(--fs-xs)">{{ r.reason || (r.score ? '得分 ' + r.score : '') }}</td>
+                        <td>
+                          <button v-if="r.status === 'rejected' && !r.forced" class="btn btn-sm"
+                                  :disabled="pasting" title="口径没命中，但我确认这篇要留 —— 收进待审核"
+                                  @click="forceOne(r)">仍收下</button>
+                          <span v-else-if="r.status === 'rejected'" class="muted" style="font-size:var(--fs-xxs,11px)">已人工收下</span>
+                        </td>
                       </tr>
                     </tbody>
                   </table>
@@ -981,7 +1019,10 @@ window.CRM = window.CRM || {};
             </div>
             <div class="drawer-foot">
               <button class="btn" @click="pasteOpen = false">关闭</button>
-              <button class="btn btn-primary" :disabled="pasting" @click="doPaste">
+              <button class="btn" :disabled="pasting || !(pasteResult && pasteResult.results)"
+                      title="口径没命中的也收进待审核（我确认这些要留）"
+                      @click="doPaste(true)">把未命中的也收下</button>
+              <button class="btn btn-primary" :disabled="pasting" @click="doPaste(false)">
                 {{ pasting ? '抓取中…（每篇间隔 3 秒）' : '开始抓取' }}
               </button>
             </div>

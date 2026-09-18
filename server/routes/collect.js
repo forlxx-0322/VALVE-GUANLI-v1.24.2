@@ -100,13 +100,20 @@ module.exports = async function collectRoutes(ctx) {
       ? p.urls
       : String(p.text || p.urls || '').split(/[\r\n]+/).map((s) => s.trim());
     const list = urls.map((s) => String(s).trim()).filter(Boolean);
-    if (!list.length) return fail(400, 'URLS_REQUIRED', '请至少粘贴一条公众号文章链接');
+    if (!list.length) {
+      return fail(400, 'URLS_REQUIRED',
+        p.force === true
+          ? '请先粘贴过链接：现在只做"把上一次未命中的收下"，没有可处理的链接'
+          : '请至少粘贴一条公众号文章链接');
+    }
     const r = await collect.collectByUrls(db, {
       urls: list,
       sourceId: p.source_id ? Number(p.source_id) : null,
       sourceName: p.source_name || '',
       filterMode: p.filterMode,
-      timeout: Number(p.timeout) || 15000
+      /* 人工"仍收下"：口径没命中的也写进暂存区（界面上的开关/单条按钮） */
+      force: p.force === true,
+      timeout: Number(p.timeout) || 20000
     });
     return ok(r);
   }

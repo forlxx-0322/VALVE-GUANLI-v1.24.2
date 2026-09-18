@@ -252,6 +252,35 @@ function isXinjiang(region, text) {
   return others.length === 0;
 }
 
+/**
+ * 文章（公众号 / 资讯）专用的地域判定。
+ *
+ * 为什么不能直接用 isXinjiang()：那是给**招标公告邮件**调的 —— 公告里出现外省地名
+ * 通常意味着"这是外省的项目"，所以"同时提到外省就排除"是合理的。
+ * 但公众号文章完全不同：正文里出现"北京""上海""江苏"太常见了
+ * （设计院所在地、总部、转载来源、页脚、相关阅读…），
+ * 用邮件那套规则会把大量**真正的新疆项目文章**误杀 —— 实际使用中就是这样。
+ *
+ * 所以文章按"认新疆"来判：
+ *   命中新疆地州/县市 → 收（最高置信）
+ *   只提到「新疆」二字  → 也收，但标注为"仅省级"，并把分数压低，让它在暂存区排后面
+ *   完全没有新疆痕迹   → 不收
+ * 收宽一点、由人工在暂存区筛掉，比漏掉真商机划算（使用者要求"凡新疆项目都收"）。
+ *
+ * @returns {{ xinjiang: boolean, level: 'region'|'province'|'none', others: string[] }}
+ */
+function judgeXinjiangArticle(region, text) {
+  const hay = String(text || '');
+  const others = OTHER_PROVINCES.filter((p) => new RegExp(p).test(hay));
+  if (region && region.code && region.code !== '650000') {
+    return { xinjiang: true, level: 'region', others };
+  }
+  if (/新疆/.test(hay) || (region && region.code === '650000')) {
+    return { xinjiang: true, level: 'province', others };
+  }
+  return { xinjiang: false, level: 'none', others };
+}
+
 /** 阀门关键词命中 */
 function pickKeywords(text) {
   const hits = [];
@@ -474,10 +503,10 @@ function extractFromArticle(art, opt) {
 
   const mode = o.filterMode || 'region+project';
 
-  /* 1) 地域：只要新疆（三种口径都要过这一关） */
+  /* 1) 地域：只要新疆（用**文章专用**判定，见 judgeXinjiangArticle 的说明） */
   const region = pickRegion(hay);
-  const xj = isXinjiang(region, hay);
-  if (o.requireXinjiang !== false && !xj) return reject('非新疆本地项目');
+  const judge = judgeXinjiangArticle(region, hay);
+  if (o.requireXinjiang !== false && !judge.xinjiang) return reject('非新疆本地项目');
 
   /* 2) 项目类词 / 关键词 */
   const projectHits = pickProjectHits(hay);
@@ -502,7 +531,8 @@ function extractFromArticle(art, opt) {
   /* 4) 打分：让暂存区能把"最像商机的"排前面 */
   let score = 0;
   const scoreNote = [];
-  if (region && xj) { score += 30; scoreNote.push('新疆地区'); }
+  if (judge.level === 'region') { score += 30; scoreNote.push('新疆地州'); }
+  else if (judge.level === 'province') { score += 8; scoreNote.push('仅提到新疆（省级）'); }
   score += Math.min(projectHits.length, 5) * 4; scoreNote.push(`项目词${projectHits.length}个`);
   score += Math.min(keywordHits.length, 5) * 6; scoreNote.push(`阀门词${keywordHits.length}个`);
   if (projectName) { score += 10; scoreNote.push('抽到项目名'); }
@@ -550,7 +580,9 @@ function extractFromArticle(art, opt) {
        把来源信息放进摘要里，审核时一眼能看出这是哪个号什么时候发的 */
     raw_excerpt: [
       [a.account ? `公众号：${a.account}` : '', o.sourceName ? `来源：${o.sourceName}` : '',
-        a.publish_time ? `发布：${a.publish_time}` : ''].filter(Boolean).join(' · '),
+        a.publish_time ? `发布：${a.publish_time}` : '',
+        judge.level === 'province' ? '地域：仅提到新疆（未出现具体地州，请自行确认）' : '']
+        .filter(Boolean).join(' · '),
       buildExcerpt(hay)
     ].filter(Boolean).join('\n'),
     match,
@@ -560,6 +592,61 @@ function extractFromArticle(art, opt) {
   };
 
   return { ok: true, info };
+}
+
+/**
+ * 人工"仍收下"时构造条目信息：不做口径判定，只抽取能抽到的字段。
+ * 摘要第一行会写清"人工收下 + 原本未命中的原因"，审核时一目了然。
+ */
+function buildForcedInfo(art, opt) {
+  const o = opt || {};
+  const a = art || {};
+  const title = String(a.title || '').trim();
+  const hay = title + '\n' + String(a.text || '');
+  const region = pickRegion(hay);
+  const orgs = pickOrganizations(hay);
+  const dates = pickDates(hay);
+  const personal = detectPersonalInfo(hay);
+  const projectName = pickProjectName(hay, title);
+  const noticeType = pickNoticeType(hay, title);
+  const match = matchCustomer({
+    tenderee: orgs.tenderee, project_name: projectName, title,
+    agency: orgs.agency, design_institute: orgs.design_institute,
+    region_code: region ? region.code : ''
+  }, o.customers || []);
+
+  return {
+    title: title || projectName || '(无标题)',
+    project_name: projectName,
+    project_code: pickProjectCode(hay),
+    region_code: region ? region.code : '',
+    region_name: region ? region.name : '',
+    location: region ? (region.locationText || '') : '',
+    amount: pickAmount(hay),
+    industry: pickIndustry(hay),
+    tenderee: orgs.tenderee,
+    agency: orgs.agency,
+    design_institute: orgs.design_institute,
+    bid_date: dates.bid_date,
+    publish_date: dates.publish_date || String(a.publish_time || '').slice(0, 10),
+    notice_type: '人工收下',
+    source_url: a.url,
+    source_platform: [a.account ? '微信公众号 · ' + a.account : '', o.sourceName || '']
+      .filter(Boolean).join(' / ') || '微信公众号',
+    keyword_hits: pickKeywords(hay),
+    project_hits: pickProjectHits(hay).slice(0, 12),
+    has_personal_info: personal.has,
+    personal_fields: personal.fields,
+    raw_excerpt: [
+      `人工收下（自动口径未命中：${o.reason || '未知'}）`,
+      [a.account ? `公众号：${a.account}` : '', a.publish_time ? `发布：${a.publish_time}` : ''].filter(Boolean).join(' · '),
+      buildExcerpt(hay)
+    ].filter(Boolean).join('\n'),
+    match,
+    score: 0,
+    score_note: '人工收下',
+    published_at: a.publish_time || ''
+  };
 }
 
 /** 从文本推断行业（用于与客户画像对齐） */function pickIndustry(text) {
@@ -618,6 +705,8 @@ module.exports = {
   NOTICE_TYPES,
   extractFromMail,
   extractFromArticle,
+  judgeXinjiangArticle,
+  buildForcedInfo,
   pickProjectHits,
   detectPersonalInfo,
   matchCustomer,

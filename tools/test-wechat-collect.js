@@ -152,6 +152,28 @@ function startMockArticles() {
             + '<p>采购内容：法兰、管件及阀门一批。招标人：库尔勒某开发建设有限公司。</p>'
         }));
       }
+      if (sn === 'xj-province-only') {
+        /* 只提到"新疆"、没有具体地州，而且正文里还提到外省单位 —— 以前会被排除 */
+        return res.end(articleHtml({
+          title: '新疆某石化项目阀门采购招标公告',
+          account: '西北项目速递',
+          body: '<p>受新疆某石化公司委托，现对该项目阀门采购进行公开招标。</p>'
+            + '<p>招标代理机构：北京某某招标有限公司（地址：北京市朝阳区）。</p>'
+            + '<p>设计单位：上海某某工程有限公司，监督单位：江苏某某咨询公司。</p>'
+            + '<p>采购球阀、闸阀共 60 台，开标时间：2026-11-20。</p>'
+        }));
+      }
+      if (sn === 'huge') {
+        /* 图文混排的大页面：正文后面塞 5MB 填充内容（旧上限 3MB 会直接失败） */
+        const filler = '<p>附图说明：本页包含大量图片与排版说明。</p>'.repeat(120000);
+        return res.end(articleHtml({
+          title: '新疆准东某煤化工项目阀门采购公告（图文版）',
+          account: '准东项目通',
+          body: '<p>新疆昌吉州准东经济技术开发区某煤化工项目阀门采购公告。</p>'
+            + '<p>招标控制价：人民币 260 万元，采购蝶阀 40 台。招标人：准东某化工有限公司。</p>'
+            + filler
+        }));
+      }
       /* 其它 sn（含 xj / xj-over-N）都返回同一篇"独山子"文章 */
       return res.end(articleHtml({}));
     });
@@ -308,6 +330,54 @@ function startMockArticles() {
       (await api('GET', '/api/collect/logs?pageSize=5')).data.list.some((l) => l.action === 'wechat_blocked'),
       '日志含 wechat_blocked');
 
+    /* ================= C2. 实际使用中暴露的两个问题（1.20 修复） ================= */
+    const provinceOnly = await wechat.fetchArticle(M('xj-province-only'), { extraHosts: EXTRA });
+    check('修复：只提到「新疆」、正文又提到北京/上海/江苏的文章，现在也能抓（不再被外省排除误杀）',
+      provinceOnly.ok && provinceOnly.text.includes('阀门采购'),
+      provinceOnly.ok ? `正文 ${provinceOnly.text.length} 字` : provinceOnly.error);
+    const rP = extract.extractFromArticle(
+      { url: M('xj-province-only'), title: provinceOnly.title, text: provinceOnly.text },
+      { filterMode: 'region+project', customers: [], sourceName: '（测试）' }
+    );
+    check('修复：这类文章判为"仅提到新疆（省级）"，收下但在得分与摘要里标明置信度较低',
+      rP.ok && rP.info.score_note.includes('仅提到新疆')
+      && String(rP.info.raw_excerpt).includes('仅提到新疆'),
+      rP.ok ? `得分 ${rP.info.score}｜${rP.info.score_note}｜${String(rP.info.raw_excerpt).split('\n')[0]}` : rP.reason);
+    /* 同一篇文字，若写明具体地州，得分应当明显更高（地域项 30 分 vs 8 分） */
+    {
+      const withRegion = extract.extractFromArticle(
+        { url: 'https://mp.weixin.qq.com/s?x=pr', title: '克拉玛依某项目阀门采购公告',
+          text: provinceOnly.text.replace('受新疆某石化公司委托', '受克拉玛依某石化公司委托') },
+        { filterMode: 'region+project', customers: [], sourceName: '（测试）' }
+      );
+      check('修复：写明具体地州的同文得分更高（地域置信度体现在分数上）',
+        withRegion.ok && withRegion.info.score > rP.info.score && withRegion.info.region_name === '克拉玛依市',
+        `${withRegion.info && withRegion.info.score} > ${rP.info.score}`);
+    }
+
+    const huge = await wechat.fetchArticle(M('huge'), { extraHosts: EXTRA });
+    check('修复：图文混排的大页面（约 5MB，旧上限 3MB 会直接失败）现在能正常抓取',
+      huge.ok && huge.text.includes('准东'),
+      huge.ok ? `正文 ${huge.text.length} 字` : huge.error);
+    check('抓取上限已放宽到 20MB（本地软件，留足余量）',
+      wechat.MAX_BYTES >= 20 * 1024 * 1024, `${Math.round(wechat.MAX_BYTES / 1024 / 1024)}MB`);
+
+    /* 人工"仍收下"：口径没命中的也进暂存区 */
+    const forceRun = await api('POST', '/api/collect/wechat/paste', {
+      urls: [M('xj-plain'), M('other-province')], force: true
+    });
+    const forcedRows = (forceRun.data.results || []).filter((r) => r.status === 'new');
+    check('人工「仍收下」：口径没命中的文章也能收进待审核（避免真商机被规则挡掉）',
+      forceRun.data.new_count === 2 && forcedRows.every((r) => r.forced === true),
+      `新增 ${forceRun.data.new_count}：${forcedRows.map((r) => r.title).join(' / ')}`);
+    if (forcedRows[0]) {
+      const fd = await api('GET', `/api/collect/staging/${forcedRows[0].staging_id}`);
+      check('人工收下的条目在暂存区标为「人工收下」，并写明原本未命中的原因',
+        fd.data.notice_type === '人工收下'
+        && String(fd.data.raw_excerpt).startsWith('人工收下（自动口径未命中：'),
+        `${fd.data.notice_type}｜${String(fd.data.raw_excerpt).split('\n')[0]}`);
+    }
+
     /* ================= C. 收文口径 ================= */
     const r1 = extract.extractFromArticle(
       { url: 'https://mp.weixin.qq.com/s?x=1', title: '新疆某项目阀门采购', account: 'A',
@@ -419,18 +489,48 @@ function startMockArticles() {
         const runUi = await cdp.js(`(async () => {
           const d = [...document.querySelectorAll('.drawer')].pop();
           const ta = d.querySelector('textarea');
-          ta.value = ${JSON.stringify(M('xj-project-2'))};
+          ta.value = ${JSON.stringify(M('other-province'))};
           ta.dispatchEvent(new Event('input', { bubbles: true }));
           const go = [...d.querySelectorAll('button')].find(b => /开始抓取/.test(b.textContent));
           if (!go) return { err: '没有提交按钮' };
           go.click();
           await new Promise(r => setTimeout(r, 4500));
           const dd = [...document.querySelectorAll('.drawer')].pop();
-          return { text: dd ? dd.innerText.replace(/\\s+/g, ' ').slice(0, 300) : '' };
+          if (!dd) return { err: '抓取后抽屉不见了' };
+          const rows = [...dd.querySelectorAll('tbody tr')].map(tr => tr.innerText.replace(/\\s+/g, ' ').trim());
+          const btn = [...dd.querySelectorAll('button')].find(b => b.textContent.trim() === '仍收下');
+          return {
+            rowCount: rows.length,
+            rows: rows.map(r => r.slice(0, 90)),
+            text: rows.join(' || ').slice(0, 300),
+            hasForceBtn: !!btn,
+            hasForceAll: [...dd.querySelectorAll('button')].some(b => b.textContent.includes('把未命中的也收下'))
+          };
         })()`);
-        check('浏览器：在界面上粘贴并抓取，能看到逐条结果',
-          !runUi.err && /已收进暂存区|已收过|不符合条件/.test(runUi.text || ''),
-          runUi.err || String(runUi.text || '').slice(0, 120));
+        check('浏览器：在界面上粘贴并抓取，结果表里逐条给出状态',
+          !runUi.err && runUi.rowCount > 0 && /已收进暂存区|已收过|不符合条件|人工收下/.test(runUi.text || ''),
+          runUi.err || `${runUi.rowCount} 行：${String(runUi.text || '').slice(0, 150)}`);
+        check('浏览器：未命中的那一行有「仍收下」按钮，底部还有「把未命中的也收下」',
+          !runUi.err && runUi.hasForceBtn === true && runUi.hasForceAll === true,
+          `单条按钮=${runUi.hasForceBtn}，批量按钮=${runUi.hasForceAll}`);
+
+        if (runUi.hasForceBtn) {
+          const clicked = await cdp.js(`(async () => {
+            const dd = [...document.querySelectorAll('.drawer')].pop();
+            const btn = [...dd.querySelectorAll('button')].find(b => b.textContent.trim() === '仍收下');
+            btn.click();
+            await new Promise(r => setTimeout(r, 4000));
+            const d3 = [...document.querySelectorAll('.drawer')].pop();
+            const row = [...d3.querySelectorAll('tbody tr')].find(tr => /华东招标|江苏/.test(tr.innerText));
+            return {
+              rowText: row ? row.innerText.replace(/\\s+/g, ' ').slice(0, 120) : '(未找到该行)',
+              toasts: [...document.querySelectorAll('.toast')].map(t => t.textContent.trim())
+            };
+          })()`);
+          check('浏览器：点「仍收下」后该条被人工收下（状态与说明都变了）',
+            !clicked.err && /人工收下|已收进暂存区/.test(clicked.rowText + (clicked.toasts || []).join(' ')),
+            clicked.err || `${clicked.rowText}｜${(clicked.toasts || []).join(' / ')}`);
+        }
       }
 
       check('页面无 JS 报错', cdp.errors.length === 0,

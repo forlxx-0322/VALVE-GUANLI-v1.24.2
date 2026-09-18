@@ -690,7 +690,7 @@ function bumpFetchCount(db, by) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/** 抓一篇公众号文章并抽取；返回 { ok, info, reason, blocked, gone } */
+/** 抓一篇公众号文章并抽取；返回 { ok, info, reason, blocked, gone, article } */
 async function grabArticle(db, url, opt) {
   const o = opt || {};
   const art = await wechat.fetchArticle(url, {
@@ -714,6 +714,17 @@ async function grabArticle(db, url, opt) {
     keywords: o.keywords && o.keywords.length ? o.keywords : undefined,
     requireXinjiang: o.requireXinjiang !== false
   });
+
+  /* 人工"仍收下"：口径没命中，但使用者看过文章、确认要留 —— 照样进暂存区，
+     并在信息里标明是人工收下的、原本是什么原因，审核时不会误以为是自动命中的。 */
+  if (!r.ok && o.force) {
+    const forced = extract.buildForcedInfo({
+      url: art.url, title: art.title, account: art.account, publish_time: art.publish_time,
+      text: art.text, sourceName: o.sourceName || '', reason: r.reason
+    });
+    return { ok: true, forced: true, forcedReason: r.reason, info: forced, article: art };
+  }
+
   return Object.assign({ article: art }, r);
 }
 
@@ -791,7 +802,8 @@ async function collectByUrls(db, opt) {
     try {
       r = await grabArticle(db, url, {
         customers, sourceName: sourceLabel,
-        filterMode: o.filterMode, timeout: o.timeout
+        filterMode: o.filterMode, timeout: o.timeout,
+        force: o.force === true            /* 人工"仍收下"：口径没命中也写进暂存区 */
       });
     } catch (e) {
       r = { ok: false, reason: '抓取异常：' + (e.message || e) };
@@ -837,6 +849,7 @@ async function collectByUrls(db, opt) {
       url, status: up.action, staging_id: up.id,
       title: r.info.title, region: r.info.region_name,
       notice_type: r.info.notice_type, score: r.info.score,
+      forced: !!r.forced, forced_reason: r.forcedReason || '',
       account: (r.article && r.article.account) || ''
     });
   }

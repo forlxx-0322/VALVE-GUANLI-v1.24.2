@@ -55,7 +55,9 @@ function isWechatUrl(url, extraHosts) {
   }
 }
 
-const MAX_BYTES = 3 * 1024 * 1024;      // 单篇上限 3MB
+/* 单篇上限：公众号文章图文混排，正文 HTML 动辄几 MB（图片标签、内联样式），
+   3MB 会把很多文章挡在门外 —— 这是本地软件，放宽到 20MB 更实际。 */
+const MAX_BYTES = 20 * 1024 * 1024;
 const MAX_REDIRECTS = 3;
 
 /** 被判为"风控页"的特征（出现即停止本轮，不硬闯） */
@@ -123,13 +125,14 @@ function httpGet(url, opt) {
         size += c.length;
         if (size > MAX_BYTES) {
           req.destroy();
-          return reject(new Error('页面过大（超过 3MB），已中止'));
+          return reject(new Error(`页面过大（已超过 ${Math.round(MAX_BYTES / 1024 / 1024)}MB），已中止抓取`));
         }
         chunks.push(c);
       });
       res.on('end', () => resolve({
         status: res.statusCode,
         headers: res.headers,
+        size,
         body: Buffer.concat(chunks).toString('utf8')
       }));
     });
@@ -306,6 +309,8 @@ async function fetchArticle(url, opt) {
   if (res.status !== 200) {
     return { ok: false, url: target, error: `页面返回状态 ${res.status}` };
   }
+  /* 带上页面字节数：排查工具要显示"这篇多大"，也便于判断要不要再放宽上限 */
+  parsed.bytes = res.size || 0;
   return parsed;
 }
 
@@ -321,6 +326,7 @@ module.exports = {
   readExtraHosts,
   ARTICLE_HOSTS,
   EXTRA_HOSTS_SETTING,
+  MAX_BYTES,
   BLOCK_MARKS,
   GONE_MARKS
 };
