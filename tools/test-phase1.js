@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 阶段一验收测试脚本
  * 用法：node tools/test-phase1.js
  * 前置：服务已在 127.0.0.1:8899 运行
@@ -18,8 +18,8 @@ const EXPECTED_TABLES = [
   'customers', 'contacts', 'tags', 'customer_tags', 'followups', 'projects',
   'payments', 'tasks', 'attachments', 'activity_logs', 'dict', 'settings', 'region'
 ];
-/* 1.11 起新增 quotation_status 一类，故为 23 */
-const DICT_CATEGORIES = 23;
+/* 1.21 起报价单模块整体移除，quotation_status 这一类随之删除，故为 22 */
+const DICT_CATEGORIES = 22;
 
 const results = [];
 function check(no, name, pass, detail) {

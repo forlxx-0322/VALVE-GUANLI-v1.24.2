@@ -9,8 +9,13 @@
  *   3. 阶段一套件会调用优雅停机接口关掉服务，必须放在最末。
  *
  * 用法：
- *   node tools/run-all-tests.js            自动清库后跑全套
+ *   node tools/run-all-tests.js            自动清库后跑全套（默认：在沙箱副本里跑，不碰真实 data/）
  *   node tools/run-all-tests.js --no-clean 跳过清库（沿用当前数据）
+ *   node tools/run-all-tests.js --in-place 就地跑（**会清空本目录 data/**，仅供空库/测试库使用）
+ *
+ * 为什么要沙箱：1.20 之后吃过一次亏 —— 测试直接在真实数据目录里跑，清库把使用者的数据清掉了。
+ * 现在默认把 server/ web/ tools/ 复制到 .fixtures/sandbox/，在里面用空库、独立端口（8955）跑，
+ * 真实 data/ 全程只读不碰。只有显式加 --in-place 才会就地跑。
  */
 'use strict';
 
@@ -19,7 +24,128 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const ROOT = path.resolve(__dirname, '..');
-const BASE = process.env.CRM_TEST_BASE || 'http://127.0.0.1:8899';
+const ARGS = process.argv.slice(2);
+const IN_PLACE = ARGS.includes('--in-place');
+const SANDBOX_PORT = String(process.env.CRM_SANDBOX_PORT || 8955);
+const SANDBOX = path.join(ROOT, '.fixtures', 'sandbox');
+const BASE = process.env.CRM_TEST_BASE
+  || (IN_PLACE ? 'http://127.0.0.1:' + (process.env.CRM_PORT || 8899) : 'http://127.0.0.1:' + SANDBOX_PORT);
+
+/**
+ * 沙箱是空库，但有两类**静态参考数据**必须和真实环境一致，否则地图/归属套件会假失败：
+ *   - `region`（行政区划，由 tools/fetch-map-data.js 首次联网抓取后写入真实库）
+ *   - 地图 GeoJSON 在 web/vendor/map/ 里，已随代码复制，不需要额外处理
+ * 这里只从真实库**只读复制 region 一张表**，不读任何客户/项目等业务数据。
+ */
+function seedSandboxDb() {
+  const sandboxData = path.join(SANDBOX, 'data');
+  const dbFile = path.join(sandboxData, 'crm.db');
+  const realDbFile = path.join(ROOT, 'data', 'crm.db');
+  const dbMod = require(path.join(SANDBOX, 'server', 'db.js'));
+  const info = dbMod.initDatabase({
+    dataDir: sandboxData,
+    dbFile,
+    backupDir: path.join(sandboxData, 'backups')
+  });
+
+  let copied = 0;
+  if (fs.existsSync(realDbFile)) {
+    try {
+      const { DatabaseSync } = require('node:sqlite');
+      const src = new DatabaseSync(realDbFile, { readOnly: true });
+      const rows = src.prepare('SELECT * FROM region').all();
+      src.close();
+      if (rows.length) {
+        const cols = info.db.prepare('PRAGMA table_info(region)').all().map((c) => c.name);
+        const ins = info.db.prepare(
+          `INSERT OR REPLACE INTO region (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`
+        );
+        info.db.exec('BEGIN');
+        for (const row of rows) {
+          try {
+            ins.run(...cols.map((c) => (row[c] === undefined ? null : row[c])));
+            copied++;
+          } catch (_) { /* 单行异常忽略 */ }
+        }
+        info.db.exec('COMMIT');
+      }
+    } catch (e) {
+      console.log(`（提示：从真实库复制行政区划失败：${e.message}）`);
+    }
+  }
+  dbMod.closeDatabase(info.db);
+  console.log(copied
+    ? `沙箱库已建好，并从真实库复制行政区划 ${copied} 行（只复制参考数据）`
+    : '沙箱库已建好（未找到行政区划数据；地图/归属套件可能失败，先跑一次 tools/fetch-map-data.js）');
+}
+
+/**
+ * 沙箱模式：把代码复制到 .fixtures/sandbox/（不含 data、.git、测试产物），
+ * 在里面用空库跑一遍内层 runner。真实 data/ 一个字节都不动。
+ */
+function runInSandbox() {
+  console.log('================ 沙箱模式 ================');
+  console.log(`代码复制到：${SANDBOX}`);
+  console.log(`数据目录：${path.join(SANDBOX, 'data')}（空库）   端口：${SANDBOX_PORT}`);
+  console.log('真实 data/ 不会被执行任何写操作。\n');
+
+  fs.rmSync(SANDBOX, { recursive: true, force: true });
+  fs.mkdirSync(SANDBOX, { recursive: true });
+  const SKIP = new Set(['.git', 'data', '.fixtures', '.shots', 'node_modules', '.wbhome',
+    'workbuddy-bridge', '.npm-cache']);
+  for (const name of fs.readdirSync(ROOT)) {
+    if (SKIP.has(name)) continue;
+    const src = path.join(ROOT, name);
+    const dst = path.join(SANDBOX, name);
+    fs.cpSync(src, dst, { recursive: true, filter: (p) => !p.includes(`${path.sep}.git${path.sep}`) });
+  }
+  fs.mkdirSync(path.join(SANDBOX, 'data'), { recursive: true });
+  /* 套件会把结果 JSON / 临时 xlsx 写进 ROOT/.fixtures，沙箱里也要有这一层 */
+  fs.mkdirSync(path.join(SANDBOX, '.fixtures'), { recursive: true });
+
+  seedSandboxDb();
+
+  /* 验收套件要读 .fixtures 里的图片/PDF/xlsx 夹具，沙箱里用生成器现做一份 */
+  try {
+    const mk = path.join(SANDBOX, 'tools', 'make-fixtures.js');
+    if (fs.existsSync(mk)) {
+      const r = spawnSync(process.execPath, [mk], { cwd: SANDBOX, stdio: 'ignore' });
+      console.log(r.status === 0 ? '沙箱测试夹具已生成（PNG / PDF / xlsx / csv）'
+        : `（提示：夹具生成失败，退出码 ${r.status}）`);
+    }
+  } catch (_) { /* 忽略 */ }
+
+  const r = spawnSync(process.execPath, [path.join(SANDBOX, 'tools', 'run-all-tests.js'),
+    '--in-place', '--no-clean'],
+  {
+    cwd: SANDBOX,
+    stdio: 'inherit',
+    env: Object.assign({}, process.env, {
+      CRM_TEST_BASE: `http://127.0.0.1:${SANDBOX_PORT}`,
+      CRM_PORT: SANDBOX_PORT
+    })
+  });
+
+  /* 把结果文件带回来，方便在外层 .fixtures 里翻看 */
+  try {
+    const inner = path.join(SANDBOX, '.fixtures');
+    if (fs.existsSync(inner)) {
+      for (const f of fs.readdirSync(inner)) {
+        if (/\.json$|\.log$/.test(f)) {
+          fs.copyFileSync(path.join(inner, f), path.join(ROOT, '.fixtures', 'sandbox-' + f));
+        }
+      }
+    }
+  } catch (_) { /* 忽略 */ }
+
+  return r.status === null ? 1 : r.status;
+}
+
+if (!IN_PLACE) {
+  process.exit(runInSandbox());
+}
+
+/* ================= 就地模式（沙箱内的内层 runner 走这里） ================= */
 
 /* 依赖服务的套件（按阶段顺序），阶段一放最后（它会关停服务） */
 const SUITES = [
@@ -50,27 +176,7 @@ const SUITES = [
   ['邮件提醒（SMTP）', 'tools/test-notify-email.js'],
   ['提醒与偏好设置页', 'tools/test-prefs-ui.js'],
   ['地图客户点', 'tools/test-map-points.js'],
-  ['报价单服务层', 'tools/test-quotation-service.js'],
-  ['报价单全流程', 'tools/test-quotation-flow.js'],
-  /* 1.12 报价模板 + 报价单管理 */
-  ['报价模板服务层', 'tools/test-quotation-template-service.js'],
-  ['报价模板全流程', 'tools/test-quotation-template-flow.js'],
-  /* 1.15 报价自定义列 */
-  ['报价自定义列全流程', 'tools/test-quotation-custom-fields.js'],
-  /* 1.16 报价明细列顺序（所有列可移动，全局一套） */
-  ['报价明细列顺序', 'tools/test-quotation-column-order.js'],
-  /* 1.17 内置列改名 / 删除 */
-  ['报价内置列改名与删除', 'tools/test-quotation-builtin-columns.js'],
-  /* 1.18 删列安全性：逐列删除，验证不影响其它功能 */
-  ['报价删列安全性（穷举）', 'tools/test-quotation-delete-column-safety.js'],
-  /* 1.19 招标采集：公众号 / RSS（本地模拟文章页与订阅源，不碰真实网络） */
-  ['公众号粘贴链接采集', 'tools/test-wechat-collect.js'],
-  ['公众号 / RSS 订阅来源', 'tools/test-collect-rss.js'],
-  /* 招标采集模块：不联网，用本地模拟 IMAP 服务器跑真实协议 */
-  ['招标采集 · MIME 解析', 'tools/test-collect-mail.js'],  ['招标采集 · IMAP 客户端', 'tools/test-collect-imap.js'],
-  ['招标采集 · 信息抽取', 'tools/test-collect-extract.js'],
-  ['招标采集 · 采集引擎', 'tools/test-collect-engine.js'],
-  ['招标采集 · 接口层', 'tools/test-collect-api.js'],
+  /* 1.21：招标采集与报价单两个模块整体移除，对应套件一并下线 */
   ['阶段七 · 最终验收（接口/性能/文件）', 'tools/test-acceptance-core.js'],
   ['阶段七 · 最终验收（浏览器）', 'tools/test-acceptance-browser.js'],
   ['阶段一 · 环境与服务（会关停服务，放最后）', 'tools/test-phase1.js']

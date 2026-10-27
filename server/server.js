@@ -22,11 +22,7 @@ const pmRoutes = require('./routes/pm');
 const systemRoutes = require('./routes/system');
 const attachmentRoutes = require('./routes/attachment');
 const mapRoutes = require('./routes/map');
-const collectRoutes = require('./routes/collect');
 const remindersRoutes = require('./routes/reminders');
-const quotationRoutes = require('./routes/quotation');
-const quotationTemplateRoutes = require('./routes/quotation-template');
-const quotationFieldRoutes = require('./routes/quotation-field');
 const backupService = require('./services/backup');
 
 /* ------------------------------------------------------------------ */
@@ -45,7 +41,7 @@ const RUN_FILE = path.join(DATA_DIR, '.run.json');
 /** 本软件的标识串 —— 用于单实例判定时确认"这是我们自己的服务" */
 const APP_SIGNATURE = 'crm-bjxt/1';
 /** 应用版本号：每次功能修改或 Bug 修复后递增，并在 CHANGELOG.md 归档 */
-const APP_VERSION = '1.20';
+const APP_VERSION = '1.21';
 /** 扫描端口的范围：服务端从 CRM_PORT 起向后扫描这么多端口（启动器不再预检端口） */
 const PORT_SCAN_RANGE = 11;
 
@@ -454,7 +450,7 @@ function buildRouter(ctx) {
       };
 
       /* 依次尝试各模块路由，返回 null 表示未命中 */
-      const handlers = [crmRoutes, pmRoutes, systemRoutes, attachmentRoutes, mapRoutes, collectRoutes, remindersRoutes, quotationRoutes, quotationTemplateRoutes, quotationFieldRoutes];
+      const handlers = [crmRoutes, pmRoutes, systemRoutes, attachmentRoutes, mapRoutes, remindersRoutes];
       for (const handler of handlers) {
         const handled = await handler(routeCtx);
 
@@ -572,43 +568,11 @@ async function main() {
     console.error('[数据] 归属地州归一化失败（不影响使用）：', e.message);
   }
 
-  /* 招标信息采集：每日首次启动时自动执行一次（附录 A.7 执行时机）
-   *
-   * 三重护栏，确保默认不联网：
-   *   1. 来源默认全部 enabled=0 —— 没启用就什么也不做，启动完全零外部请求
-   *   2. 24 小时节流 —— 当日已采集过直接跳过
-   *   3. 延迟 8 秒执行 —— 不阻塞启动，也不与备份抢资源
-   * 失败只记日志，绝不影响软件正常使用。 */
-  setTimeout(() => {
-    if (!ctx.db) return;                       // 期间可能已停机或正在恢复数据
-    let enabledCount = 0;
-    try {
-      enabledCount = ctx.db.prepare(
-        'SELECT COUNT(*) AS n FROM collect_sources WHERE deleted_at IS NULL AND enabled = 1'
-      ).get().n;
-    } catch (e) {
-      /* v4 之前的库没有该表时会走到这里，静默跳过 */
-      return;
-    }
-    if (!enabledCount) return;                 // 未启用任何来源 → 不做任何网络请求
-
-    console.log(`[采集] 检测到 ${enabledCount} 个已启用的采集来源，开始每日采集…`);
-    require('./collect/service.js').runCollect(ctx.db, {})
-      .then((r) => {
-        if (!r.results || !r.results.length) return;
-        for (const x of r.results) {
-          if (x.status === 'skipped') console.log(`[采集] ${x.sourceName}：${x.message}`);
-          else if (x.status === 'failed') console.log(`[采集] ${x.sourceName} 失败：${x.message}`);
-          else console.log(`[采集] ${x.sourceName}：${x.message}`);
-        }
-      })
-      .catch((e) => console.error('[采集] 启动采集失败（不影响使用）：', e.message));
-  }, 8000);
-
   /* ------------------------------------------------------------------ */
   /* 邮件提醒调度                                                        */
   /*                                                                     */
-  /* 与招标采集同一套护栏：**未启用时不建立任何网络连接**。               */
+  /* 本软件**唯一会联网**的功能（SMTP 发提醒），护栏与其它联网能力一致：  */
+  /* **未启用时不建立任何网络连接**。                                     */
   /* 启用后每 5 分钟检查一次：到了设定时间且当天没发过，就发一次当日提醒； */
   /* 当天没有待跟进客户时不会发空邮件。                                   */
   /* ------------------------------------------------------------------ */

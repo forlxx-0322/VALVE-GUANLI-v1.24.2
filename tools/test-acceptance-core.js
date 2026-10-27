@@ -28,7 +28,8 @@ const { spawn, spawnSync, execFileSync } = require('node:child_process');
 const { DatabaseSync } = require('node:sqlite');
 
 const ROOT = path.resolve(__dirname, '..');
-const BASE = 'http://127.0.0.1:8899';
+const PORT = String(process.env.CRM_PORT || 8899);
+const BASE = process.env.CRM_TEST_BASE || ('http://127.0.0.1:' + PORT);
 const FIX = path.join(ROOT, '.fixtures');
 const BACKUP_DIR = path.join(ROOT, 'data', 'backups');
 const MIRROR_DIR = path.join(BACKUP_DIR, 'mirror');
@@ -70,7 +71,8 @@ let spawnedServer = null;
 function findServerPid() {
   try {
     const out = execFileSync('netstat', ['-ano'], { encoding: 'utf8' });
-    const line = out.split(/\r?\n/).find((l) => /127\.0\.0\.1:8899\s+0\.0\.0\.0:0\s+LISTENING/.test(l));
+    const listenRe = new RegExp('127\\.0\\.0\\.1:' + PORT + '\\s+0\\.0\\.0\\.0:0\\s+LISTENING');
+    const line = out.split(/\r?\n/).find((l) => listenRe.test(l));
     if (!line) return null;
     const parts = line.trim().split(/\s+/);
     return Number(parts[parts.length - 1]) || null;
@@ -92,7 +94,7 @@ async function startServerAndWait(timeoutMs) {
   const t0 = Date.now();
   const child = spawn(process.execPath, [path.join(ROOT, 'server', 'server.js')], {
     cwd: ROOT,
-    env: Object.assign({}, process.env, { CRM_ROOT: ROOT, CRM_PORT: '8899' }),
+    env: Object.assign({}, process.env, { CRM_ROOT: ROOT, CRM_PORT: PORT }),
     stdio: 'ignore'
   });
   spawnedServer = child;
@@ -246,7 +248,7 @@ const created = [];
 
     const second = spawnSync(process.execPath, [path.join(ROOT, 'server', 'server.js')], {
       cwd: ROOT,
-      env: Object.assign({}, process.env, { CRM_ROOT: ROOT, CRM_PORT: '8899' }),
+      env: Object.assign({}, process.env, { CRM_ROOT: ROOT, CRM_PORT: PORT }),
       encoding: 'utf8',
       timeout: 15000
     });

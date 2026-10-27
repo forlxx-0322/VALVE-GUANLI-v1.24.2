@@ -101,11 +101,6 @@
             </main>
           </div>
         </div>
-
-        <!-- 报价自定义列管理：全局单例。
-             放在模板**最后**，这样它的抽屉一定盖在页面里的报价单抽屉之上
-             （同级 z-index 时后出现的元素在上）。 -->
-        <c-quotation-fields />
       </div>`
   };
 
@@ -116,13 +111,10 @@
   CRM.registerAttachmentComponent(app);
   CRM.registerMapComponent(app);
   CRM.registerCoordComponent(app);
-  if (CRM.registerQuotationComponent) CRM.registerQuotationComponent(app);
-  if (CRM.quotationFields) CRM.quotationFields.register(app);
   app.component('c-customer-edit', CRM.pages.CustomerEdit);
   app.component('c-followup-drawer', CRM.pages.FollowupDrawer);
   app.component('c-project-edit', CRM.pages.ProjectEdit);
   app.component('c-payment-drawer', CRM.pages.PaymentDrawer);
-  app.component('c-quotation-template-panel', CRM.pages.QuotationTemplatePanel);
   /* 设置页各面板 */
   app.component('c-dict-manager', CRM.settings.DictManager);
   app.component('c-tag-panel', CRM.settings.TagPanel);

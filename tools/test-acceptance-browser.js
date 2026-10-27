@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 阶段七 · 最终验收测试（浏览器部分）
  *
  * 覆盖必须在真实浏览器里验的剩余项：
@@ -1184,10 +1184,8 @@ const created = [];
     await cdp.send('Network.enable');
     await cdp.send('Network.setCacheDisabled', { cacheDisabled: true });
 
-    /* 遍历全部页面与主要交互，记录所有网络请求。
-       采集页（#/collect）也一并访问：它是唯一会联网的模块，
-       此处必须确认在「未启用来源」状态下它同样零外部请求。 */
-    for (const route of ['home', 'customers', 'projects', 'quotations', 'tasks', 'collect', 'settings']) {
+    /* 遍历全部页面与主要交互，记录所有网络请求 */
+    for (const route of ['home', 'customers', 'projects', 'tasks', 'settings']) {
       await goto('#/' + route, 3200);
     }
     await cdp.js(`(async () => {
@@ -1238,7 +1236,7 @@ const created = [];
     /* 服务配置核对：仅监听 127.0.0.1，不对外暴露 */
     const listened = await cdp.js(`(async () => {
       try {
-        const r = await fetch('http://127.0.0.1:8899/api/health');
+        const r = await fetch(${JSON.stringify('__BASE__/api/health')}.replace('__BASE__', location.origin));
         const j = await r.json();
         return { ok: j.ok === true, app: j.data.app };
       } catch (e) { return { ok: false, err: e.message }; }
@@ -1247,30 +1245,6 @@ const created = [];
       listened.ok === true,
       `健康检查返回 app=${listened.app}（服务绑定 127.0.0.1，非 0.0.0.0）`);
 
-    /* 招标采集模块：唯一会联网的功能，验证默认关闭时零外部请求 */
-    cdp.requests.length = 0;
-    const collectProbe = await cdp.js(`(async () => {
-      location.hash = '#/collect';
-      await new Promise(r => setTimeout(r, 4200));
-      const text = document.querySelector('.content').innerText;
-      const summary = await fetch('/api/collect/summary').then(r => r.json());
-      return {
-        pageRendered: text.includes('招标信息采集'),
-        enabled: summary.data.enabled,
-        sources: summary.data.sources,
-        hasOfflineHint: text.includes('唯一会联网的功能') && text.includes('默认关闭')
-      };
-    })()`);
-    await sleep(800);
-    const collectExternal = cdp.requests.filter((u) =>
-      !/^https?:\/\/127\.0\.0\.1[:/]/.test(u) && !u.startsWith('data:') && !u.startsWith('blob:'));
-
-    check(3.4, '招标采集页可访问，且默认关闭时零外部网络请求（对应验收标准 C1）',
-      collectProbe.pageRendered && collectProbe.enabled === 0
-      && collectProbe.hasOfflineHint && collectExternal.length === 0,
-      `页面渲染=${collectProbe.pageRendered}，启用来源 ${collectProbe.enabled}/${collectProbe.sources} 个，`
-      + `外部请求 ${collectExternal.length} 个${collectExternal.length ? '：' + collectExternal.slice(0, 2).join(', ') : ''}，`
-      + `界面已说明默认关闭=${collectProbe.hasOfflineHint}`);
   }
 
   /* ================================================================ */
@@ -1290,10 +1264,9 @@ const created = [];
     const eb = await launchBrowser(EDGE, 9241, edgeProfile);
     if (eb) {
       const pages = [];
-      /* 导航项：首页 / 客户 / 项目 / 报价单 / 待办 / 招标采集（导航组）
-         + 功能设置（系统组）= 7 项。
-         1.12 起新增「报价单」独立页，故从 6 项改为 7 项。 */
-      for (const route of ['home', 'customers', 'projects', 'quotations', 'tasks', 'collect', 'settings']) {
+      /* 导航项：首页 / 客户 / 项目 / 待办（导航组）+ 功能设置（系统组）= 5 项。
+         1.21 起移除「报价单」与「招标采集」两个模块，故从 7 项改为 5 项。 */
+      for (const route of ['home', 'customers', 'projects', 'tasks', 'settings']) {
         await eb.cdp.js(`location.href = ${JSON.stringify(BASE + '/#/' + route)}; 'ok'`);
         await sleep(3400);
         const state = await eb.cdp.js(`(() => ({
@@ -1303,8 +1276,8 @@ const created = [];
         }))()`);
         pages.push({ route, ...state });
       }
-      const allOk = pages.every((p) => p.hasLayout && p.navCount === 7 && !p.err);
-      check('24b', `Edge 下七个页面布局与导航正常（${eb.version.Browser}）`,
+      const allOk = pages.every((p) => p.hasLayout && p.navCount === 5 && !p.err);
+      check('24b', `Edge 下五个页面布局与导航正常（${eb.version.Browser}）`,
         allOk,
         pages.map((p) => `${p.route}${p.hasLayout && !p.err ? '✓' : '✗'}`).join(' ')
         + `；导航项 ${pages[0].navCount} 个`);

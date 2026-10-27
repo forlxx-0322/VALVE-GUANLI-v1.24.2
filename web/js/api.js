@@ -139,51 +139,6 @@ window.CRM = window.CRM || {};
     /* 地图客户坐标点 */
     customerPoints: (params) => request('GET', '/api/map/customer-points?' + toQuery(params)),
 
-    /* 报价单 */
-    listQuotations: (params) => request('GET', '/api/quotations?' + toQuery(params)),
-    getQuotation: (id) => request('GET', `/api/quotations/${id}`),
-    saveQuotation: (data) => data.id
-      ? request('PUT', `/api/quotations/${data.id}`, data)
-      : request('POST', '/api/quotations', data),
-    copyQuotation: (id) => request('POST', `/api/quotations/${id}/copy`),
-    setQuotationStatus: (id, payload) => request('POST', `/api/quotations/${id}/status`, payload),
-    applyQuotationToProject: (id) => request('POST', `/api/quotations/${id}/apply-to-project`),
-    deleteQuotation: (id) => request('DELETE', `/api/quotations/${id}`),
-    quotationExportData: (id) => request('GET', `/api/quotations/${id}/export`),
-    quotationStatuses: () => request('GET', '/api/quotations/statuses'),
-    /* 跨项目总列表（独立报价单页）与状态计数 */
-    quotationOverview: (params) => request('GET', '/api/quotations/overview?' + toQuery(params)),
-    quotationStatusCounts: () => request('GET', '/api/quotations/status-counts'),
-
-    /* 报价模板 */
-    listTemplates: (params) => request('GET', '/api/quotation-templates?' + toQuery(params)),
-    getQuotationTemplate: (id) => request('GET', `/api/quotation-templates/${id}`),
-    saveQuotationTemplate: (data) => data.id
-      ? request('PUT', `/api/quotation-templates/${data.id}`, data)
-      : request('POST', '/api/quotation-templates', data),
-    deleteQuotationTemplate: (id) => request('DELETE', `/api/quotation-templates/${id}`),
-    moveQuotationTemplate: (id, dir) => request('POST', `/api/quotation-templates/${id}/move`, { dir }),
-    applyQuotationTemplate: (id) => request('POST', `/api/quotation-templates/${id}/apply`),
-    templateFromQuotation: (quotationId, data) =>
-      request('POST', `/api/quotation-templates/from-quotation/${quotationId}`, data || {}),
-
-    /* 报价自定义列（报价单与报价模板共用） */
-    listQuotationFields: (params) => request('GET', '/api/quotation-fields?' + toQuery(params)),
-    saveQuotationField: (data) => data.id
-      ? request('PUT', `/api/quotation-fields/${data.id}`, data)
-      : request('POST', '/api/quotation-fields', data),
-    deleteQuotationField: (id) => request('DELETE', `/api/quotation-fields/${id}`),
-    moveQuotationField: (id, dir) => request('POST', `/api/quotation-fields/${id}/move`, { dir }),
-    /* 移动任意列（内置列也算），key 形如 'remark' 或 'f:12' */
-    moveQuotationColumn: (key, dir) => request('POST', '/api/quotation-fields/move', { key, dir }),
-    /* 内置列改名（label 传空 = 恢复默认名） */
-    renameQuotationColumn: (key, label) => request('POST', '/api/quotation-fields/rename', { key, label }),
-    /* 内置列删除（隐藏）/ 恢复 */
-    setQuotationColumnVisible: (key, visible) =>
-      request('POST', '/api/quotation-fields/visibility', { key, visible }),
-    quotationColumnOrder: () => request('GET', '/api/quotation-fields/order'),
-    saveQuotationColumnOrder: (order) => request('POST', '/api/quotation-fields/order', { order }),
-
     /* 客户 */
     listCustomers: (params) => request('GET', '/api/customers?' + toQuery(params)),
     getCustomer: (id) => request('GET', `/api/customers/${id}`),
@@ -274,25 +229,6 @@ window.CRM = window.CRM || {};
     deleteAttachment: (id) => request('DELETE', `/api/attachments/${id}`),
     attachmentUsage: () => request('GET', '/api/attachments/usage'),
     cleanOrphanAttachments: () => request('POST', '/api/attachments/clean-orphans'),
-
-    /* 招标信息采集（软件里唯一会联网的模块，默认关闭） */
-    collectSummary: () => request('GET', '/api/collect/summary'),
-    collectProviders: () => request('GET', '/api/collect/providers'),
-    collectSources: () => request('GET', '/api/collect/sources'),
-    saveCollectSource: (data) => data.id
-      ? request('PUT', `/api/collect/sources/${data.id}`, data)
-      : request('POST', '/api/collect/sources', data),
-    deleteCollectSource: (id) => request('DELETE', `/api/collect/sources/${id}`),
-    testCollectSource: (id) => request('POST', `/api/collect/sources/${id}/test`),
-    collectRun: (opt) => request('POST', '/api/collect/run',
-      { ignoreInterval: !!(opt && opt.ignore_interval) }),
-    /* 粘贴公众号链接采集（人工发起，仍受限速与每日上限） */
-    collectWechatPaste: (data) => request('POST', '/api/collect/wechat/paste', data || {}),
-    collectStaging: (params) => request('GET', '/api/collect/staging?' + toQuery(params || {})),
-    collectStagingDetail: (id) => request('GET', `/api/collect/staging/${id}`),
-    reviewStaging: (id, data) => request('POST', `/api/collect/staging/${id}/review`, data),
-    rejectStagingBatch: (ids, reason) => request('POST', '/api/collect/staging-reject', { ids, reason }),
-    collectLogs: (params) => request('GET', '/api/collect/logs?' + toQuery(params || {})),
 
     /* 缓存工具 */
     loadDict, loadTags, options, items, applyDictAdded, loadCustomerOptions, customerOptions, cache

@@ -160,16 +160,25 @@ function makeLegacyDb(file) {
     info.migrations.length === TARGET - vBefore,
     `执行 ${info.migrations.length} 步（v${vBefore} → v${TARGET}）`);
 
-  /* ---------- 各版本引入的新表 ---------- */
-  const expectTables = [];
-  if (TARGET >= 4) expectTables.push('collect_sources', 'collect_staging', 'collect_logs');
-  if (TARGET >= 5) expectTables.push('quotations', 'quotation_items');
-  if (TARGET >= 6) expectTables.push('quotation_templates', 'quotation_template_items');
-  if (TARGET >= 7) expectTables.push('quotation_fields');
-  for (const t of expectTables) {
-    const ok = tablesAfter.includes(t);
-    check(`新建表 ${t}`, ok, ok ? `${after.prepare(`PRAGMA table_info(${t})`).all().length} 列` : '未建');
-  }
+  /* ---------- v8：招标采集与报价模块的表必须已删除 ---------- */
+  const removedTables = ['collect_sources', 'collect_staging', 'collect_logs',
+    'quotations', 'quotation_items', 'quotation_templates',
+    'quotation_template_items', 'quotation_fields'];
+  const leftTables = removedTables.filter((t) => tablesAfter.includes(t));
+  check('v8 已删除招标采集与报价的 8 张表', leftTables.length === 0,
+    leftTables.length ? '仍在：' + leftTables.join('、') : '8 张表均已不存在');
+
+  const v8Settings = ['wechat_extra_hosts', 'collect_wechat_day', 'collect_wechat_count',
+    'quotation_column_order', 'quotation_column_labels', 'quotation_column_hidden',
+    'quote_no_prefix', 'quote_company', 'quote_contact'];
+  const leftSettings = v8Settings.filter((k) => !!after.prepare('SELECT 1 AS x FROM settings WHERE key = ?').get(k));
+  check('v8 已清理采集与报价专用设置项', leftSettings.length === 0,
+    leftSettings.length ? '仍在：' + leftSettings.join('、') : `${v8Settings.length} 项均已清理`);
+
+  const quoteDict = after.prepare(
+    "SELECT COUNT(*) AS n FROM dict WHERE category = 'quotation_status'"
+  ).get().n;
+  check('v8 已清理报价单状态字典项', quoteDict === 0, `quotation_status 剩 ${quoteDict} 项`);
 
   /* ---------- v2/v3 的列变更 ---------- */
   check('v2 的「删除 reg_capital」已生效（列不存在）',
@@ -183,94 +192,18 @@ function makeLegacyDb(file) {
     return idx.includes('idx_customers_region');
   })(), 'region_code / region_name 存在且索引已建');
 
-  /* ---------- 报价单（v5） ---------- */
-  if (TARGET >= 5) {
-    const quoCols = after.prepare('PRAGMA table_info(quotations)').all().map((c) => c.name);
-    const itemCols = after.prepare('PRAGMA table_info(quotation_items)').all().map((c) => c.name);
-    const quoIdx = after.prepare(
-      "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name IN ('quotations','quotation_items')"
-    ).all().map((r) => r.name);
-    const quoteDict = after.prepare(
-      "SELECT value FROM dict WHERE category='quotation_status' AND deleted_at IS NULL ORDER BY sort"
-    ).all();
-
-    check('quotations 必需列齐全',
-      ['id', 'project_id', 'customer_id', 'quote_no', 'version', 'status', 'total_amount',
-        'competitor_price', 'lose_reason', 'deleted_at'].every((c) => quoCols.includes(c)),
-      `${quoCols.length} 列`);
-    check('quotation_items 必需列齐全',
-      ['quotation_id', 'seq', 'valve_type', 'size_range', 'pressure_rating', 'body_material',
-        'quantity', 'unit_price', 'discount', 'subtotal'].every((c) => itemCols.includes(c)),
-      `${itemCols.length} 列`);
-    check('报价单索引已建立', quoIdx.length >= 6, quoIdx.join('、'));
-    check('报价单状态字典已预置 5 项', quoteDict.length === 5, quoteDict.map((d) => d.value).join('、'));
-  }
-
-  /* ---------- 报价模板（v6） ---------- */
-  if (TARGET >= 6) {
-    const tplCols = after.prepare('PRAGMA table_info(quotation_templates)').all().map((c) => c.name);
-    const tplItemCols = after.prepare('PRAGMA table_info(quotation_template_items)').all().map((c) => c.name);
-    const tplIdx = after.prepare(
-      "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name IN ('quotation_templates','quotation_template_items')"
-    ).all().map((r) => r.name);
-
-    check('quotation_templates 必需列齐全',
-      ['id', 'name', 'category', 'description', 'unit', 'use_count', 'last_used_at',
-        'sort', 'enabled', 'created_at', 'updated_at', 'deleted_at'].every((c) => tplCols.includes(c)),
-      `${tplCols.length} 列`);
-
-    /* 模板明细**不应有价格列**：价格随项目与行情变，存进模板容易报错价 */
-    const priceCols = ['unit_price', 'discount', 'subtotal'].filter((c) => tplItemCols.includes(c));
-    check('quotation_template_items 结构正确且不含价格列（设计如此）',
-      ['template_id', 'seq', 'item_name', 'valve_type', 'size_range', 'pressure_rating',
-        'body_material', 'connection_type', 'quantity', 'unit', 'delivery_days', 'remark']
-        .every((c) => tplItemCols.includes(c)) && priceCols.length === 0,
-      `${tplItemCols.length} 列；价格列：${priceCols.length ? priceCols.join('、') : '无'}`);
-
-    check('报价模板索引已建立', tplIdx.length >= 4, tplIdx.join('、'));
-  }
-
-  /* ---------- 报价自定义列（v7） ---------- */
-  if (TARGET >= 7) {
-    const fCols = after.prepare('PRAGMA table_info(quotation_fields)').all().map((c) => c.name);
-    const itemExtra = after.prepare('PRAGMA table_info(quotation_items)').all();
-    const tplItemExtra = after.prepare('PRAGMA table_info(quotation_template_items)').all();
-    const fIdx = after.prepare(
-      "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='quotation_fields'"
-    ).all().map((r) => r.name);
-    const extraCol = itemExtra.find((c) => c.name === 'extra');
-    const extraColTpl = tplItemExtra.find((c) => c.name === 'extra');
-
-    check('quotation_fields 必需列齐全',
-      ['id', 'name', 'kind', 'options', 'unit', 'sort', 'enabled', 'remark',
-        'created_at', 'updated_at', 'deleted_at'].every((c) => fCols.includes(c)),
-      `${fCols.length} 列`);
-
-    /* extra 必须有默认值 '{}'：老库升级后既有明细行要能直接读出空对象，
-       不能是 NULL（否则解析要多写一层容错，且容易在别处漏判）。 */
-    check('quotation_items 加了 extra 列且默认值为 {}',
-      !!extraCol && extraCol.notnull === 1 && String(extraCol.dflt_value).includes('{}'),
-      extraCol ? `notnull=${extraCol.notnull} default=${extraCol.dflt_value}` : '未加列');
-    check('quotation_template_items 加了 extra 列且默认值为 {}',
-      !!extraColTpl && extraColTpl.notnull === 1 && String(extraColTpl.dflt_value).includes('{}'),
-      extraColTpl ? `notnull=${extraColTpl.notnull} default=${extraColTpl.dflt_value}` : '未加列');
-
-    check('报价自定义列索引已建立', fIdx.length >= 1, fIdx.join('、') || '未建');
-
-    /* 迁移后既有的明细行 extra 必须是可解析的空对象 */
-    const legacyExtra = after.prepare(
-      "SELECT COUNT(*) AS n FROM quotation_items WHERE extra IS NULL OR extra = ''"
-    ).get().n;
-    check('迁移后既有明细行的 extra 都是合法空对象（无 NULL / 空串）', legacyExtra === 0,
-      `非法 extra 行数 ${legacyExtra}`);
-  }
+  /* ---------- 项目表上的"招标采集溯源"列（v4 加、v8 删） ---------- */
+  const legacyProvenance = ['source_url', 'source_platform', 'collected_at', 'source_notice_id', 'confidence']
+    .filter((c) => projectsColsAfter.includes(c));
+  check('v8 已删除项目表上的招标采集溯源列', legacyProvenance.length === 0,
+    legacyProvenance.length ? '仍在：' + legacyProvenance.join('、') : '5 列均已删除');
 
   /* ---------- 新设置项 ---------- */
-  const sKeys = ['follow_remind_time', 'remind_email_on', 'smtp_host', 'quote_no_prefix', 'smtp_port'];
+  const sKeys = ['follow_remind_time', 'remind_email_on', 'smtp_host', 'smtp_port', 'backup_keep'];
   const sFound = after.prepare(
     `SELECT COUNT(*) AS n FROM settings WHERE key IN (${sKeys.map(() => '?').join(',')})`
   ).get(...sKeys).n;
-  check('提醒与报价单相关设置项已预置', sFound === sKeys.length, `${sFound}/${sKeys.length} 项`);
+  check('提醒与备份相关设置项已预置', sFound === sKeys.length, `${sFound}/${sKeys.length} 项`);
 
   /* ---------- 最关键：既有数据一条不少 ---------- */
   const diffs = [];
@@ -306,11 +239,11 @@ function makeLegacyDb(file) {
     const lost = projectsColsBefore.filter((c) => !projectsColsAfter.includes(c));
     check('既有表的列一个不少（projects）', lost.length === 0,
       lost.length ? `丢失列：${lost.join('、')}` : `原有 ${projectsColsBefore.length} 列全部保留，现 ${projectsColsAfter.length} 列`);
-    if (TARGET >= 4) {
-      check('v4 的项目溯源列已加上',
+    if (TARGET >= 8) {
+      check('v8 的项目表已不再带招标采集溯源列',
         ['source_url', 'source_platform', 'collected_at', 'source_notice_id', 'confidence']
-          .every((c) => projectsColsAfter.includes(c)),
-        '5 个溯源列齐全');
+          .every((c) => !projectsColsAfter.includes(c)),
+        '5 个溯源列均已删除');
     }
   } else {
     check('迁移前该库尚无 projects 表（起点为早期版本），跳过列比对', true,

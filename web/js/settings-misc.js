@@ -348,7 +348,7 @@ window.CRM = window.CRM || {};
               <div class="note" style="margin-bottom:14px">
                 <c-icon name="alert" :size="16" />
                 <div style="font-size:var(--fs-sm)">
-                  这是本软件**第二个会联网的功能**（第一个是招标采集）。
+                  这是本软件**唯一会联网的功能**（发提醒邮件）。
                   <strong>关闭时不产生任何外部网络请求</strong>，软件内提醒照常工作。<br>
                   邮件只会发给你自己填的地址，不会发给客户。
                 </div>

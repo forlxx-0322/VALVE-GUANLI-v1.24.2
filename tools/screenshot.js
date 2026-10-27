@@ -66,31 +66,6 @@ const PAGES = [
     })()` },
   { name: '07-project-detail', hash: null, wait: 4200, full: true, resolveProject: true },
   { name: '08-tasks', hash: '#/tasks', wait: 3800, full: true },
-  { name: '09-collect-review', hash: '#/collect', wait: 4200, full: true },
-  { name: '09b-collect-source', hash: '#/collect', wait: 4200, full: true,
-    prep: `(async () => {
-      const t = [...document.querySelectorAll('.tab')].find(x => x.textContent.includes('采集来源'));
-      if (t) t.click();
-      await new Promise(r => setTimeout(r, 1600));
-      return 'ok';
-    })()` },
-  { name: '09c-collect-logs', hash: '#/collect', wait: 4200, full: true,
-    prep: `(async () => {
-      const t = [...document.querySelectorAll('.tab')].find(x => x.textContent.includes('采集记录'));
-      if (t) t.click();
-      await new Promise(r => setTimeout(r, 1600));
-      return 'ok';
-    })()` },
-  { name: '09d-collect-source-form', hash: '#/collect', wait: 4200, full: false,
-    prep: `(async () => {
-      const t = [...document.querySelectorAll('.tab')].find(x => x.textContent.includes('采集来源'));
-      if (t) t.click();
-      await new Promise(r => setTimeout(r, 1400));
-      const b = [...document.querySelectorAll('button')].find(x => x.textContent.includes('新增来源'));
-      if (b) b.click();
-      await new Promise(r => setTimeout(r, 1400));
-      return 'ok';
-    })()` },
   { name: '10-settings-dict', hash: '#/settings', wait: 4000, full: true },
   { name: '11-settings-backup', hash: '#/settings', wait: 4000, full: false,
     prep: `(async () => {

@@ -16,7 +16,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
 
-const SCHEMA_VERSION = 7;
+const SCHEMA_VERSION = 8;
 
 /* ------------------------------------------------------------------ */
 /* 13 张表结构                                                          */
@@ -276,193 +276,7 @@ const TABLES = [
     sort           INTEGER NOT NULL DEFAULT 0,
     customer_count INTEGER NOT NULL DEFAULT 0
   )`,
-
-  /* 14. 采集来源（招标信息采集模块）
-   * 当前实现为「邮件订阅解析」路线：订阅各招标平台的邮件推送，本地解析。
-   * 枚举类型（subscription / public_api / licensed_api / whitelist_crawl）为将来扩展预留，
-   * 但只有 subscription 有实现；其余类型即使用户手工写入也拒绝执行。 */
-  `CREATE TABLE IF NOT EXISTS collect_sources (
-    id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    name           TEXT NOT NULL,
-    type           TEXT NOT NULL DEFAULT 'subscription',
-    enabled        INTEGER NOT NULL DEFAULT 0,
-    config_json    TEXT NOT NULL DEFAULT '{}',
-    last_run_at    TEXT NOT NULL DEFAULT '',
-    last_status    TEXT NOT NULL DEFAULT '',
-    last_message   TEXT NOT NULL DEFAULT '',
-    last_new_count INTEGER NOT NULL DEFAULT 0,
-    last_upd_count INTEGER NOT NULL DEFAULT 0,
-    fail_streak    INTEGER NOT NULL DEFAULT 0,
-    created_at     TEXT NOT NULL,
-    updated_at     TEXT NOT NULL,
-    deleted_at     TEXT
-  )`,
-
-  /* 15. 采集暂存区（人工审核前不写入正式库） */
-  `CREATE TABLE IF NOT EXISTS collect_staging (
-    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
-    source_id          INTEGER,
-    source_name        TEXT NOT NULL DEFAULT '',
-    notice_id          TEXT NOT NULL DEFAULT '',
-    title              TEXT NOT NULL DEFAULT '',
-    project_name       TEXT NOT NULL DEFAULT '',
-    project_code       TEXT NOT NULL DEFAULT '',
-    region_code        TEXT NOT NULL DEFAULT '',
-    region_name        TEXT NOT NULL DEFAULT '',
-    location           TEXT NOT NULL DEFAULT '',
-    amount             REAL,
-    industry           TEXT NOT NULL DEFAULT '',
-    tenderee           TEXT NOT NULL DEFAULT '',
-    agency             TEXT NOT NULL DEFAULT '',
-    design_institute   TEXT NOT NULL DEFAULT '',
-    bid_date           TEXT NOT NULL DEFAULT '',
-    notice_type        TEXT NOT NULL DEFAULT '',
-    source_url         TEXT NOT NULL DEFAULT '',
-    source_platform    TEXT NOT NULL DEFAULT '',
-    mail_subject       TEXT NOT NULL DEFAULT '',
-    mail_from          TEXT NOT NULL DEFAULT '',
-    mail_date          TEXT NOT NULL DEFAULT '',
-    mail_uid           TEXT NOT NULL DEFAULT '',
-    raw_excerpt        TEXT NOT NULL DEFAULT '',
-    has_personal_info  INTEGER NOT NULL DEFAULT 0,
-    personal_fields    TEXT NOT NULL DEFAULT '',
-    keyword_hits       TEXT NOT NULL DEFAULT '',
-    matched_customer   TEXT NOT NULL DEFAULT '',
-    match_score        INTEGER NOT NULL DEFAULT 0,
-    content_hash       TEXT NOT NULL DEFAULT '',
-    status             TEXT NOT NULL DEFAULT 'pending',
-    reject_reason      TEXT NOT NULL DEFAULT '',
-    project_id         INTEGER,
-    collected_at       TEXT NOT NULL,
-    reviewed_at        TEXT,
-    created_at         TEXT NOT NULL,
-    updated_at         TEXT NOT NULL,
-    deleted_at         TEXT
-  )`,
-
-  /* 16. 采集日志（审计，保留 ≥180 天） */
-  `CREATE TABLE IF NOT EXISTS collect_logs (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    source_id   INTEGER,
-    source_name TEXT NOT NULL DEFAULT '',
-    level       TEXT NOT NULL DEFAULT 'info',
-    action      TEXT NOT NULL DEFAULT '',
-    message     TEXT NOT NULL DEFAULT '',
-    detail      TEXT NOT NULL DEFAULT '',
-    item_count  INTEGER NOT NULL DEFAULT 0,
-    created_at  TEXT NOT NULL
-  )`,
-
-  /* 17. 报价单主表（v5 新增）
-   * 报价合计 total_amount 由服务端按明细重算后写入，不接受手工填写。 */
-  `CREATE TABLE IF NOT EXISTS quotations (
-    id               INTEGER PRIMARY KEY AUTOINCREMENT,
-    project_id       INTEGER NOT NULL,
-    customer_id      INTEGER,
-    quote_no         TEXT NOT NULL DEFAULT '',
-    version          INTEGER NOT NULL DEFAULT 1,
-    parent_id        INTEGER,
-    quote_date       TEXT NOT NULL DEFAULT '',
-    valid_until      TEXT NOT NULL DEFAULT '',
-    currency         TEXT NOT NULL DEFAULT '人民币',
-    status           TEXT NOT NULL DEFAULT '草稿',
-    total_amount     REAL NOT NULL DEFAULT 0,
-    tax_note         TEXT NOT NULL DEFAULT '',
-    delivery_note    TEXT NOT NULL DEFAULT '',
-    payment_note     TEXT NOT NULL DEFAULT '',
-    competitor       TEXT NOT NULL DEFAULT '',
-    competitor_price REAL NOT NULL DEFAULT 0,
-    lose_reason      TEXT NOT NULL DEFAULT '',
-    remark           TEXT NOT NULL DEFAULT '',
-    created_at       TEXT NOT NULL,
-    updated_at       TEXT NOT NULL,
-    deleted_at       TEXT
-  )`,
-
-  /* 18. 报价明细行（v5 新增） */
-  `CREATE TABLE IF NOT EXISTS quotation_items (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    quotation_id    INTEGER NOT NULL,
-    seq             INTEGER NOT NULL DEFAULT 1,
-    item_name       TEXT NOT NULL DEFAULT '',
-    valve_type      TEXT NOT NULL DEFAULT '',
-    size_range      TEXT NOT NULL DEFAULT '',
-    pressure_rating TEXT NOT NULL DEFAULT '',
-    body_material   TEXT NOT NULL DEFAULT '',
-    connection_type TEXT NOT NULL DEFAULT '',
-    quantity        REAL NOT NULL DEFAULT 0,
-    unit            TEXT NOT NULL DEFAULT '台',
-    unit_price      REAL NOT NULL DEFAULT 0,
-    discount        REAL NOT NULL DEFAULT 0,
-    subtotal        REAL NOT NULL DEFAULT 0,
-    delivery_days   INTEGER NOT NULL DEFAULT 0,
-    remark          TEXT NOT NULL DEFAULT '',
-    extra           TEXT NOT NULL DEFAULT '{}',
-    created_at      TEXT NOT NULL
-  )`,
-
-  /* 19. 报价模板（v6 新增）
-   * 模板 = 一组常用规格，避免每次报价都从零敲明细行。 */
-  `CREATE TABLE IF NOT EXISTS quotation_templates (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    name          TEXT NOT NULL,
-    category      TEXT NOT NULL DEFAULT '',
-    description   TEXT NOT NULL DEFAULT '',
-    unit          TEXT NOT NULL DEFAULT '台',
-    use_count     INTEGER NOT NULL DEFAULT 0,
-    last_used_at  TEXT NOT NULL DEFAULT '',
-    sort          INTEGER NOT NULL DEFAULT 0,
-    enabled       INTEGER NOT NULL DEFAULT 1,
-    created_at    TEXT NOT NULL,
-    updated_at    TEXT NOT NULL,
-    deleted_at    TEXT
-  )`,
-
-  /* 20. 报价模板明细行（v6 新增）
-   * 结构与 quotation_items 对齐，但**不含价格**：
-   * 模板沉淀的是"常用规格"，单价随项目与行情变，套用后由使用者填。 */
-  `CREATE TABLE IF NOT EXISTS quotation_template_items (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    template_id     INTEGER NOT NULL,
-    seq             INTEGER NOT NULL DEFAULT 1,
-    item_name       TEXT NOT NULL DEFAULT '',
-    valve_type      TEXT NOT NULL DEFAULT '',
-    size_range      TEXT NOT NULL DEFAULT '',
-    pressure_rating TEXT NOT NULL DEFAULT '',
-    body_material   TEXT NOT NULL DEFAULT '',
-    connection_type TEXT NOT NULL DEFAULT '',
-    quantity        REAL NOT NULL DEFAULT 1,
-    unit            TEXT NOT NULL DEFAULT '台',
-    delivery_days   INTEGER NOT NULL DEFAULT 0,
-    remark          TEXT NOT NULL DEFAULT '',
-    extra           TEXT NOT NULL DEFAULT '{}',
-    created_at      TEXT NOT NULL
-  )`,
-
-  /* 21. 报价自定义列（v7 新增）
-   *
-   * 为什么用「列定义 + JSON 明细」而不是给明细表加列：
-   *   介质、设计压力、设计温度、操作压力/温度、环境温度、泄露等级、阀门标准、
-   *   执行器型号、定位器、电磁阀、限位开关、过滤减压阀、气控阀…… 这些字段
-   *   因客户而异，且**列数不封顶**。若每个新列都 ALTER TABLE，
-   *   一是要不停迁移，二是列名会随用户改名而失控。
-   *   所以：列定义存本表，明细行的值存 `extra` 字段（JSON，键=列 id）。
-   *
-   * 键用列 id 而不是列名，是为了**改名不丢值**：
-   *   「泄露等级」改成「泄漏等级」，历史报价单里的值照样跟着显示。 */
-  `CREATE TABLE IF NOT EXISTS quotation_fields (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    name        TEXT NOT NULL,
-    kind        TEXT NOT NULL DEFAULT 'text',   -- text(文本) | number(数字) | select(下拉候选)
-    options     TEXT NOT NULL DEFAULT '',       -- kind=select 时的候选值，逗号分隔
-    unit        TEXT NOT NULL DEFAULT '',       -- 单位（如 MPa / ℃），导出时并进表头
-    sort        INTEGER NOT NULL DEFAULT 0,
-    enabled     INTEGER NOT NULL DEFAULT 1,
-    remark      TEXT NOT NULL DEFAULT '',
-    created_at  TEXT NOT NULL,
-    updated_at  TEXT NOT NULL,
-    deleted_at  TEXT
-  )`];
+];
 
 /* ------------------------------------------------------------------ */
 /* 索引                                                                */
@@ -508,20 +322,6 @@ const INDEXES = [
   'CREATE INDEX IF NOT EXISTS idx_dict_category            ON dict(category, sort)',
   'CREATE INDEX IF NOT EXISTS idx_dict_deleted             ON dict(deleted_at)',
   'CREATE INDEX IF NOT EXISTS idx_region_parent            ON region(parent_code)',
-  /* 报价单索引：按项目查列表、按客户跨项目比价、按状态筛选用 */
-  'CREATE INDEX IF NOT EXISTS idx_quotations_project       ON quotations(project_id)',
-  'CREATE INDEX IF NOT EXISTS idx_quotations_customer      ON quotations(customer_id)',
-  'CREATE INDEX IF NOT EXISTS idx_quotations_status        ON quotations(status)',
-  'CREATE INDEX IF NOT EXISTS idx_quotations_no            ON quotations(quote_no)',
-  'CREATE INDEX IF NOT EXISTS idx_quotations_deleted       ON quotations(deleted_at)',
-  'CREATE INDEX IF NOT EXISTS idx_quo_items_quotation      ON quotation_items(quotation_id, seq)',
-  /* 报价模板索引 */
-  'CREATE INDEX IF NOT EXISTS idx_quotation_templates_sort  ON quotation_templates(sort, id)',
-  'CREATE INDEX IF NOT EXISTS idx_quotation_templates_del   ON quotation_templates(deleted_at)',
-  'CREATE INDEX IF NOT EXISTS idx_quotation_templates_cat   ON quotation_templates(category)',
-  'CREATE INDEX IF NOT EXISTS idx_quo_tpl_items_template    ON quotation_template_items(template_id, seq)',
-  /* 报价自定义列（v7）：按删除标记 + 排序取列 */
-  'CREATE INDEX IF NOT EXISTS idx_quotation_fields_sort     ON quotation_fields(deleted_at, sort, id)'
 ];
 
 /* ------------------------------------------------------------------ */
@@ -929,6 +729,58 @@ const MIGRATIONS = [
 
       return `新增列 ${done.join('、')}`;
     }
+  },
+
+  /* v7 → v8：移除「招标采集」与「报价」两个模块（按使用者的明确要求整体删除）
+   *
+   * 删掉的东西：
+   *   - 采集 3 张表：collect_sources / collect_staging / collect_logs
+   *   - 报价 5 张表：quotations / quotation_items / quotation_templates /
+   *                 quotation_template_items / quotation_fields
+   *   - 项目表上"招标采集溯源"用的 5 列
+   *     （source_url / source_platform / collected_at / source_notice_id / confidence）
+   *   - 配套的设置项与字典项（报价单状态）
+   *
+   * 迁移前 initDatabase 会**自动整库备份**（backups/before-migrate-v7-*.db），
+   * 万一以后还要这些数据，从那份备份里取即可。 */
+  {
+    version: 8,
+    note: '移除招标采集与报价模块：删 8 张表、项目表 5 列、相关设置与字典',
+    run(db) {
+      const dropped = [];
+      const tables = ['collect_logs', 'collect_staging', 'collect_sources',
+        'quotation_template_items', 'quotation_templates',
+        'quotation_items', 'quotations', 'quotation_fields'];
+      for (const t of tables) {
+        const exists = db.prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?"
+        ).get(t);
+        if (!exists) continue;
+        db.exec(`DROP TABLE IF EXISTS ${t}`);
+        dropped.push(t);
+      }
+
+      const projectCols = ['source_url', 'source_platform', 'collected_at', 'source_notice_id', 'confidence'];
+      const has = new Set(db.prepare('PRAGMA table_info(projects)').all().map((c) => c.name));
+      for (const c of projectCols) {
+        if (!has.has(c)) continue;
+        db.exec(`ALTER TABLE projects DROP COLUMN ${c}`);
+        dropped.push(`projects.${c}`);
+      }
+
+      const keys = ['wechat_extra_hosts', 'collect_wechat_day', 'collect_wechat_count',
+        'quotation_column_order', 'quotation_column_labels', 'quotation_column_hidden',
+        'quote_no_prefix', 'quote_company', 'quote_contact'];
+      let settingsCleaned = 0;
+      for (const k of keys) {
+        const r = db.prepare('DELETE FROM settings WHERE key = ?').run(k);
+        settingsCleaned += r.changes || 0;
+      }
+
+      const dict = db.prepare("DELETE FROM dict WHERE category = 'quotation_status'").run();
+
+      return `删除 ${dropped.join('、')}；清理设置 ${settingsCleaned} 项、字典 ${dict.changes || 0} 项`;
+    }
   }
 ];
 
@@ -1046,15 +898,6 @@ const SETTINGS_SEED = [
   ['smtp_port', '465', 'SMTP 端口（465 隐式 TLS）'],
   ['smtp_user', '', 'SMTP 登录账号（邮箱地址）'],
   ['smtp_pass', '', 'SMTP 授权码（不是登录密码）'],
-  ['quote_no_prefix', 'BJ', '报价单号前缀'],
-  ['quote_company', '', '报价单抬头公司名（留空用「我方公司名称」）'],
-  ['quote_contact', '', '报价单联系方式'],
-  /* 报价明细的列顺序（JSON 数组：内置列 key 或 f:<自定义列id>）。
-     留空 = 用默认顺序；在报价单/报价模板的表头上就能调，不需要动这里。 */
-  ['quotation_column_order', '', '报价明细列顺序（留空用默认顺序）'],
-  /* 采集模块：额外的抓取主机白名单（逗号分隔）。默认留空 = 只认微信官方域名；
-     自己搭了公众号内容镜像/中转站时才需要填。 */
-  ['wechat_extra_hosts', '', '允许抓取的额外主机（默认留空，只认微信公众号域名）'],
   /* 邮件提醒的运行时状态（由 notify 模块维护，便于重启后仍能判断与降级） */
   ['remind_email_fail_streak', '0', '邮件提醒连续失败次数'],
   ['remind_email_last_at', '', '邮件提醒上次尝试时间'],
