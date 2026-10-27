@@ -81,9 +81,20 @@ if (process.argv.includes('--all')) {
       'products']) {
       n[t] = db.prepare(`DELETE FROM ${t}`).run().changes;
     }
-    /* 清掉测试期间新增的自定义字典项与自定义产品分类，保留系统内置项 */
+    /* 清掉测试期间新增的自定义字典项；
+     * 产品分类只删「用户自己建的」：6 个一级内置 + 23 个种子示例（1.24.1 起是自定义分类）都保留，
+     * 避免清理后价目表只剩 6 个空骨架。 */
     n.dict = db.prepare('DELETE FROM dict WHERE is_system = 0').run().changes;
-    n.product_categories = db.prepare('DELETE FROM product_categories WHERE is_system = 0').run().changes;
+    const seed = require('../server/db').PRODUCT_CATEGORY_SEED || [];
+    const seedNames = [];
+    for (const root of seed) {
+      seedNames.push(root.name);
+      for (const child of root.children || []) seedNames.push(child);
+    }
+    const marks = seedNames.map(() => '?').join(',');
+    n.product_categories = db.prepare(
+      `DELETE FROM product_categories WHERE is_system = 0 AND name NOT IN (${marks})`
+    ).run(...seedNames).changes;
     db.exec('COMMIT');
     console.log('已清空全部业务数据：');
     for (const [t, c] of Object.entries(n)) console.log(`  ${t}\t${c} 条`);

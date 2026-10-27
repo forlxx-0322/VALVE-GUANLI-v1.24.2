@@ -78,20 +78,20 @@ async function get(pathname, init) {
     check(3, '结构版本表已记录为最新版本', sv && sv.v === expectedVersion,
       `schema_version = ${sv && sv.v}（代码当前结构版本 v${expectedVersion}）`);
 
-    /* 1.24：产品价目表两张表的列数与内置分类（6 个一级 + 23 个二级） */
+    /* 1.24：产品价目表两张表的列数与分类种子（6 个一级内置 + 23 个二级自定义） */
     const catCols = db.prepare('PRAGMA table_info(product_categories)').all().map((c) => c.name);
     const prodCols = db.prepare('PRAGMA table_info(products)').all().map((c) => c.name);
     const builtinRoots = db.prepare(`SELECT COUNT(*) AS n FROM product_categories
       WHERE deleted_at IS NULL AND is_system = 1 AND parent_id IS NULL`).get().n;
-    const builtinChildren = db.prepare(`SELECT COUNT(*) AS n FROM product_categories
-      WHERE deleted_at IS NULL AND is_system = 1 AND parent_id IS NOT NULL`).get().n;
-    check('3a', '产品价目表结构完整（分类 8 列 / 产品 16 列）且内置分类 6 + 23 已灌入',
+    const customChildren = db.prepare(`SELECT COUNT(*) AS n FROM product_categories
+      WHERE deleted_at IS NULL AND is_system = 0 AND parent_id IS NOT NULL`).get().n;
+    check('3a', '产品价目表结构完整（分类 8 列 / 产品 16 列）且分类种子 6 + 23 已灌入',
       catCols.length === 8 && prodCols.length === 16
         && catCols.includes('parent_id') && catCols.includes('is_system')
         && ['category_id', 'name', 'price', 'lead_time_days', 'body_material',
           'pressure_rating', 'discount', 'code', 'enabled', 'sort'].every((c) => prodCols.includes(c))
-        && builtinRoots === 6 && builtinChildren === 23,
-      `分类 ${catCols.length} 列 / 产品 ${prodCols.length} 列；内置一级 ${builtinRoots}、二级 ${builtinChildren}`);
+        && builtinRoots === 6 && customChildren === 23,
+      `分类 ${catCols.length} 列 / 产品 ${prodCols.length} 列；一级内置 ${builtinRoots}、二级自定义 ${customChildren}`);
 
     const dictStat = db.prepare(
       'SELECT COUNT(DISTINCT category) AS c, COUNT(*) AS n FROM dict WHERE deleted_at IS NULL'

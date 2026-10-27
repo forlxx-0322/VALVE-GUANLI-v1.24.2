@@ -16,7 +16,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
 
-const SCHEMA_VERSION = 11;
+const SCHEMA_VERSION = 12;
 
 /* ------------------------------------------------------------------ */
 /* 17 张表结构                                                          */
@@ -366,10 +366,11 @@ const FIXED_TAGS = [
 const FIXED_TAG_NAMES = FIXED_TAGS.map((t) => t.name);
 
 /* ------------------------------------------------------------------ */
-/* 内置产品分类（1.24 · v11）                                           */
+/* 产品分类种子（1.24 · v11；v12 起二级改为自定义）                       */
 /*                                                                     */
-/* 6 个一级分类 + 23 个二级示例，全部 is_system=1：可改名、可调排序、    */
-/* 可移到自己建的分类下，但**不可删除**（删了价目表就没有骨架了）。       */
+/* 6 个一级分类 is_system=1：可改名、可调排序，但**不可删除**（价目表的骨架）；*/
+/* 23 个二级示例 is_system=0（1.24.1 起）：就是普通自定义分类，             */
+/* 可改名、可挪位、**可删除**，用户也可以随时自己新增。                      */
 /* 全新安装（fromVersion=0）与老库升级（v11 迁移）都走 seedProductCategories， */
 /* 仅在 product_categories 表为空时灌入，因此天然幂等。                   */
 /* ------------------------------------------------------------------ */
@@ -1022,14 +1023,14 @@ const MIGRATIONS = [
   /* v10 → v11：产品价目表（1.24）
    *
    * 纯新增，不动任何既有表：新建 product_categories / products 两张表 + 5 个索引，
-   * 再灌入 6 个一级 + 23 个二级内置分类（is_system=1，可改名不可删）。
+   * 再灌入 6 个一级（is_system=1，不可删）+ 23 个二级示例（is_system=0，可删可改）。
    * 因为全是新表，迁移可安全回退（删表即可），旧数据一条不受影响。
    *
    * 注意：全新安装不会走到这里（fromVersion=0），由 initDatabase 里的
    * seedProductCategories(db) 负责灌同一份种子，两边逻辑共用、幂等。 */
   {
     version: 11,
-    note: '新增产品价目表：product_categories / products 两张表 + 6 个一级 / 23 个二级内置分类',
+    note: '新增产品价目表：product_categories / products 两张表 + 6 个一级 / 23 个二级示例分类',
     run(db) {
       db.exec(`CREATE TABLE IF NOT EXISTS product_categories (
         id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1071,6 +1072,23 @@ const MIGRATIONS = [
 
       const added = seedProductCategories(db);
       return `新增表 product_categories、products 与 5 个索引；灌入内置分类 ${added} 个`;
+    }
+  },
+
+  /* v11 → v12：二级分类改为自定义（可删除）
+   * 1.24 最初把 23 个二级示例也标成了 is_system=1（不可删）；使用者要求
+   * 「产品子目录改成自定义、可删除」，因此只保留 6 个一级分类为系统分类，
+   * 所有二级及以下一律降级为普通自定义分类（可改名、可挪位、可删除）。 */
+  {
+    version: 12,
+    note: '产品二级分类改为自定义分类（is_system 1 → 0），可删除',
+    run(db) {
+      const before = db.prepare(`SELECT COUNT(*) AS n FROM product_categories
+        WHERE parent_id IS NOT NULL AND is_system = 1`).get().n;
+      if (!before) return '没有需要降级的二级分类';
+      db.prepare(`UPDATE product_categories SET is_system = 0, updated_at = ?
+        WHERE parent_id IS NOT NULL AND is_system = 1`).run(now());
+      return `二级分类改为自定义 ${before} 个`;
     }
   }
 ];
@@ -1409,18 +1427,22 @@ function seedProductCategories(db) {
   if (n > 0) return 0;
 
   const ts = now();
-  const ins = db.prepare(`INSERT INTO product_categories
+  const insRoot = db.prepare(`INSERT INTO product_categories
     (parent_id, name, sort, is_system, created_at, updated_at)
     VALUES (?, ?, ?, 1, ?, ?)`);
+  const insChild = db.prepare(`INSERT INTO product_categories
+    (parent_id, name, sort, is_system, created_at, updated_at)
+    VALUES (?, ?, ?, 0, ?, ?)`);
   let added = 0;
   db.exec('BEGIN');
   try {
     PRODUCT_CATEGORY_SEED.forEach((root, i) => {
-      const r = ins.run(null, root.name, (i + 1) * 10, ts, ts);
+      const r = insRoot.run(null, root.name, (i + 1) * 10, ts, ts);
       const parentId = Number(r.lastInsertRowid);
       added++;
       root.children.forEach((child, j) => {
-        ins.run(parentId, child, (j + 1) * 10, ts, ts);
+        /* 二级示例是普通自定义分类：用户想删就删、想改就改 */
+        insChild.run(parentId, child, (j + 1) * 10, ts, ts);
         added++;
       });
     });

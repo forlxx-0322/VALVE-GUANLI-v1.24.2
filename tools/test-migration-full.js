@@ -227,14 +227,16 @@ function makeLegacyDb(file) {
 
     const rootCount = after.prepare(`SELECT COUNT(*) AS n FROM product_categories
       WHERE deleted_at IS NULL AND is_system = 1 AND parent_id IS NULL`).get().n;
-    const childCount = after.prepare(`SELECT COUNT(*) AS n FROM product_categories
+    const childTotal = after.prepare(`SELECT COUNT(*) AS n FROM product_categories
+      WHERE deleted_at IS NULL AND parent_id IS NOT NULL`).get().n;
+    const systemChildren = after.prepare(`SELECT COUNT(*) AS n FROM product_categories
       WHERE deleted_at IS NULL AND is_system = 1 AND parent_id IS NOT NULL`).get().n;
     const rootNames = after.prepare(`SELECT name FROM product_categories
       WHERE deleted_at IS NULL AND parent_id IS NULL ORDER BY sort, id`).all().map((r) => r.name);
-    check('v11 内置分类 6 个一级 + 23 个二级且名称正确',
-      rootCount === 6 && childCount === 23
+    check('v11 分类种子：一级 6 个（内置）+ 二级 23 个（自定义），名称正确',
+      rootCount === 6 && childTotal === 23 && systemChildren === 0
         && ['蝶阀', '球阀', '止回阀', '隔膜阀', '刀闸阀', '执行器'].every((n) => rootNames.includes(n)),
-      `一级 ${rootCount}（${rootNames.join(' / ')}），二级 ${childCount}`);
+      `一级 ${rootCount}（${rootNames.join(' / ')}），二级 ${childTotal}，其中系统分类 ${systemChildren}`);
 
     const prodIdx = after.prepare(
       "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name IN ('product_categories','products')"
@@ -254,8 +256,13 @@ function makeLegacyDb(file) {
     const catsAfterFirst = after.prepare(
       'SELECT COUNT(*) AS n FROM product_categories WHERE deleted_at IS NULL'
     ).get().n;
-    check('v11 内置分类数量正确（29 个，不多不少）', catsAfterFirst === 29,
+    check('v11 分类数量正确（29 个，不多不少）', catsAfterFirst === 29,
       `分类 ${catsAfterFirst} 个`);
+
+    /* ---------- v12：二级分类降级为自定义（可删除） ---------- */
+    check('v12 二级分类已改为自定义（is_system=0，可删除），一级仍为系统分类',
+      systemChildren === 0 && rootCount === 6 && childTotal === 23,
+      `一级系统 ${rootCount} / 二级自定义 ${childTotal} / 二级系统 ${systemChildren}`);
   }
 
   /* ---------- v2/v3 的列变更 ---------- */

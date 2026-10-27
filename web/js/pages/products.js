@@ -2,7 +2,7 @@
  * 产品价目表（1.24 新增）
  *
  * 左侧：分类树（展开/收起、产品数含子分类、选中过滤；新增子分类 / 改名 / 上移下移 / 删除）
- *       内置分类（is_system=1）的删除按钮禁用并给出说明。
+ *       6 个一级分类（is_system=1）的删除按钮禁用并给出说明；二级及以下是自定义分类，可删可改。
  * 右侧：搜索 + 材质/压力/状态筛选 + 新增产品 + 导出 Excel + 产品表格 + 分页。
  * 产品新增/编辑走 c-drawer，折后价实时计算。
  * 导出用前端 SheetJS（web/vendor/xlsx.full.min.js），文件名 产品价目表-YYYYMMDD.xlsx。
@@ -175,7 +175,7 @@ window.CRM = window.CRM || {};
       },
 
       deleteTitle(node) {
-        if (node.is_system) return '内置分类不可删除（可改名、可调整排序）';
+        if (node.is_system) return '一级分类不可删除（可改名、可调整排序）；二级分类可自由删除';
         if ((node.children || []).length) return '该分类下还有子分类，删除会被拒绝';
         if (node.product_count) return '该分类下还有产品，删除会被拒绝（先移走或删除产品）';
         return '删除分类';
@@ -235,7 +235,7 @@ window.CRM = window.CRM || {};
 
       async removeNode(node) {
         if (node.is_system) {
-          CRM.toast('内置分类不可删除（可改名、可调整排序）', 'warn');
+          CRM.toast('一级分类不可删除（可改名、可调整排序）；二级分类可自由删除', 'warn');
           return;
         }
         const ok = await CRM.confirm({
@@ -411,7 +411,7 @@ window.CRM = window.CRM || {};
               <c-icon name="folder" :size="17" style="color:var(--c-text-3)" />
               <div>
                 <div class="card-title">产品分类</div>
-                <div class="card-sub">内置分类可改名、可排序，不可删除</div>
+                <div class="card-sub">一级分类固定（可改名），二级分类可自定义、可删除</div>
               </div>
               <div class="spacer"></div>
               <button class="btn btn-sm" title="新增一级分类" :disabled="catBusy" @click="addRoot">
@@ -454,7 +454,7 @@ window.CRM = window.CRM || {};
               </div>
 
               <c-empty v-if="!tree.length" icon="folder" title="还没有产品分类"
-                       desc="点右上角「＋」新增一级分类，或重新初始化数据库灌入内置分类。" />
+                       desc="点右上角「＋」新增一级分类；选中一级分类后可再加二级分类。" />
             </div>
           </section>
 

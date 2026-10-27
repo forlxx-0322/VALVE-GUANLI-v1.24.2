@@ -2,7 +2,8 @@
  * 产品价目表服务（1.24 新增）
  *
  * 两块内容：
- *   1. 分类树 product_categories —— 任意层级，内置分类 is_system=1（可改名/挪位，不可删）
+ *   1. 分类树 product_categories —— 任意层级；6 个一级分类 is_system=1（可改名/挪位，不可删），
+ *      二级及以下都是自定义分类（is_system=0），可改名、可删除
  *   2. 产品 products —— 单价 / 货期 / 材质 / 压力等级 / 设定折扣 / 编号
  *
  * 口径与约定：
@@ -269,12 +270,12 @@ function moveCategory(db, id, dir) {
   return { id: Number(id), moved: true, dir: d, sort: (target + 1) * 10 };
 }
 
-/** 删除分类（软删除）：内置分类不可删；有子分类或产品时拒绝 */
+/** 删除分类（软删除）：一级内置分类不可删；有子分类或产品时拒绝 */
 function removeCategory(db, id) {
   const cur = categoryRow(db, id);
   if (!cur) bad(404, 'NOT_FOUND', '产品分类不存在或已删除');
   if (Number(cur.is_system) === 1) {
-    bad(400, 'SYSTEM_CATEGORY', '内置分类不可删除（可改名、可调整排序）');
+    bad(400, 'SYSTEM_CATEGORY', '一级分类不可删除（可改名、可调整排序）；二级分类可自由删除');
   }
 
   const children = db.prepare(`SELECT COUNT(*) AS n FROM product_categories

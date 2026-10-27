@@ -1,10 +1,10 @@
 /**
- * 产品分类模块 / 产品价目表专项（1.24 新增，结构 v11）
+ * 产品分类模块 / 产品价目表专项（1.24 新增，结构 v11；1.24.1 起 v12）
  *
  * 覆盖：
- *   · 结构：product_categories / products 两张表与 5 个索引、schema_version = 11
- *   · 内置分类：6 个一级 + 23 个二级示例、is_system=1 不可删、可改名、可上下移
- *   · 分类：新增一级/子级、同级重名拒绝、改名、上移下移、有子分类/有产品拒绝删除
+ *   · 结构：product_categories / products 两张表与 5 个索引、schema_version = 12
+ *   · 分类种子：6 个一级（is_system=1，不可删）+ 23 个二级示例（is_system=0，可删可改）；均可改名/上下移
+ *   · 分类：新增一级/子级、同级重名拒绝、改名、上移下移、有子分类/有产品拒绝删除、二级分类可删除
  *   · 产品：CRUD、名称必填、分类必须存在、单价 ≥0 两位小数、折扣 0~100、
  *           货期非负整数、单位默认台、同分类不重名（跨分类可同名）、编号全库唯一
  *   · 筛选：分类（默认含子孙，可关）、关键字（名称/编号/备注）、材质、压力、启用
@@ -13,7 +13,7 @@
  *   · 复制：名称加「（副本）」、重名自动加序号、编号自动加后缀、sort 排末尾
  *   · 导出：category_path 形如「蝶阀 / 对夹式」、字段齐全、行数与筛选一致
  *   · 审计日志：product / product_category 的 create / update / delete / move / copy
- *   · 自清理：跑完不留测试产品与自定义分类，内置分类 29 个原样保留
+ *   · 自清理：跑完不留测试产品与测试分类，种子分类 29 个（6 内置 + 23 自定义示例）原样保留
  *
  * 前置：服务已启动（默认 127.0.0.1:8899，可用 CRM_TEST_BASE 覆盖）
  * 用法：node tools/test-products-124.js
@@ -54,7 +54,7 @@ function withDb(fn) {
 
 /**
  * 物理清掉本套件的残留（含上次失败留下的），只动名字带 TAG 的自定义分类与产品。
- * 内置分类 is_system=1，永远不在这里被删。
+ * 6 个一级分类 is_system=1，永远不在这里被删；二级示例是自定义分类，但名字不带 TAG，也不会被误删。
  */
 function purgeTag() {
   const db = new DatabaseSync(DB_FILE);
@@ -94,12 +94,12 @@ function findNode(nodes, id) {
 }
 
 (async () => {
-  console.log('=== 产品分类模块 / 产品价目表专项（1.24 · v11）===\n');
+  console.log('=== 产品分类模块 / 产品价目表专项（1.24.1 · v12）===\n');
   console.log(`测试标记：${TAG}\n`);
 
   /* ---------------- 0. 健康检查与预清理 ---------------- */
   const health = await api('GET', '/api/health');
-  check('服务可访问且版本为 1.24', health.ok === true && health.data.version === '1.24',
+  check('服务可访问且版本为 1.24.x', health.ok === true && /^1\.24(\.\d+)?$/.test(health.data.version || ''),
     health.ok ? `v${health.data.version}` : (health.message || '无响应'));
   if (!health.ok) {
     console.error('服务未启动，请先运行 启动.bat 或 node server/server.js');
@@ -108,7 +108,7 @@ function findNode(nodes, id) {
 
   try { purgeTag(); } catch (e) { console.log('（预清理失败，继续：' + e.message + '）'); }
 
-  /* ---------------- 1. 结构（v11） ---------------- */
+  /* ---------------- 1. 结构（v12） ---------------- */
   const struct = withDb((db) => {
     const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
       .all().map((r) => r.name);
@@ -120,7 +120,7 @@ function findNode(nodes, id) {
     return { tables, catCols, prodCols, indexes, ver };
   });
 
-  check('结构版本已升到 v11', struct.ver === 11, `schema_version = ${struct.ver}`);
+  check('结构版本已升到 v12', struct.ver === 12, `schema_version = ${struct.ver}`);
   check('product_categories 与 products 两张表已建',
     struct.tables.includes('product_categories') && struct.tables.includes('products'),
     `当前 ${struct.tables.length} 张表（含 schema_version）`);
@@ -142,7 +142,7 @@ function findNode(nodes, id) {
     NEED_IDX.every((n) => struct.indexes.includes(n)),
     NEED_IDX.filter((n) => !struct.indexes.includes(n)).join('、') || NEED_IDX.join('、'));
 
-  /* ---------------- 2. 内置分类（6 + 23） ---------------- */
+  /* ---------------- 2. 分类种子（6 个一级内置 + 23 个二级示例） ---------------- */
   const tree0 = await api('GET', '/api/product-categories?tree=1');
   const roots = tree0.data || [];
   check('分类树接口可用且一级分类为 6 个',
@@ -171,19 +171,24 @@ function findNode(nodes, id) {
     `二级合计 ${childTotal} 个：` + roots.map((n) => `${n.name}-${(n.children || []).length}`).join(' '));
 
   const die = roots.find((n) => n.name === '蝶阀');
-  check('内置二级分类也是 is_system=1',
-    (die.children || []).every((c) => Number(c.is_system) === 1),
-    `蝶阀下 ${die.children.length} 个二级全部 is_system=1`);
+  check('二级示例是自定义分类（is_system=0，可改名、可删除）',
+    (die.children || []).every((c) => Number(c.is_system) === 0),
+    `蝶阀下 ${die.children.length} 个二级全部 is_system=0`);
 
   const sysDel = await api('DELETE', `/api/product-categories/${die.id}`);
-  check('内置一级分类不可删除（400 SYSTEM_CATEGORY）',
+  check('一级分类不可删除（400 SYSTEM_CATEGORY）',
     sysDel.status === 400 && sysDel.code === 'SYSTEM_CATEGORY' && /不可删除/.test(sysDel.message || ''),
     `HTTP ${sysDel.status} ${sysDel.code} ${sysDel.message}`);
 
-  const sysChildDel = await api('DELETE', `/api/product-categories/${die.children[0].id}`);
-  check('内置二级分类不可删除',
-    sysChildDel.status === 400 && sysChildDel.code === 'SYSTEM_CATEGORY',
-    `HTTP ${sysChildDel.status} ${sysChildDel.code}`);
+  /* 二级分类可删除：建一个临时子分类 → 删除 → 树上不再出现 */
+  const tmpChild = await createCat({ name: TAG + '可删子类', parent_id: die.id });
+  const childDel = tmpChild.ok ? await api('DELETE', `/api/product-categories/${tmpChild.data.id}`) : { ok: false, status: 0 };
+  const treeAfterChildDel = await api('GET', '/api/product-categories?tree=1');
+  const dieAfter = (treeAfterChildDel.data || []).find((n) => Number(n.id) === Number(die.id));
+  check('二级分类可删除（自定义子分类删除成功）',
+    tmpChild.ok && childDel.ok && dieAfter
+      && !(dieAfter.children || []).some((c) => Number(c.id) === Number(tmpChild.data.id)),
+    `新增 #${tmpChild.data && tmpChild.data.id} → 删除 HTTP ${childDel.status}`);
 
   /* 内置分类可改名（改完立刻改回来，尽量不留痕） */
   const renamed = await api('PUT', `/api/product-categories/${die.id}`, { name: '蝶阀' + TAG });
@@ -584,9 +589,9 @@ function findNode(nodes, id) {
     sys: db.prepare('SELECT COUNT(*) AS n FROM product_categories WHERE deleted_at IS NULL AND is_system = 1').get().n,
     roots: db.prepare('SELECT COUNT(*) AS n FROM product_categories WHERE deleted_at IS NULL AND parent_id IS NULL').get().n
   }));
-  check('内置分类 29 个（6 + 23）原样保留',
-    builtin.total === 29 && builtin.sys === 29 && builtin.roots === 6,
-    `分类 ${builtin.total} 个（内置 ${builtin.sys} / 一级 ${builtin.roots}）`);
+  check('种子分类 29 个（6 个一级内置 + 23 个二级自定义）原样保留',
+    builtin.total === 29 && builtin.sys === 6 && builtin.roots === 6,
+    `分类 ${builtin.total} 个（一级内置 ${builtin.sys} / 一级 ${builtin.roots}）`);
 
   /* ---------------- 汇总 ---------------- */
   const pass = results.filter((r) => r.pass).length;
