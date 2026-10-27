@@ -32,6 +32,13 @@ window.CRM = window.CRM || {};
         contactOpen: false,
         contact: null,
         savingContact: false,
+        /* 成本台账（1.22） */
+        costs: [],
+        costByCategory: [],
+        costTotal: 0,
+        costsLoading: false,
+        costOpen: false,
+        costEditing: null,
       };
     },
     computed: {
@@ -43,6 +50,7 @@ window.CRM = window.CRM || {};
           { key: 'contacts', label: '联系人', badge: c ? c.contacts.length : 0 },
           { key: 'followups', label: '跟进记录', badge: c ? c.followups.length : 0 },
           { key: 'projects', label: '关联项目', badge: c ? c.projects.length : 0 },
+          { key: 'costs', label: '成本台账', badge: this.costs.length },
           { key: 'files', label: '附件' },
           { key: 'logs', label: '变更记录', badge: c ? c.logs.length : 0 }
         ];
@@ -73,10 +81,51 @@ window.CRM = window.CRM || {};
         try {
           await CRM.api.loadDict();
           this.customer = await CRM.api.getCustomer(this.id);
+          await this.loadCosts();
         } catch (e) {
           this.error = e.message || '加载失败';
         } finally {
           this.loading = false;
+        }
+      },
+
+      /* ---------------- 成本台账（1.22） ---------------- */
+      async loadCosts() {
+        this.costsLoading = true;
+        try {
+          const r = await CRM.api.listCosts({ customer_id: this.id, pageSize: 100 });
+          this.costs = r.list || [];
+          this.costByCategory = r.by_category || [];
+          this.costTotal = r.amount || 0;
+        } catch (_) {
+          this.costs = [];
+          this.costByCategory = [];
+          this.costTotal = 0;
+        } finally {
+          this.costsLoading = false;
+        }
+      },
+      openCost(row) {
+        this.costEditing = row || null;
+        this.costOpen = true;
+      },
+      async onCostSaved() {
+        this.costOpen = false;
+        await this.loadCosts();
+      },
+      async removeCost(row) {
+        const ok = await CRM.confirm({
+          title: '删除成本记录',
+          message: `确定删除「${row.category} ${CRM.util.fmtMoney(row.amount)} 元（${row.spent_at}）」吗？`,
+          okText: '删除', danger: true
+        });
+        if (!ok) return;
+        try {
+          await CRM.api.deleteCost(row.id);
+          CRM.toast('已删除', 'success');
+          await this.loadCosts();
+        } catch (e) {
+          CRM.toast(e.message || '删除失败', 'error');
         }
       },
 
@@ -378,6 +427,51 @@ window.CRM = window.CRM || {};
             <c-attachments owner-type="customer" :owner-id="id" title="客户附件" />
           </div>
 
+          <!-- 成本台账（1.22 新增：利润报表的数据来源） -->
+          <div v-show="tab === 'costs'" class="card">
+            <div class="card-head">
+              <div>
+                <div class="card-title">成本台账</div>
+                <div class="card-sub">采购成本 / 维护成本 / 差旅 / 其他；首页利润 = 收入 − 这些成本</div>
+              </div>
+              <div class="spacer"></div>
+              <button class="btn btn-sm btn-primary" @click="openCost(null)">+ 登记成本</button>
+            </div>
+            <div class="card-body">
+              <div class="stat-grid" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr));margin-bottom:10px">
+                <div class="stat" v-for="c in costByCategory" :key="c.category">
+                  <div class="n">{{ fmtMoney(c.amount) }}</div>
+                  <div class="l">{{ c.category }} · {{ c.count }} 笔</div>
+                </div>
+                <div class="stat">
+                  <div class="n">{{ fmtMoney(costTotal) }}</div>
+                  <div class="l">成本合计</div>
+                </div>
+              </div>
+              <c-empty v-if="!costs.length" icon="money" title="还没有成本记录"
+                       desc="登记采购成本与维护成本后，首页才能算出真实利润。" />
+              <div v-else class="table-wrap">
+                <table class="data-table">
+                  <thead>
+                    <tr><th style="width:110px">日期</th><th style="width:110px">分类</th><th style="width:130px">金额</th><th>供应商 / 备注</th><th style="width:120px">操作</th></tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="r in costs" :key="r.id">
+                      <td>{{ r.spent_at }}</td>
+                      <td><span class="tag">{{ r.category }}</span></td>
+                      <td class="num">{{ fmtMoney(r.amount) }}</td>
+                      <td class="muted">{{ r.supplier || r.remark || '—' }}</td>
+                      <td>
+                        <button class="btn btn-sm" @click="openCost(r)">编辑</button>
+                        <button class="btn btn-sm btn-danger" @click="removeCost(r)">删除</button>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
           <!-- 变更记录 -->
           <div v-show="tab === 'logs'" class="card">
             <div class="card-head">
@@ -408,6 +502,11 @@ window.CRM = window.CRM || {};
         <c-followup-drawer v-model="followOpen" :customer-id="id"
                            :customer-name="customer ? customer.short_name : ''"
                            @saved="onFollowSaved" />
+
+        <!-- 成本登记 -->
+        <c-cost-drawer v-model="costOpen" :customer-id="id"
+                       :customer-name="customer ? (customer.short_name || customer.name) : ''"
+                       :cost="costEditing" @saved="onCostSaved" />
 
         <!-- 联系人编辑 -->
         <c-drawer v-model="contactOpen"

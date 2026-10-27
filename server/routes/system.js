@@ -22,8 +22,8 @@ module.exports = async function systemRoutes(ctx) {
   const ok = (data) => ({ ok: true, data });
   const fail = (status, code, message) => ({ ok: false, status, code, message });
 
-  /* ================= 首页总览 ================= */
-  if (root === 'dashboard') {
+  /* ================= 首页总览（旧版，保留兼容；新版是 /api/dashboard/v2） ================= */
+  if (root === 'dashboard' && !sub) {
     if (method === 'GET') return ok(dashboard.dashboard(db));
     return fail(404, 'API_NOT_FOUND', '接口不存在：' + pathname);
   }

@@ -158,12 +158,11 @@ const SUITES = [
   ['阶段四 · 界面交互', 'tools/test-phase4-ui-interaction.js'],
   ['阶段五 · 接口', 'tools/test-phase5-api.js'],
   ['阶段五 · 界面交互', 'tools/test-phase5-ui-interaction.js'],
-  ['阶段六 · 接口', 'tools/test-phase6-api.js'],
-  ['阶段六 · 界面交互', 'tools/test-phase6-ui-interaction.js'],
+  /* 1.22：地图模块与 3 个地图套件下线（阶段六 / 地图客户点 / 地址归属与地图显示），
+     改为「客户分布统计 + 收入报表 + 成本台账」套件 */
   ['数据库结构迁移', 'tools/test-migration.js'],
   ['数据库迁移（全面）', 'tools/test-migration-full.js'],
-  /* 地址 → 地州归属 → 地图显示（含历史脏数据纠正与下拉取值） */
-  ['地址归属与地图显示', 'tools/test-region-map.js'],
+  ['统计报表与成本台账（1.22）', 'tools/test-stats-122.js'],
   ['归属地州历史数据纠正', 'tools/test-region-legacy-fix.js'],
   ['归属地州下拉取值', 'tools/test-region-select.js'],
   ['客户详细地址保存', 'tools/test-customer-address.js'],
@@ -175,7 +174,6 @@ const SUITES = [
   ['跟进提醒（界面）', 'tools/test-remind-ui.js'],
   ['邮件提醒（SMTP）', 'tools/test-notify-email.js'],
   ['提醒与偏好设置页', 'tools/test-prefs-ui.js'],
-  ['地图客户点', 'tools/test-map-points.js'],
   /* 1.21：招标采集与报价单两个模块整体移除，对应套件一并下线 */
   ['阶段七 · 最终验收（接口/性能/文件）', 'tools/test-acceptance-core.js'],
   ['阶段七 · 最终验收（浏览器）', 'tools/test-acceptance-browser.js'],

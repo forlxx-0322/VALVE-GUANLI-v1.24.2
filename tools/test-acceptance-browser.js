@@ -5,7 +5,7 @@
  *   3  数据零外流（断网后功能正常 + 无外部请求）
  *   8  阀门行业字段（8 区块、多选字段存取、注册资金已移除）
  *   9  筛选与排序（全部筛选条件 + 快捷筛选）
- *   10 招投标日历（7 天内标黄、过期未填结果标红、排序）
+ *   10 首页 v2（指标卡 / 回访提醒 / 收入报表按月按年 / 客户分布环形图）
  *   11 项目阶段看板（14 列 + 改阶段同步）
  *   12 软删除与还原（关联数据完整恢复、无孤儿）
  *   13 操作日志（记录增删改、变更前后值可读）
@@ -599,61 +599,74 @@ const created = [];
   }
 
   /* ================================================================ */
-  /* 验收 10：招投标日历                                               */
-  /* ================================================================ */
-  console.log('\n--- 验收 10：招投标日历 ---');
+  /* 验收 10：首页 v2（指标卡 / 回访提醒 / 收入报表 / 环形图） */
+  console.log('\n--- 验收 10：首页 v2 ---');
   {
     await goto('#/home', 4600);
-    const cal = await cdp.js(`(() => {
-      const tables = [...document.querySelectorAll('.data-table')];
-      const t = tables.find(x => x.textContent.includes('投标日期'));
-      if (!t) return { err: '未找到招投标日历表' };
-      const rows = [...t.querySelectorAll('tbody tr')].map(tr => {
-        const tds = [...tr.querySelectorAll('td')].map(td => td.textContent.trim());
-        const alertTag = tr.querySelector('td:last-child .tag');
-        return {
-          cells: tds,
-          alertClass: alertTag ? alertTag.className : '',
-          alertText: alertTag ? alertTag.textContent.trim() : '',
-          rowClass: tr.className
-        };
-      });
-      return { rows };
+
+    /* 指标卡：客户总数 / 待回访 / 本月收入 / 本月利润 / 本月成本 / 应收未收 */
+    const ui = await cdp.js(`(() => {
+      const stats = [...document.querySelectorAll('.stat')].map((s) => ({
+        n: ((s.querySelector('.n') || {}).textContent || '').trim(),
+        l: ((s.querySelector('.l') || {}).textContent || '').trim()
+      }));
+      const text = document.querySelector('.content').innerText;
+      return {
+        stats,
+        hasFollowCard: text.includes('回访提醒'),
+        hasIncomeCard: text.includes('收入报表'),
+        hasRegionRing: text.includes('客户分布 · 地区'),
+        hasIndustryRing: text.includes('客户分布 · 行业'),
+        canvases: document.querySelectorAll('canvas').length
+      };
     })()`);
 
-    check('10a', '首页招投标日历渲染出投标节点',
-      !cal.err && cal.rows.length >= 2,
-      cal.err ? cal.err : `共 ${cal.rows.length} 行`);
+    check('10a', '首页 6 张指标卡齐全（客户数 / 待回访 / 收入 / 利润 / 成本 / 应收）',
+      !ui.err && ui.stats.length >= 6
+        && ui.stats.some((s) => s.l.includes('客户总数'))
+        && ui.stats.some((s) => s.l.includes('待回访'))
+        && ui.stats.some((s) => s.l.includes('利润'))
+        && ui.stats.some((s) => s.l.includes('应收未收')),
+      `${ui.stats.length} 张：${(ui.stats || []).map((s) => s.l).join(' / ')}`);
 
-    const yellow = (cal.rows || []).find((r) => /还有 \d+ 天开标|今天开标/.test(r.alertText));
-    const red = (cal.rows || []).find((r) => /已过开标日/.test(r.alertText));
+    check('10b', '回访提醒与收入报表两块都在首页',
+      ui.hasFollowCard && ui.hasIncomeCard,
+      `回访提醒=${ui.hasFollowCard}，收入报表=${ui.hasIncomeCard}`);
 
-    check('10b', '7 天内开标标黄（warning 样式）',
-      !!yellow && /warning/.test(yellow.alertClass),
-      yellow ? `「${yellow.cells[1]}」提醒="${yellow.alertText}"，样式类=${yellow.alertClass}` : '未找到 7 天内开标的行');
+    check('10c', '两张客户分布环形图都在（地区 + 行业）',
+      ui.hasRegionRing && ui.hasIndustryRing && ui.canvases >= 3,
+      `地区环=${ui.hasRegionRing}，行业环=${ui.hasIndustryRing}，canvas ${ui.canvases} 个`);
 
-    check('10c', '已过开标日未填结果标红（danger 样式 + 整行高亮）',
-      !!red && /danger/.test(red.alertClass) && /row-overdue/.test(red.rowClass),
-      red ? `「${red.cells[1]}」提醒="${red.alertText}"，样式类=${red.alertClass}，行高亮=${/row-overdue/.test(red.rowClass)}` : '未找到过期未填结果的行');
+    /* 接口层核对：卡片数字与 /api/dashboard/v2 一致 */
+    const dash = await api('GET', `/api/dashboard/v2?month=${new Date().toLocaleDateString('sv-SE').slice(0, 7)}`);
+    const c = dash.data.cards;
+    const statByLabel = (kw) => (ui.stats.find((s) => s.l.includes(kw)) || {}).n || '';
+    check('10d', '指标卡数字与接口一致（客户总数）',
+      String(c.customer_total) === String(statByLabel('客户总数')),
+      `页面「${statByLabel('客户总数')}」/ 接口「${c.customer_total}」`);
 
-    /* 排序正确（按投标日期升序） */
-    const dates = (cal.rows || []).map((r) => r.cells[0]).filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d));
-    const sortedOk = dates.every((d, i) => i === 0 || dates[i - 1] <= d);
-    check('10d', '招投标日历按投标日期升序排列',
-      dates.length >= 2 && sortedOk,
-      `日期序列：${dates.join(' → ')}`);
+    check('10e', '利润口径正确：收入 − 采购 − 维护 − 差旅 − 其他',
+      c.month_profit === Math.round((c.month_income - c.month_cost) * 100) / 100,
+      `收入 ${c.month_income} − 成本 ${c.month_cost} = 利润 ${c.month_profit}`);
 
-    /* 接口层核对预警级别 */
-    const dash = await api('GET', '/api/dashboard');
-    const bidRows = dash.data.bid_calendar.filter((b) => b.name.includes(`最终验收项目`));
-    const lvl2 = bidRows.filter((b) => b.alert_level === 2);
-    const lvl1 = bidRows.filter((b) => b.alert_level === 1);
-    check('10e', '接口层预警级别正确（1=7天内标黄，2=过期未填结果标红）',
-      lvl2.length >= 1 && lvl1.length >= 1,
-      `标红 ${lvl2.length} 条（已过开标日未填结果），标黄 ${lvl1.length} 条（7 天内开标）`);
+    /* 收入报表能切"按年" */
+    const yearUi = await cdp.js(`(async () => {
+      const btn = [...document.querySelectorAll('button')].find((b) => b.textContent.trim() === '按年');
+      if (!btn) return { err: '没找到「按年」按钮' };
+      btn.click();
+      /* 数据多时渲染会慢一点：轮询最多 6 秒，直到出现「20xx 年」行 */
+      for (let i = 0; i < 12; i++) {
+        await new Promise((r) => setTimeout(r, 500));
+        const text = document.querySelector('.content').innerText;
+        if (/\\d{4} 年/.test(text)) return { ok: true, waited: (i + 1) * 500 };
+      }
+      return { ok: false };
+    })()`);
+    check('10f', '收入报表可在「按月 / 按年」之间切换',
+      !yearUi.err && yearUi.ok === true,
+      yearUi.err || (yearUi.ok ? `切到按年后出现「20xx 年」行（${yearUi.waited}ms）` : '切到按年后仍未出现年份行'));
   }
 
-  /* ================================================================ */
   /* 验收 11：项目阶段看板                                             */
   /* ================================================================ */
   console.log('\n--- 验收 11：项目阶段看板 ---');
@@ -696,28 +709,13 @@ const created = [];
       !moved.err && afterMove.data.stage === '生产执行',
       moved.err ? moved.err : `阶段已变为「${afterMove.data.stage}」，提示：${(moved.toasts || []).join(' ')}`);
 
-    /* 阶段分布环形图同步 */
-    await goto('#/home', 4600);
-    const stageChart = await cdp.js(`(() => {
-      const inst = CRM.charts.get('xinjiang-map');
-      /* 阶段分布图没有命名，遍历所有 canvas 找饼图 */
-      const canvases = [...document.querySelectorAll('canvas')];
-      let pieData = null;
-      for (const c of canvases) {
-        const vm = null;
-      }
-      /* 直接查接口数据更可靠，这里只验证图表容器存在且有内容 */
-      return {
-        canvasCount: canvases.length,
-        hasStageCard: document.body.innerText.includes('项目阶段分布')
-      };
-    })()`);
-
-    const dash2 = await api('GET', '/api/dashboard');
-    const stageHit = (dash2.data.chart_stages || []).find((x) => x.name === '生产执行');
-    check('11d', '阶段分布数据随改阶段同步（环形图数据源正确）',
-      !!stageHit && stageHit.value >= 1,
-      `「生产执行」阶段项目数 = ${stageHit ? stageHit.value : 0}；页面图表容器 ${stageChart.canvasCount} 个`);
+    /* 客户分布环形图数据源（1.22：阶段分布图已从首页移除） */
+    const dist = await api('GET', '/api/stats/distribution?by=region&top=8');
+    const distTotal = dist.data.total;
+    const custTotal = (await api('GET', '/api/dashboard/v2')).data.cards.customer_total;
+    check('11d', '客户分布统计与客户总数一致（环形图数据源正确）',
+      distTotal === custTotal,
+      `分布合计 ${distTotal} 家 / 客户总数 ${custTotal} 家，分组 ${dist.data.groups.length} 个`);
   }
 
   /* ================================================================ */
@@ -1189,11 +1187,17 @@ const created = [];
       await goto('#/' + route, 3200);
     }
     await cdp.js(`(async () => {
-      /* 地图下钻一次 */
+      /* 首页新版交互：切一次分布维度 + 切一次按月/按年 */
       location.hash = '#/home';
       await new Promise(r => setTimeout(r, 3200));
-      const row = document.querySelector('.map-rank-row');
-      if (row) { row.click(); await new Promise(r => setTimeout(r, 2200)); }
+      const sel = document.querySelector('.content select');
+      if (sel) {
+        sel.value = 'industry';
+        sel.dispatchEvent(new Event('change', { bubbles: true }));
+        await new Promise(r => setTimeout(r, 1800));
+      }
+      const btn = [...document.querySelectorAll('button')].find((b) => b.textContent.trim() === '按年');
+      if (btn) { btn.click(); await new Promise(r => setTimeout(r, 1800)); }
       return 'ok';
     })()`);
     await sleep(1500);
@@ -1202,7 +1206,7 @@ const created = [];
       !/^https?:\/\/127\.0\.0\.1[:/]/.test(u) && !u.startsWith('data:') && !u.startsWith('blob:'));
     const local = cdp.requests.filter((u) => /^https?:\/\/127\.0\.0\.1[:/]/.test(u));
 
-    check(3.1, '全部页面与地图交互全程零外部域名请求',
+    check(3.1, '全部页面与首页交互全程零外部域名请求',
       external.length === 0,
       external.length ? `发现外部请求：${[...new Set(external)].slice(0, 3).join(', ')}`
         : `共 ${cdp.requests.length} 个请求，全部指向本地 127.0.0.1`);
@@ -1214,14 +1218,10 @@ const created = [];
     await sleep(400);
     const offlineProbe = await cdp.js(`(async () => {
       /* CDP 的 offline 会连 127.0.0.1 一起拦掉，所以这里改用页面内已有的数据验证功能可用性：
-         页面不崩、已渲染的地图仍在、可继续交互 */
+         页面不崩、已渲染的图表仍在（图表全是本地 ECharts，不依赖在线瓦片） */
       const canvases = document.querySelectorAll('canvas').length;
-      const mapInst = CRM.charts.get('xinjiang-map');
-      const rankRows = document.querySelectorAll('.map-rank-row').length;
       return {
         canvases,
-        hasMap: !!mapInst,
-        rankRows,
         pageAlive: !!document.querySelector('#app') && document.querySelector('.layout') !== null
       };
     })()`);
@@ -1229,9 +1229,9 @@ const created = [];
       offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1
     });
 
-    check(3.2, '断网状态下界面与地图保持可用（无在线依赖）',
-      offlineProbe.pageAlive && offlineProbe.hasMap && offlineProbe.canvases >= 1,
-      `页面存活=${offlineProbe.pageAlive}，地图实例在=${offlineProbe.hasMap}，canvas ${offlineProbe.canvases} 个，地州排行 ${offlineProbe.rankRows} 行`);
+    check(3.2, '断网状态下界面与图表保持可用（无在线依赖）',
+      offlineProbe.pageAlive && offlineProbe.canvases >= 1,
+      `页面存活=${offlineProbe.pageAlive}，canvas ${offlineProbe.canvases} 个（ECharts 全本地）`);
 
     /* 服务配置核对：仅监听 127.0.0.1，不对外暴露 */
     const listened = await cdp.js(`(async () => {

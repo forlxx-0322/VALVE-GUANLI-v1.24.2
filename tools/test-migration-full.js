@@ -180,6 +180,20 @@ function makeLegacyDb(file) {
   ).get().n;
   check('v8 已清理报价单状态字典项', quoteDict === 0, `quotation_status 剩 ${quoteDict} 项`);
 
+  /* ---------- v9：成本台账 ---------- */
+  if (TARGET >= 9) {
+    const costCols = after.prepare('PRAGMA table_info(costs)').all().map((c) => c.name);
+    check('v9 已建成本台账 costs 表',
+      tablesAfter.includes('costs')
+        && ['customer_id', 'project_id', 'category', 'amount', 'spent_at', 'supplier', 'remark']
+          .every((c) => costCols.includes(c)),
+      `${costCols.length} 列`);
+    const costIdx = after.prepare(
+      "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='costs'"
+    ).all().map((r) => r.name);
+    check('v9 成本表索引已建立', costIdx.length >= 3, costIdx.join('、'));
+  }
+
   /* ---------- v2/v3 的列变更 ---------- */
   check('v2 的「删除 reg_capital」已生效（列不存在）',
     !customersColsAfter.includes('reg_capital'),

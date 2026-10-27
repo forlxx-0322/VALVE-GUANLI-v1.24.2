@@ -168,12 +168,12 @@ class CDP {
         !!row && /^\d{6}$/.test(row.region_code) && row.region_code === probe.chosenValue,
         row ? `region_code=[${row.region_code}] region_name=[${row.region_name}]` : '未找到该客户');
 
-      /* 地图统计应包含它 */
-      const dist = await (await fetch(BASE + '/api/map/distribution')).json();
-      const klmy = dist.data.cities.find((c) => c.code === '650200');
-      check('地图统计包含该客户所属地州',
-        !!klmy && klmy.customer_count >= 1,
-        `克拉玛依市 客户数 = ${klmy ? klmy.customer_count : '未找到'}`);
+      /* 客户分布统计应包含它（1.22 起地图模块移除，改用 /api/stats/distribution） */
+      const dist = await (await fetch(BASE + '/api/stats/distribution?by=region&top=30')).json();
+      const klmy = (dist.data.groups || []).find((g) => g.label === '克拉玛依市');
+      check('客户分布统计包含该客户所属地州',
+        !!klmy && klmy.count >= 1,
+        `克拉玛依市 客户数 = ${klmy ? klmy.count : '未找到'}`);
 
       /* 编辑态回显：应显示地州名而不是编码 */
       await cdp.js(`location.href = ${JSON.stringify(BASE + '/#/customers/' + createdId)}; 'ok'`);

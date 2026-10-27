@@ -747,7 +747,9 @@ const created = [];
     all.push(await bench('快捷筛选', '/api/customers?quick=stale30'));
     all.push(await bench('拼音排序', '/api/customers?sort=name&order=asc'));
     all.push(await bench('首页总览', '/api/dashboard'));
-    all.push(await bench('地图分布统计', '/api/map/distribution'));
+    all.push(await bench('首页 v2（指标卡+分布）', '/api/dashboard/v2'));
+    all.push(await bench('客户分布统计', '/api/stats/distribution?by=region'));
+    all.push(await bench('收入报表', '/api/stats/income?by=month'));
 
     const worst = Math.max(...all.map((x) => x.max));
 

@@ -16,7 +16,9 @@ const DB_FILE = path.join(ROOT, 'data', 'crm.db');
 
 const EXPECTED_TABLES = [
   'customers', 'contacts', 'tags', 'customer_tags', 'followups', 'projects',
-  'payments', 'tasks', 'attachments', 'activity_logs', 'dict', 'settings', 'region'
+  'payments', 'tasks', 'attachments', 'activity_logs', 'dict', 'settings', 'region',
+  /* 1.22：成本台账（首页收入报表要算利润） */
+  'costs'
 ];
 /* 1.21 起报价单模块整体移除，quotation_status 这一类随之删除，故为 22 */
 const DICT_CATEGORIES = 22;
@@ -65,7 +67,7 @@ async function get(pathname, init) {
       "SELECT COUNT(*) AS n FROM sqlite_master WHERE type='index' AND name LIKE 'idx_%'"
     ).get().n;
     const missing = EXPECTED_TABLES.filter((t) => !tables.includes(t));
-    check(2, '13 张业务表全部存在',
+    check(2, '业务表全部存在（含 1.22 新增的成本台账 costs）',
       missing.length === 0,
       missing.length ? `缺少：${missing.join(', ')}` : `共 ${tables.length} 张（含 schema_version），索引 ${idxCount} 个`);
 
@@ -85,7 +87,8 @@ async function get(pathname, init) {
     check(5, '系统设置默认值已灌入', st.n >= 12, `${st.n} 项`);
 
     const region = db.prepare('SELECT COUNT(*) AS n FROM region').get();
-    check(6, '行政区划表可用（地图模块预留）', true, `当前 ${region.n} 条（阶段六导入新疆区划数据）`);
+    check(6, '行政区划表可用（客户分布与地址归属用，1.22 起由本地种子灌入）', true,
+      `当前 ${region.n} 条（server/data/region.json 种子）`);
 
     const custCols = db.prepare('PRAGMA table_info(customers)').all().map((c) => c.name);
     check(7, '客户表字段完整（8 区块，且已移除注册资金）',
@@ -282,12 +285,10 @@ async function get(pathname, init) {
   }
 
   /* --- 21. 零外部请求：全量扫描前端源码中的外部 URL ---
-     说明：允许少量「用户主动点击才会打开」的外部链接（如在线地图核对、坐标拾取器）。
-     这类链接不会在页面加载或日常操作中自动请求，因此不影响离线可用性。
-     关键是把它们显式登记出来，而不是笼统放行——新增外部链接必须在此登记并说明用途。 */
-  const ALLOWED_USER_TRIGGERED = [
-    { domain: 'lbs.amap.com', why: '坐标拾取器：仅当用户点「拾取器」按钮时打开，用于获取坐标' }
-  ];
+     说明：地图模块已在 1.22 移除（在线地图核对/坐标拾取器一并下线），
+     因此当前**不登记任何外部链接**：前端源码里出现外链即视为不合格。
+     将来若要加"用户主动点击才打开"的外链，必须在此登记并说明用途。 */
+  const ALLOWED_USER_TRIGGERED = [];
   try {
     const scanned = [];
     const offenders = [];

@@ -16,7 +16,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
 
-const SCHEMA_VERSION = 8;
+const SCHEMA_VERSION = 9;
 
 /* ------------------------------------------------------------------ */
 /* 13 张表结构                                                          */
@@ -264,7 +264,7 @@ const TABLES = [
     updated_at TEXT NOT NULL
   )`,
 
-  /* 13. 行政区划（地图模块用） */
+  /* 13. 行政区划（客户分布统计与"地址→地州"归属用；数据来自 server/data/region.json，纯本地） */
   `CREATE TABLE IF NOT EXISTS region (
     code           TEXT PRIMARY KEY,
     name           TEXT NOT NULL,
@@ -275,6 +275,23 @@ const TABLES = [
     geojson_path   TEXT NOT NULL DEFAULT '',
     sort           INTEGER NOT NULL DEFAULT 0,
     customer_count INTEGER NOT NULL DEFAULT 0
+  )`,
+
+  /* 14. 成本台账（v9 新增）
+   * 利润口径：利润 = 已收 − 采购成本 − 维护成本 − 差旅 − 其他。
+   * 采购成本按笔登记（可选供应商），报表按 spent_at 归月/归年。 */
+  `CREATE TABLE IF NOT EXISTS costs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    customer_id INTEGER,
+    project_id  INTEGER,
+    category    TEXT NOT NULL DEFAULT '其他',
+    amount      REAL NOT NULL DEFAULT 0,
+    spent_at    TEXT NOT NULL DEFAULT '',
+    supplier    TEXT NOT NULL DEFAULT '',
+    remark      TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL,
+    deleted_at  TEXT
   )`,
 ];
 
@@ -322,6 +339,11 @@ const INDEXES = [
   'CREATE INDEX IF NOT EXISTS idx_dict_category            ON dict(category, sort)',
   'CREATE INDEX IF NOT EXISTS idx_dict_deleted             ON dict(deleted_at)',
   'CREATE INDEX IF NOT EXISTS idx_region_parent            ON region(parent_code)',
+  /* 成本台账（v9）：按客户/项目查，按发生日期做月/年报表 */
+  'CREATE INDEX IF NOT EXISTS idx_costs_customer           ON costs(customer_id, spent_at)',
+  'CREATE INDEX IF NOT EXISTS idx_costs_project            ON costs(project_id, spent_at)',
+  'CREATE INDEX IF NOT EXISTS idx_costs_spent              ON costs(spent_at)',
+  'CREATE INDEX IF NOT EXISTS idx_costs_category           ON costs(category)',
 ];
 
 /* ------------------------------------------------------------------ */
@@ -781,6 +803,38 @@ const MIGRATIONS = [
 
       return `删除 ${dropped.join('、')}；清理设置 ${settingsCleaned} 项、字典 ${dict.changes || 0} 项`;
     }
+  },
+
+  /* v8 → v9：成本台账（1.22 新增）
+   *
+   * 首页要算"利润 = 已收 − 采购成本 − 维护成本 − 差旅 − 其他"，
+   * 原来只有回款（payments）没有成本，所以新增 costs 表。
+   * 纯建表，不动既有数据，可安全回退（删表即可）。 */
+  {
+    version: 9,
+    note: '新增成本台账 costs（采购成本 / 维护成本 / 差旅 / 其他）',
+    run(db) {
+      db.exec(`CREATE TABLE IF NOT EXISTS costs (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        customer_id INTEGER,
+        project_id  INTEGER,
+        category    TEXT NOT NULL DEFAULT '其他',
+        amount      REAL NOT NULL DEFAULT 0,
+        spent_at    TEXT NOT NULL DEFAULT '',
+        supplier    TEXT NOT NULL DEFAULT '',
+        remark      TEXT NOT NULL DEFAULT '',
+        created_at  TEXT NOT NULL,
+        updated_at  TEXT NOT NULL,
+        deleted_at  TEXT
+      )`);
+      db.exec('CREATE INDEX IF NOT EXISTS idx_costs_customer  ON costs(customer_id, spent_at)');
+      db.exec('CREATE INDEX IF NOT EXISTS idx_costs_project   ON costs(project_id, spent_at)');
+      db.exec('CREATE INDEX IF NOT EXISTS idx_costs_spent     ON costs(spent_at)');
+      db.exec('CREATE INDEX IF NOT EXISTS idx_costs_category  ON costs(category)');
+      /* 地图模块 1.22 移除，顺手清掉它的设置项 */
+      db.prepare("DELETE FROM settings WHERE key = 'map_approval_no'").run();
+      return '新建 costs 表与 4 个索引；清理 map_approval_no 设置';
+    }
   }
 ];
 
@@ -911,8 +965,7 @@ const SETTINGS_SEED = [
   ['backup_keep', '30', '主备份保留份数'],
   ['backup_mirror_keep', '7', '镜像备份保留份数'],
   ['backup_auto', '1', '是否启用每日自动备份'],
-  ['attachment_max_mb', '50', '单个附件大小上限(MB)'],
-  ['map_approval_no', '', '地图审图号（对外使用时必须填写）']
+  ['attachment_max_mb', '50', '单个附件大小上限(MB)']
 ];
 
 /* ------------------------------------------------------------------ */
@@ -1004,6 +1057,8 @@ function initDatabase(paths) {
   const ts = now();
   const dictCount = seedDict(db, ts);
   seedSettings(db, ts);
+  /* 行政区划（地图模块移除后改为纯本地种子，不再联网抓边界） */
+  const regionAdded = seedRegion(db);
 
   /* 全新数据库：直接记录为最新版本 */
   if (fromVersion === 0) {
@@ -1055,6 +1110,41 @@ function seedDict(db, ts) {
             .run(ts, hit.id);
         }
       });
+    }
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
+  return added;
+}
+
+/**
+ * 灌入行政区划（仅当表为空时）。
+ * 地图模块已移除，但"地址 → 地州"归属与客户分布环形图都还要这 121 行数据，
+ * 所以改成仓库内的本地种子（server/data/region.json），全新安装也能离线可用。
+ */
+function seedRegion(db) {
+  const n = db.prepare('SELECT COUNT(*) AS n FROM region').get().n;
+  if (n > 0) return 0;
+  const file = path.join(__dirname, 'data', 'region.json');
+  if (!fs.existsSync(file)) return 0;
+  let rows = [];
+  try {
+    rows = JSON.parse(fs.readFileSync(file, 'utf8')).rows || [];
+  } catch (_) {
+    return 0;
+  }
+  const ins = db.prepare(`INSERT OR REPLACE INTO region
+    (code, name, level, parent_code, longitude, latitude, geojson_path, sort, customer_count)
+    VALUES (?, ?, ?, ?, ?, ?, '', ?, 0)`);
+  let added = 0;
+  db.exec('BEGIN');
+  try {
+    for (const r of rows) {
+      ins.run(r.code, r.name, r.level, r.parent_code || '', r.longitude == null ? null : r.longitude,
+        r.latitude == null ? null : r.latitude, Number(r.sort) || 0);
+      added++;
     }
     db.exec('COMMIT');
   } catch (e) {

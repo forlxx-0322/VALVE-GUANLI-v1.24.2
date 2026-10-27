@@ -109,12 +109,11 @@
   CRM.registerUiComponents(app);
   CRM.registerChartComponent(app);
   CRM.registerAttachmentComponent(app);
-  CRM.registerMapComponent(app);
-  CRM.registerCoordComponent(app);
   app.component('c-customer-edit', CRM.pages.CustomerEdit);
   app.component('c-followup-drawer', CRM.pages.FollowupDrawer);
   app.component('c-project-edit', CRM.pages.ProjectEdit);
   app.component('c-payment-drawer', CRM.pages.PaymentDrawer);
+  if (CRM.registerCostComponent) CRM.registerCostComponent(app);
   /* 设置页各面板 */
   app.component('c-dict-manager', CRM.settings.DictManager);
   app.component('c-tag-panel', CRM.settings.TagPanel);

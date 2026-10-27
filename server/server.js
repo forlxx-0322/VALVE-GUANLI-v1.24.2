@@ -21,7 +21,7 @@ const crmRoutes = require('./routes/crm');
 const pmRoutes = require('./routes/pm');
 const systemRoutes = require('./routes/system');
 const attachmentRoutes = require('./routes/attachment');
-const mapRoutes = require('./routes/map');
+const statsRoutes = require('./routes/stats');
 const remindersRoutes = require('./routes/reminders');
 const backupService = require('./services/backup');
 
@@ -41,7 +41,7 @@ const RUN_FILE = path.join(DATA_DIR, '.run.json');
 /** 本软件的标识串 —— 用于单实例判定时确认"这是我们自己的服务" */
 const APP_SIGNATURE = 'crm-bjxt/1';
 /** 应用版本号：每次功能修改或 Bug 修复后递增，并在 CHANGELOG.md 归档 */
-const APP_VERSION = '1.21';
+const APP_VERSION = '1.22';
 /** 扫描端口的范围：服务端从 CRM_PORT 起向后扫描这么多端口（启动器不再预检端口） */
 const PORT_SCAN_RANGE = 11;
 
@@ -450,7 +450,7 @@ function buildRouter(ctx) {
       };
 
       /* 依次尝试各模块路由，返回 null 表示未命中 */
-      const handlers = [crmRoutes, pmRoutes, systemRoutes, attachmentRoutes, mapRoutes, remindersRoutes];
+      const handlers = [crmRoutes, pmRoutes, systemRoutes, attachmentRoutes, statsRoutes, remindersRoutes];
       for (const handler of handlers) {
         const handled = await handler(routeCtx);
 

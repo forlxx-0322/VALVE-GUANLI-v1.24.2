@@ -136,8 +136,19 @@ window.CRM = window.CRM || {};
     testEmail: () => request('POST', '/api/reminders/test-email'),
     sendReminderNow: () => request('POST', '/api/reminders/send-now'),
 
-    /* 地图客户坐标点 */
-    customerPoints: (params) => request('GET', '/api/map/customer-points?' + toQuery(params)),
+    /* 行政区划（地州下拉用；地图模块已移除，数据来自本地种子） */
+    regions: () => request('GET', '/api/regions'),
+
+    /* 统计 / 报表 / 成本台账（1.22 新增） */
+    dashboardV2: (params) => request('GET', '/api/dashboard/v2?' + toQuery(params || {})),
+    distribution: (params) => request('GET', '/api/stats/distribution?' + toQuery(params || {})),
+    incomeReport: (params) => request('GET', '/api/stats/income?' + toQuery(params || {})),
+    incomeDetail: (params) => request('GET', '/api/stats/income/detail?' + toQuery(params || {})),
+    listCosts: (params) => request('GET', '/api/costs?' + toQuery(params || {})),
+    saveCost: (data) => data.id
+      ? request('PUT', `/api/costs/${data.id}`, data)
+      : request('POST', '/api/costs', data),
+    deleteCost: (id) => request('DELETE', `/api/costs/${id}`),
 
     /* 客户 */
     listCustomers: (params) => request('GET', '/api/customers?' + toQuery(params)),

@@ -41,8 +41,7 @@ window.CRM = window.CRM || {};
         duplicates: [],
         showDup: false,
         /* 行政区划清单（用于「归属地州」下拉与坐标工具） */
-        regions: { cities: [], districts: [] },
-        coordOpen: false
+        regions: { cities: [], districts: [] }
       };
     },
     computed: {
@@ -116,23 +115,10 @@ window.CRM = window.CRM || {};
         CRM.api.applyDictAdded(result, category);
       },
 
-      /** 坐标工具回填 */
-      applyCoord(payload) {
-        this.form.longitude = payload.longitude;
-        this.form.latitude = payload.latitude;
-        this.open = [...new Set([...this.open, 'address'])];
-      },
-
-      /** 坐标工具推荐的地州 → 填入城市文本（保存时后端会自动归属） */
-      applyCity(name) {
-        this.form.city = name;
-        this.open = [...new Set([...this.open, 'address'])];
-      },
-
       async loadRegions() {
         if (this.regions.cities.length) return;
         try {
-          const r = await CRM.api.get('/api/map/regions');
+          const r = await CRM.api.regions();
           this.regions = { cities: r.cities || [], districts: r.districts || [] };
         } catch (_) { /* 地图数据未就绪时忽略，不影响客户编辑 */ }
       },
@@ -254,16 +240,6 @@ window.CRM = window.CRM || {};
                            :required="fd.required" :hint="errors[fd.key] || fd.hint"
                            :span="fd.span" :rows="fd.rows" />
 
-                  <!-- 经度字段后面挂一个「坐标工具」入口 -->
-                  <div v-if="fd.key === 'longitude'" class="coord-entry"
-                       style="grid-column:span 2;margin-top:-6px">
-                    <button type="button" class="btn btn-sm" @click="loadRegions(); coordOpen = true">
-                      <c-icon name="map" :size="13" /> 坐标工具（粘贴高德/百度坐标自动转换）
-                    </button>
-                    <span class="muted" style="font-size:var(--fs-xs);margin-left:8px">
-                      从地图复制的坐标直接粘进去即可，系统会转成 WGS84
-                    </span>
-                  </div>
                 </template>
               </div>
             </div>
@@ -290,12 +266,6 @@ window.CRM = window.CRM || {};
           </template>
         </template>
 
-        <!-- 坐标工具（独立抽屉） -->
-        <c-coord-tool v-model="coordOpen"
-                      :longitude="form.longitude" :latitude="form.latitude"
-                      :city-text="form.city" :customer-name="form.short_name || form.name"
-                      @apply="applyCoord"
-                      @apply-city="applyCity" />
       </c-drawer>`,
     setup() {
       return { api: CRM.api };

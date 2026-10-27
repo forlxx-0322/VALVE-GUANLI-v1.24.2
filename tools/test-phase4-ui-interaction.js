@@ -156,32 +156,34 @@ function findBrowser() {
     return [];
   }
 
-  /* ================= 1. 首页总览 ================= */
+  /* ================= 1. 首页总览（1.22 改版：指标卡 + 回访提醒 + 收入报表 + 两张环形图） ================= */
   await goto('#/home', 3800);
   const dash = await cdp.evalJs(`(() => {
     const stats = [...document.querySelectorAll('.stat')];
     const canvases = [...document.querySelectorAll('canvas')];
     const canvasSizes = canvases.map(c => (c.width + 'x' + c.height));
+    const text = document.querySelector('.content').innerText;
     return {
       cardCount: stats.length,
       cardTexts: stats.map(s => (s.querySelector('.l') || {}).textContent.trim()).slice(0, 6),
       chartCount: canvases.length,
       canvasSizes,
-      hasFollowList: !!document.querySelector('.mini-list'),
-      miniRows: document.querySelectorAll('.mini-row').length,
-      hasBidTable: !!document.querySelector('.data-table'),
+      hasFollowCard: text.includes('回访提醒'),
+      hasIncomeCard: text.includes('收入报表'),
+      hasDataTable: !!document.querySelector('.data-table'),
+      hasRing: text.includes('客户分布'),
       hasError: document.body.innerText.includes('加载失败')
     };
   })()`);
 
-  check('首页渲染 6 张数字卡', dash.cardCount >= 6,
+  check('首页渲染 6 张指标卡', dash.cardCount >= 6,
     `${dash.cardCount} 张：${dash.cardTexts.join(' / ')}`);
-  check('首页 4 张 ECharts 图表真实渲染（canvas 有尺寸）',
-    dash.chartCount >= 4 && dash.canvasSizes.every((s) => !s.startsWith('0x')),
+  check('首页 3 张 ECharts 图表真实渲染（收入报表 + 两张环形图）',
+    dash.chartCount >= 3 && dash.canvasSizes.every((s) => !s.startsWith('0x')),
     `${dash.chartCount} 个 canvas：${dash.canvasSizes.join(' , ')}`);
-  check('首页各数据块渲染（待跟进 / 回款 / 招投标 / 动态）',
-    dash.hasFollowList && dash.miniRows > 0 && dash.hasBidTable,
-    `列表行 ${dash.miniRows} 条，招投标表格=${dash.hasBidTable}`);
+  check('首页各数据块渲染（回访提醒 / 收入报表 / 分布环形图）',
+    dash.hasFollowCard && dash.hasIncomeCard && dash.hasRing,
+    `回访提醒=${dash.hasFollowCard}，收入报表=${dash.hasIncomeCard}，分布图=${dash.hasRing}`);
   check('首页无加载错误', !dash.hasError, dash.hasError ? '出现错误提示' : '正常');
 
   /* ================= 2. 设置页标签 ================= */

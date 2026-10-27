@@ -70,22 +70,17 @@ window.CRM = window.CRM || {};
     {
       key: 'address',
       title: '地址信息',
-      desc: '填写「市 / 地区」后会自动归属到地图上的地州；坐标用于在地图上精确定位',
+      desc: '填写「市 / 地区」后会自动归属到地州，用于客户分布统计',
       fields: [
         txt('province', '省 / 自治区', { placeholder: '新疆维吾尔自治区' }),
-        txt('city', '市 / 地区', { hint: '如「乌鲁木齐市」「喀什地区」——填写后自动归入地图统计' }),
+        txt('city', '市 / 地区', { hint: '如「乌鲁木齐市」「喀什地区」——填写后自动归入分布统计' }),
         txt('district', '区 / 县', { hint: '如「天山区」「库尔勒市」' }),
         txt('zip_code', '邮编'),
         txt('address', '详细地址', { span: 2 }),
         {
           key: 'region_code', label: '归属地州', type: 'region', span: 2,
-          hint: '由地址自动匹配；也可手动指定。用于地图统计与按区域筛选'
-        },
-        txt('longitude', '经度', {
-          type: 'number',
-          hint: '可留空。在高德坐标拾取器复制后粘贴，或点右侧「坐标工具」转换'
-        }),
-        txt('latitude', '纬度', { type: 'number' })
+          hint: '由地址自动匹配；也可手动指定。用于客户分布与按区域筛选'
+        }
       ]
     },
     {

@@ -324,9 +324,9 @@ window.CRM = window.CRM || {};
     async created() {
       await CRM.api.loadDict();
       await CRM.api.loadTags();
-      /* 行政区划：失败也不影响使用（地图数据未就绪时该筛选项为空） */
+      /* 行政区划：失败也不影响使用（筛选里的地州下拉会为空） */
       try {
-        const r = await CRM.api.get('/api/map/regions');
+        const r = await CRM.api.regions();
         this.regions = { cities: r.cities || [] };
       } catch (_) { /* 忽略 */ }
       this.load();
