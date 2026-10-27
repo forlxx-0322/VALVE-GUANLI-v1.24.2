@@ -54,17 +54,9 @@ const PAGES = [
       await new Promise(r => setTimeout(r, 900));
       return 'ok';
     })()` },
+  { name: '03b-products', hash: '#/products', wait: 4200, full: true },
   { name: '04-customer-detail', hash: null, wait: 4200, full: true,
     resolveHash: true },
-  { name: '05-projects', hash: '#/projects', wait: 4200, full: true },
-  { name: '06-projects-list', hash: '#/projects', wait: 4200, full: true,
-    prep: `(async () => {
-      const b = [...document.querySelectorAll('button')].find(x => x.textContent.trim() === '列表');
-      if (b) b.click();
-      await new Promise(r => setTimeout(r, 1500));
-      return 'ok';
-    })()` },
-  { name: '07-project-detail', hash: null, wait: 4200, full: true, resolveProject: true },
   { name: '08-tasks', hash: '#/tasks', wait: 3800, full: true },
   { name: '10-settings-dict', hash: '#/settings', wait: 4000, full: true },
   { name: '11-settings-backup', hash: '#/settings', wait: 4000, full: false,

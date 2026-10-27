@@ -8,6 +8,109 @@
 
 ---
 
+## [1.24] — 2026-10-27
+
+本次归档：**产品分类模块（产品价目表）**。新增产品分类树与产品价目，支持折后价、复制与导出 Excel；
+数据库结构 **v10 → v11**（新增 `product_categories` / `products` 两张表，15 → 17 张）。
+
+### 一、为什么加
+
+同一系列阀门（蝶阀 / 球阀 / 止回阀…）不同口径、材质、压力的价格原来散在 Excel 里，
+报价时翻表格、手工算折后价，客户问「DN200 对夹式蝶阀多少钱、货期多久」没有一个地方能查。
+按《精简版改造_技术方案_1.22-1.25.md》§5 增加**产品价目表**：只做价目表（1.21 已删报价单），
+能查价、算折后价、导出给客户，分类按阀门类型无限细分。
+
+### 二、新增两张表（结构 v11）
+
+| 表 | 字段 |
+|---|---|
+| `product_categories` | `id / parent_id / name / sort / is_system / created_at / updated_at / deleted_at`（8 列，支持任意层级） |
+| `products` | `id / category_id / name / code / unit / price / lead_time_days / body_material / pressure_rating / discount / remark / enabled / sort / created_at / updated_at / deleted_at`（16 列） |
+
+- 索引 5 个：`idx_product_categories_parent(parent_id, sort)`、`idx_products_category(category_id, sort)`、
+  `idx_products_name`、`idx_products_enabled`、`idx_products_deleted`
+- **内置分类**（`is_system=1`）：蝶阀 / 球阀 / 止回阀 / 隔膜阀 / 刀闸阀 / 执行器 6 个一级，
+  各带 3~4 个二级示例（对夹式 / 法兰式…，共 23 个）。可改名、可上下移，**不可删除**
+- **种子逻辑**：`seedProductCategories()` 在 `initDatabase` 与 v11 迁移里共用，**仅当表为空时灌入**，
+  因此全新安装（fromVersion=0）与老库升级都能拿到同一套内置分类，且重复启动不会重复灌入
+- **折后价不落库**：`net_price = round(price × (1 − discount/100), 2)`，查询时计算，
+  避免单价或折扣改动后出现两份对不上的数字
+
+### 三、接口（`server/routes/products.js`）
+
+| 接口 | 说明 |
+|---|---|
+| `GET /api/product-categories?tree=1` | 分类树（每个节点带 `product_count`，含子孙分类合计） |
+| `POST /api/product-categories` | 新增分类（`parent_id` 可选，同级不重名） |
+| `PUT /api/product-categories/:id` | 改名 / 改父级 / 改排序（禁止挂到自己的子孙下） |
+| `POST /api/product-categories/:id/move` | 同父级上移 / 下移（`{dir: up\|down}`，到头返回 `moved:false`） |
+| `DELETE /api/product-categories/:id` | 删除（内置不可删；有子分类或产品拒绝，提示先移走或删除） |
+| `GET /api/products` | 列表：分类（默认含子孙，`include_children=false` 可关）/ 关键字（名称/编号/备注）/ 材质 / 压力 / 启用 / 分页（默认 20，上限 200） |
+| `GET /api/products/:id` | 详情（带 `category_name` / `category_path` / `net_price`） |
+| `POST /api/products`、`PUT /api/products/:id` | 新增 / 修改（字段白名单，校验见下） |
+| `POST /api/products/:id/copy` | 复制：名称加「（副本）」，重名自动加序号，编号加 `-2/-3` 保唯一，sort 排末尾 |
+| `DELETE /api/products/:id` | 删除（软删除） |
+| `GET /api/products/export-data` | 导出用扁平行：`category_path / name / code / unit / price / lead_time_days / body_material / pressure_rating / discount / net_price / remark / enabled` |
+
+### 四、界面
+
+- **导航 4 项 → 5 项**：首页总览 / 客户管理 / **产品价目表** / 待办中心 / 功能设置
+  （图标为内联 SVG 价签，风格与既有导航一致；`index.html` 引入 `js/pages/products.js`）
+- **产品价目表页**（`web/js/pages/products.js`）：
+  - 左侧分类树：展开 / 收起、节点显示产品数（含子分类）、点选过滤；选中后出现
+    新增子分类 / 改名 / 上移 / 下移 / 删除；**内置分类删除按钮禁用并带 title 说明**
+  - 右侧：关键字搜索 + 材质 / 压力 / 状态筛选 + 新增产品 + 导出 Excel；
+    表格列＝名称（含分类路径）/ 编号 / 材质 / 压力 / 单价 / 货期 / 折扣 / 折后价 / 操作（编辑 / 复制 / 删除）；分页
+  - 新增 / 编辑抽屉：分类（树形缩进下拉）、名称、编号、单位、单价、货期(天)、
+    材质（字典 `body_material`，可内联新增）、压力等级（`pressure_rating`）、设定折扣(%)、备注、启用；
+    **折后价实时显示**（与服务端同一算法）
+  - 导出：前端 SheetJS（`web/vendor/xlsx.full.min.js`）生成 `产品价目表-YYYYMMDD.xlsx`，
+    列＝分类 / 名称 / 编号 / 单位 / 单价 / 货期 / 材质 / 压力 / 折扣 / 折后价 / 备注 / 启用
+
+### 五、规则与校验
+
+- 名称必填；`category_id` 必须存在且未删除；单价 ≥ 0 且保留两位小数；折扣 0~100；
+  货期非负整数；单位默认「台」
+- **同一分类下产品不重名**（软删除的不算；跨分类允许同名）；**编号非空时全库唯一**（新增与修改都校验）
+- 分类同一上级下不重名；内置分类不可删；有子分类 / 有产品的分类拒绝删除
+- 全部软删除；写操作都写 `activity_logs`（`entity_type = product / product_category`，
+  `action = create / update / delete / move / copy`），summary 可读，
+  如「新增产品：DN200 蝶阀 1200 元 / 台」「复制产品：X → X（副本）」
+
+### 六、迁移（v10 → v11，纯新增）
+
+- `SCHEMA_VERSION = 11`；`TABLES` / `INDEXES` 同步加两张表与 5 个索引
+- `MIGRATIONS` 追加 v11：`CREATE TABLE IF NOT EXISTS` 两张表 + 5 个索引 + 灌入内置分类；
+  不动任何既有表，**删表即可回退**
+- 迁移前自动整库备份机制不变（`data/backups/before-migrate-v10-*.db`）
+- 两种情形分别验证：**空库**直接建 v11 并灌 29 个内置分类；**有数据的老库**（v1 夹具 + 真实 v10 结构）
+  升级后客户 / 项目 / 回款 / 成本 / 字典 / 设置 / 行政区划一条不变，仅新增两表与分类种子
+
+### 七、测试
+
+- **新增** `tools/test-products-124.js`（**69 项断言**）：结构 v11、内置分类 6+23 与保护、
+  分类增删改移（含同级重名、有子分类/有产品拒绝删除）、产品 CRUD 与全部校验分支、
+  筛选（含子孙 / 关键字 / 材质 / 压力 / 启用）、分页与上限、折后价（0/50/100/小数）、
+  复制、导出（路径 / 字段 / 行数）、审计日志、自清理
+- **更新** `tools/test-phase1.js`：`EXPECTED_TABLES` 加两表；新增“产品价目表结构完整 + 内置分类 6+23”检查；
+  `/api/status` 表数门槛 14 → 16
+- **更新** `tools/test-migration-full.js`：v11 断言（两表存在、8 + 16 列齐全、内置分类 6+23、
+  5 个索引、迁移后产品表为空且既有数据不变、重复启动不重复灌分类）
+- **更新** `tools/test-acceptance-browser.js`：导航项 4 → 5；新增「产品价目表页可打开、
+  分类树与产品表格渲染、抽屉折后价实时计算、无 JS 报错」4 项检查；Edge 路由遍历加入 `#/products`
+- **更新** `tools/test-phase2-ui-interaction.js`（导航 5 项）、`tools/test-acceptance-core.js`
+  （新建库必需表加两表）、`tools/cleanup-test-data.js`（`--all` 一并清产品与自定义分类）
+- **注册** `tools/run-all-tests.js`：新产品套件放在「客户精简专项」之后
+
+### 八、验证
+
+- **全量回归：通过 722 / 722，失败 0**（27 个套件，沙箱空库起跑，Chrome + Edge）
+- 迁移两情形（空库 / 有数据老库）分别验证通过；真实 `data/` 未被读写
+- 浏览器实测：导航 5 项 → 产品价目表页分类树 / 表格 / 抽屉折后价 / 导出入口均正常，
+  全程 0 条 JS 错误
+
+---
+
 ## [1.23] — 2026-10-27
 
 本次归档：**客户系统简洁化（一客户一项目）**。客户表 68 列精简到 27 列，取消独立「项目管理」模块，

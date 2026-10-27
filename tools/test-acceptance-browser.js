@@ -11,7 +11,8 @@
  *   14 表单校验（名称必填 / 金额 / 日期 / 超收）
  *   15 查重（同名 / 同主联系人手机）
  *   23 空状态
- *   24 浏览器兼容（Chrome + Edge，导航 4 项）
+ *   29 产品价目表（1.24：分类树 + 产品表格 + 抽屉折后价，无 JS 报错）
+ *   24 浏览器兼容（Chrome + Edge，导航 5 项）
  *   25 自定义行业与内联新增
  *   26 数据零外流（无外部请求）
  *
@@ -215,8 +216,10 @@ const created = { customers: [], projects: [], tags: [], dict: [] };
       && ['编号', '公司名称', '行业', '联系人（职务）', '来源', '下次回访', '标签']
         .every((h) => listUi.headers.some((x) => x.includes(h))),
     `列头：${listUi.headers.join(' | ')}`);
-  check('8b', '左侧导航 4 项且没有「项目管理」',
-    listUi.nav.length === 4 && listUi.nav.includes('客户管理') && !listUi.nav.some((n) => n.includes('项目管理')),
+  check('8b', '左侧导航 5 项（含产品价目表）且没有「项目管理」',
+    listUi.nav.length === 5 && listUi.nav.includes('客户管理')
+      && listUi.nav.includes('产品价目表')
+      && !listUi.nav.some((n) => n.includes('项目管理')),
     `导航：${listUi.nav.join(' / ')}`);
   check('8c', '快捷筛选为 1.23 口径（今日待跟进/已逾期/从未跟进/本月新增）',
     ['今日待跟进', '已逾期', '从未跟进', '本月新增'].every((l) => listUi.chips.some((x) => x.includes(l))),
@@ -912,6 +915,103 @@ const created = { customers: [], projects: [], tags: [], dict: [] };
     `视图：${tasksUi.tabs.join(' / ')}；新增可见=${tasksUi.hasItem}`);
 
   /* ================================================================ */
+  /* 29. 产品价目表（1.24）                                             */
+  /* ================================================================ */
+  console.log('\n--- 验收 29：产品价目表 ---');
+
+  /* 先在系统分类「蝶阀 / 对夹式」下建一个验收产品，页面才有数据可看 */
+  const catTree = await api('GET', '/api/product-categories?tree=1');
+  const dieCat = (catTree.data || []).find((c) => c.name === '蝶阀');
+  const jiaCat = dieCat && (dieCat.children || []).find((c) => c.name === '对夹式');
+  const testProduct = await api('POST', '/api/products', {
+    category_id: jiaCat ? jiaCat.id : (dieCat ? dieCat.id : ''),
+    name: `验收产品${ts} DN200 蝶阀`, code: `ACC-${ts}`,
+    unit: '台', price: 1200, discount: 25, lead_time_days: 15,
+    body_material: '碳钢 WCB', pressure_rating: 'PN16', remark: '最终验收用产品'
+  });
+  const productId = testProduct.data && testProduct.data.id;
+  if (!productId) {
+    check('29a', '产品价目表页可打开，左侧分类树与右侧产品表格都渲染', false,
+      '准备验收产品失败：' + (testProduct.json && testProduct.json.message || ''));
+  }
+  const errBeforeProducts = cdp.errors.length;
+
+  await goto('#/products', 3600);
+  const prodUi = await cdp.js(`(() => {
+    const text = document.body.innerText;
+    const cats = [...document.querySelectorAll('.prod-cat-name')].map(x => x.textContent.trim());
+    const headers = [...document.querySelectorAll('.data-table thead th')]
+      .map(t => t.textContent.replace(/[↕↑↓]/g, '').trim());
+    return {
+      hasLayout: !!document.querySelector('.prod-layout'),
+      hasTree: !!document.querySelector('.prod-tree'),
+      hasTable: !!document.querySelector('.data-table'),
+      hasPager: !!document.querySelector('.pager'),
+      cats, headers,
+      hasProduct: text.includes('验收产品${ts}'),
+      navCount: document.querySelectorAll('.nav-item').length,
+      fatal: !!document.querySelector('.fatal')
+    };
+  })()`);
+  check('29a', '产品价目表页可打开，左侧分类树与右侧产品表格都渲染',
+    prodUi.hasLayout && prodUi.hasTree && prodUi.hasTable && prodUi.hasPager && !prodUi.fatal
+      && prodUi.cats.includes('蝶阀') && prodUi.cats.includes('对夹式')
+      && prodUi.navCount === 5 && prodUi.hasProduct,
+    `分类节点 ${prodUi.cats.length} 个（含蝶阀/对夹式=${prodUi.cats.includes('对夹式')}）；`
+      + `验收产品可见=${prodUi.hasProduct}；导航 ${prodUi.navCount} 项`);
+
+  check('29b', '产品表格列头为 1.24 口径（名称/编号/材质/压力/单价/货期/折扣/折后价/操作）',
+    ['名称', '编号', '材质', '压力', '单价', '货期', '折扣', '折后价', '操作']
+      .every((h) => prodUi.headers.some((x) => x.includes(h))),
+    prodUi.headers.join(' | '));
+
+  /* 抽屉：打开「新增产品」，填单价与折扣，检查实时折后价 */
+  const prodDrawer = await cdp.js(`(async () => {
+    const btn = [...document.querySelectorAll('button')].find(b => b.textContent.includes('新增产品'));
+    if (!btn) return { err: '未找到新增产品按钮' };
+    btn.click();
+    await new Promise(r => setTimeout(r, 900));
+    const d = [...document.querySelectorAll('.drawer')].pop();
+    if (!d) return { err: '抽屉未打开' };
+    const labels = [...d.querySelectorAll('.field-label')]
+      .map(x => x.textContent.trim().replace(/\\*$/, ''));
+    const setVal = (label, v) => {
+      const f = [...d.querySelectorAll('.field')].find(x => {
+        const l = x.querySelector('.field-label');
+        return l && l.textContent.trim().startsWith(label);
+      });
+      if (!f) return false;
+      const i = f.querySelector('input');
+      if (!i) return false;
+      i.value = v; i.dispatchEvent(new Event('input', { bubbles: true }));
+      return true;
+    };
+    setVal('单价', '1200');
+    setVal('设定折扣', '30');
+    await new Promise(r => setTimeout(r, 400));
+    const net = (d.querySelector('.prod-net') || {}).textContent || '';
+    const x = [...d.querySelectorAll('.drawer-head button')].pop();
+    x.click();
+    await new Promise(r => setTimeout(r, 600));
+    return { labels, net: net.trim() };
+  })()`);
+  check('29c', '产品抽屉字段齐全（分类/名称/单价/货期/材质/压力/折扣/备注/启用），折后价实时计算',
+    !prodDrawer.err
+      && ['产品分类', '产品名称', '产品编号', '单位', '单价（元）', '货期（天）', '阀体材质',
+        '压力等级', '设定折扣（%）', '备注', '启用'].every((l) => prodDrawer.labels.includes(l))
+      && /840/.test(prodDrawer.net),
+    prodDrawer.err || `折后价显示「${prodDrawer.net}」（1200 × 0.7 = 840）`);
+
+  check('29d', '产品价目表页无 JS 报错',
+    cdp.errors.length === errBeforeProducts,
+    cdp.errors.length === errBeforeProducts
+      ? '0 条错误'
+      : cdp.errors.slice(errBeforeProducts, errBeforeProducts + 3).join(' | '));
+
+  /* 清理验收产品（软删除即可，不影响其它套件） */
+  if (productId) await api('DELETE', `/api/products/${productId}`);
+
+  /* ================================================================ */
   /* 23. 空状态                                                         */
   /* ================================================================ */
   console.log('\n--- 验收 23：空状态 ---');
@@ -941,8 +1041,8 @@ const created = { customers: [], projects: [], tags: [], dict: [] };
     navCount: document.querySelectorAll('.nav-item').length,
     navText: [...document.querySelectorAll('.nav-item')].map(x => x.textContent.trim())
   }))()`);
-  check('24a', 'Chrome：导航 4 项、无外部请求',
-    navChrome.navCount === 4
+  check('24a', 'Chrome：导航 5 项、无外部请求',
+    navChrome.navCount === 5
       && !cdp.requests.some((u) => /^https?:\/\//.test(u) && !/127\.0\.0\.1|localhost/.test(u)),
     `导航 ${navChrome.navCount} 项：${navChrome.navText.join(' / ')}；外部请求 ${cdp.requests.filter((u) => /^https?:\/\//.test(u) && !/127\.0\.0\.1|localhost/.test(u)).length} 个`);
 
@@ -951,7 +1051,7 @@ const created = { customers: [], projects: [], tags: [], dict: [] };
     const ed = await launchBrowser(EDGE, 9241, edgeProfile);
     if (ed) {
       let edgeOk = true;
-      const pages = ['#/home', '#/customers', '#/tasks', '#/settings'];
+      const pages = ['#/home', '#/customers', '#/products', '#/tasks', '#/settings'];
       for (const p of pages) {
         await ed.cdp.js(`location.href = ${JSON.stringify(BASE + '/' + p)}; 'ok'`);
         await sleep(2600);
@@ -960,10 +1060,10 @@ const created = { customers: [], projects: [], tags: [], dict: [] };
           navCount: document.querySelectorAll('.nav-item').length,
           err: !!document.querySelector('.fatal')
         }))()`);
-        if (!st.hasLayout || st.navCount !== 4 || st.err) edgeOk = false;
+        if (!st.hasLayout || st.navCount !== 5 || st.err) edgeOk = false;
       }
-      check('24b', `Edge：4 个页面布局与导航正常（${ed.version.Browser}）`, edgeOk,
-        edgeOk ? '导航 4 项，页面均正常渲染' : '存在渲染或导航异常');
+      check('24b', `Edge：5 个页面布局与导航正常（${ed.version.Browser}）`, edgeOk,
+        edgeOk ? '导航 5 项，页面均正常渲染' : '存在渲染或导航异常');
       check('24c', 'Edge：无控制台报错', ed.cdp.errors.length === 0,
         ed.cdp.errors.length ? ed.cdp.errors.slice(0, 3).join(' | ') : '0 条错误');
       ed.cdp.close();

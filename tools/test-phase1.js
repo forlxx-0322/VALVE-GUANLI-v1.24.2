@@ -18,7 +18,9 @@ const EXPECTED_TABLES = [
   'customers', 'contacts', 'tags', 'customer_tags', 'followups', 'projects',
   'payments', 'tasks', 'attachments', 'activity_logs', 'dict', 'settings', 'region',
   /* 1.22：成本台账（首页收入报表要算利润） */
-  'costs'
+  'costs',
+  /* 1.24：产品价目表（分类树 + 产品） */
+  'product_categories', 'products'
 ];
 /* 1.21 起报价单模块整体移除，quotation_status 这一类随之删除，故为 22 */
 const DICT_CATEGORIES = 22;
@@ -56,7 +58,7 @@ async function get(pathname, init) {
     process.exit(1);
   }
 
-  /* --- 2. 数据库与 13 张表 --- */
+  /* --- 2. 数据库与 17 张表 --- */
   let tables = [];
   try {
     const db = new DatabaseSync(DB_FILE, { readOnly: true });
@@ -67,7 +69,7 @@ async function get(pathname, init) {
       "SELECT COUNT(*) AS n FROM sqlite_master WHERE type='index' AND name LIKE 'idx_%'"
     ).get().n;
     const missing = EXPECTED_TABLES.filter((t) => !tables.includes(t));
-    check(2, '业务表全部存在（含 1.22 新增的成本台账 costs）',
+    check(2, '业务表全部存在（含 1.22 成本台账、1.24 产品价目表两张表）',
       missing.length === 0,
       missing.length ? `缺少：${missing.join(', ')}` : `共 ${tables.length} 张（含 schema_version），索引 ${idxCount} 个`);
 
@@ -75,6 +77,21 @@ async function get(pathname, init) {
     const expectedVersion = require('../server/db').SCHEMA_VERSION;
     check(3, '结构版本表已记录为最新版本', sv && sv.v === expectedVersion,
       `schema_version = ${sv && sv.v}（代码当前结构版本 v${expectedVersion}）`);
+
+    /* 1.24：产品价目表两张表的列数与内置分类（6 个一级 + 23 个二级） */
+    const catCols = db.prepare('PRAGMA table_info(product_categories)').all().map((c) => c.name);
+    const prodCols = db.prepare('PRAGMA table_info(products)').all().map((c) => c.name);
+    const builtinRoots = db.prepare(`SELECT COUNT(*) AS n FROM product_categories
+      WHERE deleted_at IS NULL AND is_system = 1 AND parent_id IS NULL`).get().n;
+    const builtinChildren = db.prepare(`SELECT COUNT(*) AS n FROM product_categories
+      WHERE deleted_at IS NULL AND is_system = 1 AND parent_id IS NOT NULL`).get().n;
+    check('3a', '产品价目表结构完整（分类 8 列 / 产品 16 列）且内置分类 6 + 23 已灌入',
+      catCols.length === 8 && prodCols.length === 16
+        && catCols.includes('parent_id') && catCols.includes('is_system')
+        && ['category_id', 'name', 'price', 'lead_time_days', 'body_material',
+          'pressure_rating', 'discount', 'code', 'enabled', 'sort'].every((c) => prodCols.includes(c))
+        && builtinRoots === 6 && builtinChildren === 23,
+      `分类 ${catCols.length} 列 / 产品 ${prodCols.length} 列；内置一级 ${builtinRoots}、二级 ${builtinChildren}`);
 
     const dictStat = db.prepare(
       'SELECT COUNT(DISTINCT category) AS c, COUNT(*) AS n FROM dict WHERE deleted_at IS NULL'
@@ -113,7 +130,7 @@ async function get(pathname, init) {
 
     db.close();
   } catch (e) {
-    check(2, '13 张业务表全部存在', false, e.message);
+    check(2, '业务表全部存在（含 1.22 成本台账、1.24 产品价目表两张表）', false, e.message);
   }
 
   /* --- 8. WAL 模式 --- */
@@ -132,7 +149,7 @@ async function get(pathname, init) {
     const { json } = await get('/api/status');
     const d = json && json.data;
     check(9, '/api/status 返回数据库与字典统计',
-      d && d.tableCount >= 14 && d.dictCategories === DICT_CATEGORIES,
+      d && d.tableCount >= 16 && d.dictCategories === DICT_CATEGORIES,
       d ? `表 ${d.tableCount} 张 / 字典 ${d.dictCategories} 类 ${d.dictItems} 项` : '无响应');
   } catch (e) {
     check(9, '/api/status 返回数据库与字典统计', false, e.message);

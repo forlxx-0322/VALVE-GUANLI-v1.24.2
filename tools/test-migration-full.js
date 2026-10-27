@@ -4,7 +4,7 @@
  * 与 test-migration.js 的区别：
  *   - test-migration.js 专测 v1 → 最新版本的完整升级链路
  *   - 本文件覆盖**迁移到最新版本**的完整链路，且版本无关（目标取自 SCHEMA_VERSION），
- *     并逐版核对各版本的产物（v8 删表、v9 costs、v10 客户精简与一客户一项目）
+ *     并逐版核对各版本的产物（v8 删表、v9 costs、v10 客户精简与一客户一项目、v11 产品价目表）
  *
  * 起点自适应（重要）：
  *   全套件连跑时，运行器会先清库重建为**最新版本**，此时真实库没有"旧版本"可迁移。
@@ -211,6 +211,53 @@ function makeLegacyDb(file) {
       nos.join('、') || '（无客户）');
   }
 
+  /* ---------- v11：产品价目表（1.24） ---------- */
+  if (TARGET >= 11) {
+    const CAT_COLS = ['id', 'parent_id', 'name', 'sort', 'is_system', 'created_at', 'updated_at', 'deleted_at'];
+    const PROD_COLS = ['id', 'category_id', 'name', 'code', 'unit', 'price', 'lead_time_days',
+      'body_material', 'pressure_rating', 'discount', 'remark', 'enabled', 'sort',
+      'created_at', 'updated_at', 'deleted_at'];
+    const catCols = after.prepare('PRAGMA table_info(product_categories)').all().map((c) => c.name);
+    const prodCols = after.prepare('PRAGMA table_info(products)').all().map((c) => c.name);
+    check('v11 已建产品价目表两张表且列齐全（8 + 16）',
+      tablesAfter.includes('product_categories') && tablesAfter.includes('products')
+        && CAT_COLS.every((c) => catCols.includes(c)) && catCols.length === CAT_COLS.length
+        && PROD_COLS.every((c) => prodCols.includes(c)) && prodCols.length === PROD_COLS.length,
+      `product_categories ${catCols.length} 列 / products ${prodCols.length} 列`);
+
+    const rootCount = after.prepare(`SELECT COUNT(*) AS n FROM product_categories
+      WHERE deleted_at IS NULL AND is_system = 1 AND parent_id IS NULL`).get().n;
+    const childCount = after.prepare(`SELECT COUNT(*) AS n FROM product_categories
+      WHERE deleted_at IS NULL AND is_system = 1 AND parent_id IS NOT NULL`).get().n;
+    const rootNames = after.prepare(`SELECT name FROM product_categories
+      WHERE deleted_at IS NULL AND parent_id IS NULL ORDER BY sort, id`).all().map((r) => r.name);
+    check('v11 内置分类 6 个一级 + 23 个二级且名称正确',
+      rootCount === 6 && childCount === 23
+        && ['蝶阀', '球阀', '止回阀', '隔膜阀', '刀闸阀', '执行器'].every((n) => rootNames.includes(n)),
+      `一级 ${rootCount}（${rootNames.join(' / ')}），二级 ${childCount}`);
+
+    const prodIdx = after.prepare(
+      "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name IN ('product_categories','products')"
+    ).all().map((r) => r.name);
+    const NEED_IDX = ['idx_product_categories_parent', 'idx_products_category', 'idx_products_name',
+      'idx_products_enabled', 'idx_products_deleted'];
+    check('v11 产品相关 5 个索引已建立',
+      NEED_IDX.every((n) => prodIdx.includes(n)),
+      NEED_IDX.filter((n) => !prodIdx.includes(n)).join('、') || NEED_IDX.join('、'));
+
+    const prodCount = after.prepare('SELECT COUNT(*) AS n FROM products').get().n;
+    check('v11 为纯新增迁移：产品表迁移后为空，既有业务数据不受影响',
+      prodCount === 0 && countsAfter.customers === countsBefore.customers,
+      `products ${prodCount} 条；客户 ${countsBefore.customers} → ${countsAfter.customers}`);
+
+    /* 迁移后旧库再打开一次也不应重复灌分类（幂等） —— 由下面「重复启动」统一验证 */
+    const catsAfterFirst = after.prepare(
+      'SELECT COUNT(*) AS n FROM product_categories WHERE deleted_at IS NULL'
+    ).get().n;
+    check('v11 内置分类数量正确（29 个，不多不少）', catsAfterFirst === 29,
+      `分类 ${catsAfterFirst} 个`);
+  }
+
   /* ---------- v2/v3 的列变更 ---------- */
   check('v2 的「删除 reg_capital」已生效（列不存在）',
     !customersColsAfter.includes('reg_capital'),
@@ -298,6 +345,12 @@ function makeLegacyDb(file) {
     check('重复启动不会重复迁移（幂等）',
       info2.migrations.length === 0 && info2.schemaVersion === TARGET,
       `二次启动执行 ${info2.migrations.length} 步，版本 v${info2.schemaVersion}`);
+
+    const catsAfterSecond = info2.db.prepare(
+      'SELECT COUNT(*) AS n FROM product_categories WHERE deleted_at IS NULL'
+    ).get().n;
+    check('重复启动不会重复灌入内置分类（仍为 29 个）',
+      catsAfterSecond === 29, `分类 ${catsAfterSecond} 个`);
   }
 
   /* ---------- 迁移前自动备份 ---------- */

@@ -1432,12 +1432,13 @@ function countDictUsage(db, category, value) {
 
 const ENTITY_LABEL = {
   customer: '客户', contact: '联系人', project: '项目', task: '待办',
-  dict: '字典', tag: '标签', import: '导入', payment: '回款'
+  dict: '字典', tag: '标签', import: '导入', payment: '回款',
+  cost: '成本', product: '产品', product_category: '产品分类'
 };
 const ACTION_LABEL = {
   create: '新建', update: '修改', delete: '删除', restore: '还原',
   followup: '跟进', followup_delete: '删除跟进', payment: '回款',
-  bulk: '批量', disable: '停用', import: '导入'
+  bulk: '批量', disable: '停用', import: '导入', move: '排序', copy: '复制'
 };
 
 function listLogs(db, q) {

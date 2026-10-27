@@ -2,7 +2,7 @@
  * 阶段二 浏览器交互测试（1.23 一客户一项目）
  *
  * 通过 Chrome DevTools Protocol 驱动真实浏览器：
- *   - 客户列表：4 项导航（无项目管理）、新列头、筛选与快捷
+ *   - 客户列表：5 项导航（含产品价目表、无项目管理）、新列头、筛选与快捷
  *   - 新增客户抽屉：4 个区块、只有公司名称必填、标签选择器、字典内联新增
  *   - 通过界面真实创建客户（含行业 / 主联系人）
  *   - 客户详情 4 个标签页：资料（财务栏）/ 回访与跟进 / 项目与财务 / 附件与日志
@@ -173,9 +173,10 @@ class CDP {
     ['编号', '公司名称', '行业', '联系人（职务）', '来源', '下次回访', '标签']
       .every((h) => listInfo.headers.some((x) => x.includes(h))),
     `列头：${listInfo.headers.join(' | ')}`);
-  check('左侧导航只剩 4 项（首页总览/客户管理/待办中心/功能设置），没有项目管理',
-    listInfo.nav.length === 4
+  check('左侧导航为 5 项（首页总览/客户管理/产品价目表/待办中心/功能设置），没有项目管理',
+    listInfo.nav.length === 5
       && listInfo.nav.includes('首页总览') && listInfo.nav.includes('客户管理')
+      && listInfo.nav.includes('产品价目表')
       && listInfo.nav.includes('待办中心') && listInfo.nav.includes('功能设置')
       && !listInfo.nav.some((x) => x.includes('项目管理')),
     `导航：${listInfo.nav.join(' / ')}`);

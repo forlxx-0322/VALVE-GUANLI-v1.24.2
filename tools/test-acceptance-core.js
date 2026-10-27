@@ -358,11 +358,12 @@ const created = [];
     ).get().n;
     const dictCount = first.db.prepare('SELECT COUNT(*) AS n FROM dict WHERE deleted_at IS NULL').get().n;
     const required = ['customers', 'contacts', 'tags', 'customer_tags', 'followups', 'projects',
-      'payments', 'tasks', 'attachments', 'activity_logs', 'dict', 'settings', 'region'];
+      'payments', 'tasks', 'attachments', 'activity_logs', 'dict', 'settings', 'region',
+      'costs', 'product_categories', 'products'];
     const missing = required.filter((t) => !tables.includes(t));
     closeDatabase(first.db);
 
-    check(2.1, '全新环境自动建库并建全部 13 张业务表',
+    check(2.1, '全新环境自动建库并建全部业务表（含成本台账与产品价目表）',
       first.created === true && missing.length === 0,
       missing.length ? `缺少：${missing.join(', ')}`
         : `共 ${tables.length} 张表（含 schema_version），${idxCount} 个索引，字典 ${dictCount} 项，版本 v${first.schemaVersion}`);

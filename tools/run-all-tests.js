@@ -156,6 +156,8 @@ const SUITES = [
   ['阶段三 · 界面交互', 'tools/test-phase3-ui-interaction.js'],
   /* 1.23：客户精简专项（一客户一项目 / 客户编号 / 主联系人同步 / 回访周期 / 财务口径） */
   ['客户精简专项（1.23）', 'tools/test-customer-123.js'],
+  /* 1.24：产品分类模块（分类树 / 产品价目表 / 折后价 / 导出 / 审计） */
+  ['产品分类专项（1.24）', 'tools/test-products-124.js'],
   ['阶段四 · 接口', 'tools/test-phase4-api.js'],
   ['阶段四 · 界面交互', 'tools/test-phase4-ui-interaction.js'],
   ['阶段五 · 接口', 'tools/test-phase5-api.js'],

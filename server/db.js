@@ -3,9 +3,9 @@
  *
  * 职责：
  *   1. 建立 SQLite 连接（Node 内置 node:sqlite，零依赖）
- *   2. 建全 15 张表与索引
+ *   2. 建全 17 张表与索引
  *   3. 结构版本管理（schema_version）+ 迁移前自动备份
- *   4. 写入初始字典数据与系统设置
+ *   4. 写入初始字典数据、系统设置与内置产品分类
  *
  * 编码约定：本文件与所有 .js 文件统一 UTF-8 无 BOM。
  */
@@ -16,10 +16,10 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
 
-const SCHEMA_VERSION = 10;
+const SCHEMA_VERSION = 11;
 
 /* ------------------------------------------------------------------ */
-/* 15 张表结构                                                          */
+/* 17 张表结构                                                          */
 /* ------------------------------------------------------------------ */
 
 const TABLES = [
@@ -257,6 +257,41 @@ const TABLES = [
     updated_at  TEXT NOT NULL,
     deleted_at  TEXT
   )`,
+
+  /* 15. 产品分类（v11 新增）—— 价目表的分类树，可无限层级。
+   *     is_system=1 的内置分类（蝶阀/球阀/…）可改名、可排序，但不可删除。 */
+  `CREATE TABLE IF NOT EXISTS product_categories (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    parent_id  INTEGER,
+    name       TEXT NOT NULL,
+    sort       INTEGER NOT NULL DEFAULT 0,
+    is_system  INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    deleted_at TEXT
+  )`,
+
+  /* 16. 产品（v11 新增）—— 价目表主表。
+   *     折后价不落库：net_price = round(price × (1 − discount/100), 2) 由查询时计算，
+   *     避免单价或折扣改动后出现两份对不上的数字。 */
+  `CREATE TABLE IF NOT EXISTS products (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    category_id     INTEGER NOT NULL,
+    name            TEXT NOT NULL,
+    code            TEXT NOT NULL DEFAULT '',
+    unit            TEXT NOT NULL DEFAULT '台',
+    price           REAL NOT NULL DEFAULT 0,
+    lead_time_days  INTEGER NOT NULL DEFAULT 0,
+    body_material   TEXT NOT NULL DEFAULT '',
+    pressure_rating TEXT NOT NULL DEFAULT '',
+    discount        REAL NOT NULL DEFAULT 0,
+    remark          TEXT NOT NULL DEFAULT '',
+    enabled         INTEGER NOT NULL DEFAULT 1,
+    sort            INTEGER NOT NULL DEFAULT 0,
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL,
+    deleted_at      TEXT
+  )`,
 ];
 
 /* ------------------------------------------------------------------ */
@@ -305,6 +340,12 @@ const INDEXES = [
   'CREATE INDEX IF NOT EXISTS idx_costs_project            ON costs(project_id, spent_at)',
   'CREATE INDEX IF NOT EXISTS idx_costs_spent              ON costs(spent_at)',
   'CREATE INDEX IF NOT EXISTS idx_costs_category           ON costs(category)',
+  /* 产品价目表（v11）：分类树按父级排序，产品按分类排序 / 名称 / 启用 / 软删除查 */
+  'CREATE INDEX IF NOT EXISTS idx_product_categories_parent ON product_categories(parent_id, sort)',
+  'CREATE INDEX IF NOT EXISTS idx_products_category         ON products(category_id, sort)',
+  'CREATE INDEX IF NOT EXISTS idx_products_name             ON products(name)',
+  'CREATE INDEX IF NOT EXISTS idx_products_enabled          ON products(enabled)',
+  'CREATE INDEX IF NOT EXISTS idx_products_deleted          ON products(deleted_at)',
 ];
 
 /* ------------------------------------------------------------------ */
@@ -323,6 +364,24 @@ const FIXED_TAGS = [
 ];
 
 const FIXED_TAG_NAMES = FIXED_TAGS.map((t) => t.name);
+
+/* ------------------------------------------------------------------ */
+/* 内置产品分类（1.24 · v11）                                           */
+/*                                                                     */
+/* 6 个一级分类 + 23 个二级示例，全部 is_system=1：可改名、可调排序、    */
+/* 可移到自己建的分类下，但**不可删除**（删了价目表就没有骨架了）。       */
+/* 全新安装（fromVersion=0）与老库升级（v11 迁移）都走 seedProductCategories， */
+/* 仅在 product_categories 表为空时灌入，因此天然幂等。                   */
+/* ------------------------------------------------------------------ */
+
+const PRODUCT_CATEGORY_SEED = [
+  { name: '蝶阀', children: ['对夹式', '法兰式', '凸耳式', '焊接式'] },
+  { name: '球阀', children: ['浮动球', '固定球', '三通球', '全焊接'] },
+  { name: '止回阀', children: ['旋启式', '升降式', '对夹式', '双瓣式'] },
+  { name: '隔膜阀', children: ['堰式', '直通式', '衬氟'] },
+  { name: '刀闸阀', children: ['手动', '气动', '电动', '浆液专用'] },
+  { name: '执行器', children: ['气动', '电动', '电液联动', '附件'] }
+];
 
 /* ------------------------------------------------------------------ */
 /* 结构迁移脚本                                                        */
@@ -958,6 +1017,61 @@ const MIGRATIONS = [
 
       return done.length ? done.join('；') : '结构已是最新，无需变更';
     }
+  },
+
+  /* v10 → v11：产品价目表（1.24）
+   *
+   * 纯新增，不动任何既有表：新建 product_categories / products 两张表 + 5 个索引，
+   * 再灌入 6 个一级 + 23 个二级内置分类（is_system=1，可改名不可删）。
+   * 因为全是新表，迁移可安全回退（删表即可），旧数据一条不受影响。
+   *
+   * 注意：全新安装不会走到这里（fromVersion=0），由 initDatabase 里的
+   * seedProductCategories(db) 负责灌同一份种子，两边逻辑共用、幂等。 */
+  {
+    version: 11,
+    note: '新增产品价目表：product_categories / products 两张表 + 6 个一级 / 23 个二级内置分类',
+    run(db) {
+      db.exec(`CREATE TABLE IF NOT EXISTS product_categories (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        parent_id  INTEGER,
+        name       TEXT NOT NULL,
+        sort       INTEGER NOT NULL DEFAULT 0,
+        is_system  INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        deleted_at TEXT
+      )`);
+
+      db.exec(`CREATE TABLE IF NOT EXISTS products (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        category_id     INTEGER NOT NULL,
+        name            TEXT NOT NULL,
+        code            TEXT NOT NULL DEFAULT '',
+        unit            TEXT NOT NULL DEFAULT '台',
+        price           REAL NOT NULL DEFAULT 0,
+        lead_time_days  INTEGER NOT NULL DEFAULT 0,
+        body_material   TEXT NOT NULL DEFAULT '',
+        pressure_rating TEXT NOT NULL DEFAULT '',
+        discount        REAL NOT NULL DEFAULT 0,
+        remark          TEXT NOT NULL DEFAULT '',
+        enabled         INTEGER NOT NULL DEFAULT 1,
+        sort            INTEGER NOT NULL DEFAULT 0,
+        created_at      TEXT NOT NULL,
+        updated_at      TEXT NOT NULL,
+        deleted_at      TEXT
+      )`);
+
+      for (const sql of [
+        'CREATE INDEX IF NOT EXISTS idx_product_categories_parent ON product_categories(parent_id, sort)',
+        'CREATE INDEX IF NOT EXISTS idx_products_category         ON products(category_id, sort)',
+        'CREATE INDEX IF NOT EXISTS idx_products_name             ON products(name)',
+        'CREATE INDEX IF NOT EXISTS idx_products_enabled          ON products(enabled)',
+        'CREATE INDEX IF NOT EXISTS idx_products_deleted          ON products(deleted_at)'
+      ]) db.exec(sql);
+
+      const added = seedProductCategories(db);
+      return `新增表 product_categories、products 与 5 个索引；灌入内置分类 ${added} 个`;
+    }
   }
 ];
 
@@ -1182,6 +1296,8 @@ function initDatabase(paths) {
   seedSettings(db, ts);
   /* 行政区划（地图模块移除后改为纯本地种子，不再联网抓边界） */
   const regionAdded = seedRegion(db);
+  /* 产品价目表的内置分类（1.24）：全新安装也必须灌入，仅当表为空时执行 */
+  const productCategoryAdded = seedProductCategories(db);
 
   /* 全新数据库：直接记录为最新版本 */
   if (fromVersion === 0) {
@@ -1205,6 +1321,7 @@ function initDatabase(paths) {
     schemaVersion: finalVersion,
     tables: tableCount,
     dictCount,
+    productCategoryCount: productCategoryAdded,
     backedUpTo
   };
 }
@@ -1277,6 +1394,44 @@ function seedRegion(db) {
   return added;
 }
 
+/**
+ * 灌入内置产品分类（仅当 product_categories 表为空时）。
+ *
+ * 为什么迁移里和 initDatabase 里都要调用：
+ *   - 全新安装 fromVersion=0，迁移列表一步都不会跑，必须靠 initDatabase 灌种子；
+ *   - 老库升级 v10 → v11 也走同一函数，保证两边的内置分类完全一致。
+ * 幂等：只要表里已有任何一行（含软删除的）就整体跳过，绝不会重复插入。
+ *
+ * @returns {number} 本次灌入的分类条数（6 个一级 + 23 个二级 = 29）
+ */
+function seedProductCategories(db) {
+  const n = db.prepare('SELECT COUNT(*) AS n FROM product_categories').get().n;
+  if (n > 0) return 0;
+
+  const ts = now();
+  const ins = db.prepare(`INSERT INTO product_categories
+    (parent_id, name, sort, is_system, created_at, updated_at)
+    VALUES (?, ?, ?, 1, ?, ?)`);
+  let added = 0;
+  db.exec('BEGIN');
+  try {
+    PRODUCT_CATEGORY_SEED.forEach((root, i) => {
+      const r = ins.run(null, root.name, (i + 1) * 10, ts, ts);
+      const parentId = Number(r.lastInsertRowid);
+      added++;
+      root.children.forEach((child, j) => {
+        ins.run(parentId, child, (j + 1) * 10, ts, ts);
+        added++;
+      });
+    });
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
+  return added;
+}
+
 /** 补充缺失的设置项 */
 function seedSettings(db, ts) {
   const exists = db.prepare('SELECT 1 AS x FROM settings WHERE key = ?');
@@ -1319,8 +1474,10 @@ module.exports = {
   DICT_SEED,
   FIXED_TAGS,
   FIXED_TAG_NAMES,
+  PRODUCT_CATEGORY_SEED,
   DROPPED_CUSTOMER_COLUMNS,
   initDatabase,
+  seedProductCategories,
   getSettings,
   closeDatabase,
   plain,

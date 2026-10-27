@@ -44,7 +44,7 @@ if (process.argv.includes('--all')) {
   if (!process.argv.includes('--yes')) {
     const live = db.prepare('SELECT COUNT(*) AS n FROM customers WHERE deleted_at IS NULL').get().n;
     const proj = db.prepare('SELECT COUNT(*) AS n FROM projects WHERE deleted_at IS NULL').get().n;
-    console.log('⚠ --all 会清空全部业务数据（客户 / 项目 / 回款 / 待办 / 标签 / 日志 / 附件），且不可恢复。');
+    console.log('⚠ --all 会清空全部业务数据（客户 / 项目 / 回款 / 待办 / 标签 / 日志 / 附件 / 产品），且不可恢复。');
     console.log(`   当前库中有：客户 ${live} 条、项目 ${proj} 条。`);
     console.log('   确认要清空，请加 --yes 重新执行：');
     console.log('     node tools/cleanup-test-data.js --all --yes');
@@ -76,11 +76,14 @@ if (process.argv.includes('--all')) {
   try {
     const n = {};
     for (const t of ['payments', 'tasks', 'followups', 'contacts', 'customer_tags',
-      'attachments', 'activity_logs', 'projects', 'customers', 'tags']) {
+      'attachments', 'activity_logs', 'projects', 'customers', 'tags',
+      /* 1.24：产品价目表也是业务数据，一并清空（内置分类保留） */
+      'products']) {
       n[t] = db.prepare(`DELETE FROM ${t}`).run().changes;
     }
-    /* 清掉测试期间新增的自定义字典项，保留系统内置项 */
+    /* 清掉测试期间新增的自定义字典项与自定义产品分类，保留系统内置项 */
     n.dict = db.prepare('DELETE FROM dict WHERE is_system = 0').run().changes;
+    n.product_categories = db.prepare('DELETE FROM product_categories WHERE is_system = 0').run().changes;
     db.exec('COMMIT');
     console.log('已清空全部业务数据：');
     for (const [t, c] of Object.entries(n)) console.log(`  ${t}\t${c} 条`);

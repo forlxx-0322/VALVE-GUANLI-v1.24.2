@@ -248,6 +248,23 @@ window.CRM = window.CRM || {};
     attachmentUsage: () => request('GET', '/api/attachments/usage'),
     cleanOrphanAttachments: () => request('POST', '/api/attachments/clean-orphans'),
 
+    /* 产品价目表（1.24 新增） */
+    productCategories: (params) => request('GET', '/api/product-categories?' + toQuery(params || {})),
+    saveProductCategory: (data) => data.id
+      ? request('PUT', `/api/product-categories/${data.id}`, data)
+      : request('POST', '/api/product-categories', data),
+    moveProductCategory: (id, dir) => request('POST', `/api/product-categories/${id}/move`, { dir }),
+    deleteProductCategory: (id) => request('DELETE', `/api/product-categories/${id}`),
+
+    listProducts: (params) => request('GET', '/api/products?' + toQuery(params || {})),
+    getProduct: (id) => request('GET', `/api/products/${id}`),
+    saveProduct: (data) => data.id
+      ? request('PUT', `/api/products/${data.id}`, data)
+      : request('POST', '/api/products', data),
+    copyProduct: (id) => request('POST', `/api/products/${id}/copy`),
+    deleteProduct: (id) => request('DELETE', `/api/products/${id}`),
+    productsExport: (params) => request('GET', '/api/products/export-data?' + toQuery(params || {})),
+
     /* 缓存工具 */
     loadDict, loadTags, options, items, applyDictAdded, loadCustomerOptions, customerOptions, cache
   };
