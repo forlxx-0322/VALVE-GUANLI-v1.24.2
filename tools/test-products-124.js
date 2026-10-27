@@ -1,19 +1,21 @@
 /**
- * 产品分类模块 / 产品价目表专项（1.24 新增，结构 v11；1.24.1 起 v12）
+ * 产品分类模块 / 产品价目表专项（1.24 新增，结构 v11；1.24.1 起 v12；1.24.2 起 v13）
  *
  * 覆盖：
- *   · 结构：product_categories / products 两张表与 5 个索引、schema_version = 12
- *   · 分类种子：6 个一级（is_system=1，不可删）+ 23 个二级示例（is_system=0，可删可改）；均可改名/上下移
- *   · 分类：新增一级/子级、同级重名拒绝、改名、上移下移、有子分类/有产品拒绝删除、二级分类可删除
+ *   · 结构：product_categories / products 两张表与 5 个索引、schema_version = 13
+ *   · 分类种子：一级 6 个（is_system=1，不可删）+ 二级 22 个 + 三级 46 个（is_system=0，可删可改），
+ *     三级抽样「蝶阀 → 三偏心蝶阀 → 对夹 / 法兰 / 支耳」；均可改名/上下移
+ *   · 分类：新增一级/子级、同级重名拒绝、改名、上移下移、有子分类/有产品拒绝删除、
+ *           二级与三级自定义分类均可改名、可删除
  *   · 产品：CRUD、名称必填、分类必须存在、单价 ≥0 两位小数、折扣 0~100、
  *           货期非负整数、单位默认台、同分类不重名（跨分类可同名）、编号全库唯一
- *   · 筛选：分类（默认含子孙，可关）、关键字（名称/编号/备注）、材质、压力、启用
+ *   · 筛选：分类（默认含子孙，可关；一级筛选默认带出三级产品）、关键字（名称/编号/备注）、材质、压力、启用
  *   · 分页：page/pageSize、pageSize 上限 200
  *   · 折后价：0 / 50 / 100 折扣与小数折扣，net_price = round(price×(1−discount/100),2)
  *   · 复制：名称加「（副本）」、重名自动加序号、编号自动加后缀、sort 排末尾
- *   · 导出：category_path 形如「蝶阀 / 对夹式」、字段齐全、行数与筛选一致
+ *   · 导出：category_path 形如「蝶阀 / 三偏心蝶阀 / 对夹」、字段齐全、行数与筛选一致
  *   · 审计日志：product / product_category 的 create / update / delete / move / copy
- *   · 自清理：跑完不留测试产品与测试分类，种子分类 29 个（6 内置 + 23 自定义示例）原样保留
+ *   · 自清理：跑完不留测试产品与测试分类，种子分类 74 个（6 + 22 + 46）原样保留
  *
  * 前置：服务已启动（默认 127.0.0.1:8899，可用 CRM_TEST_BASE 覆盖）
  * 用法：node tools/test-products-124.js
@@ -54,7 +56,7 @@ function withDb(fn) {
 
 /**
  * 物理清掉本套件的残留（含上次失败留下的），只动名字带 TAG 的自定义分类与产品。
- * 6 个一级分类 is_system=1，永远不在这里被删；二级示例是自定义分类，但名字不带 TAG，也不会被误删。
+ * 6 个一级分类 is_system=1，永远不在这里被删；二级 / 三级是自定义分类，但名字不带 TAG，也不会被误删。
  */
 function purgeTag() {
   const db = new DatabaseSync(DB_FILE);
@@ -94,7 +96,7 @@ function findNode(nodes, id) {
 }
 
 (async () => {
-  console.log('=== 产品分类模块 / 产品价目表专项（1.24.1 · v12）===\n');
+  console.log('=== 产品分类模块 / 产品价目表专项（1.24.2 · v13）===\n');
   console.log(`测试标记：${TAG}\n`);
 
   /* ---------------- 0. 健康检查与预清理 ---------------- */
@@ -108,7 +110,7 @@ function findNode(nodes, id) {
 
   try { purgeTag(); } catch (e) { console.log('（预清理失败，继续：' + e.message + '）'); }
 
-  /* ---------------- 1. 结构（v12） ---------------- */
+  /* ---------------- 1. 结构（v13） ---------------- */
   const struct = withDb((db) => {
     const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
       .all().map((r) => r.name);
@@ -120,7 +122,7 @@ function findNode(nodes, id) {
     return { tables, catCols, prodCols, indexes, ver };
   });
 
-  check('结构版本已升到 v12', struct.ver === 12, `schema_version = ${struct.ver}`);
+  check('结构版本已升到 v13', struct.ver === 13, `schema_version = ${struct.ver}`);
   check('product_categories 与 products 两张表已建',
     struct.tables.includes('product_categories') && struct.tables.includes('products'),
     `当前 ${struct.tables.length} 张表（含 schema_version）`);
@@ -142,7 +144,7 @@ function findNode(nodes, id) {
     NEED_IDX.every((n) => struct.indexes.includes(n)),
     NEED_IDX.filter((n) => !struct.indexes.includes(n)).join('、') || NEED_IDX.join('、'));
 
-  /* ---------------- 2. 分类种子（6 个一级内置 + 23 个二级示例） ---------------- */
+  /* ---------------- 2. 分类种子（6 个一级 + 22 个二级 + 46 个三级 = 74） ---------------- */
   const tree0 = await api('GET', '/api/product-categories?tree=1');
   const roots = tree0.data || [];
   check('分类树接口可用且一级分类为 6 个',
@@ -154,26 +156,52 @@ function findNode(nodes, id) {
       && roots.every((x) => Number(x.is_system) === 1),
     roots.map((n) => `${n.name}(${n.is_system})`).join(' '));
 
-  const EXPECT_CHILDREN = {
-    蝶阀: ['对夹式', '法兰式', '凸耳式', '焊接式'],
-    球阀: ['浮动球', '固定球', '三通球', '全焊接'],
-    止回阀: ['旋启式', '升降式', '对夹式', '双瓣式'],
-    隔膜阀: ['堰式', '直通式', '衬氟'],
-    刀闸阀: ['手动', '气动', '电动', '浆液专用'],
-    执行器: ['气动', '电动', '电液联动', '附件']
+  /* 二级＝按结构 */
+  const EXPECT_SECOND = {
+    蝶阀: ['衬胶蝶阀', '双偏心蝶阀', '三偏心蝶阀'],
+    球阀: ['浮动球阀', '固定球阀', '三通球阀', '全焊接球阀'],
+    止回阀: ['旋启式止回阀', '升降式止回阀', '对夹式止回阀', '双瓣式止回阀'],
+    隔膜阀: ['堰式隔膜阀', '直通式隔膜阀', '衬氟隔膜阀'],
+    刀闸阀: ['手动刀闸阀', '气动刀闸阀', '电动刀闸阀', '浆液专用刀闸阀'],
+    执行器: ['气动执行器', '电动执行器', '电液联动执行器', '附件']
   };
-  const childTotal = roots.reduce((s, n) => s + (n.children || []).length, 0);
-  check('二级示例共 23 个且各一级的示例齐全',
-    childTotal === 23 && Object.entries(EXPECT_CHILDREN).every(([root, list]) => {
+  const secondTotal = roots.reduce((s, n) => s + (n.children || []).length, 0);
+  check('二级分类共 22 个且各一级按结构的分类齐全',
+    secondTotal === 22 && Object.entries(EXPECT_SECOND).every(([root, list]) => {
       const hit = roots.find((n) => n.name === root);
-      return hit && list.every((c) => (hit.children || []).some((x) => x.name === c));
+      return hit && list.length === (hit.children || []).length
+        && list.every((c) => (hit.children || []).some((x) => x.name === c));
     }),
-    `二级合计 ${childTotal} 个：` + roots.map((n) => `${n.name}-${(n.children || []).length}`).join(' '));
+    `二级合计 ${secondTotal} 个：` + roots.map((n) => `${n.name}-${(n.children || []).length}`).join(' '));
+
+  /* 三级＝按连接 / 法兰安装方式 */
+  const thirdTotal = roots.reduce((s, n) => s
+    + (n.children || []).reduce((t, c) => t + (c.children || []).length, 0), 0);
+  check('三级分类共 46 个（按连接 / 法兰安装方式）',
+    thirdTotal === 46,
+    `三级合计 ${thirdTotal} 个：` + roots.map((n) => `${n.name}-${(n.children || [])
+      .reduce((t, c) => t + (c.children || []).length, 0)}`).join(' '));
 
   const die = roots.find((n) => n.name === '蝶阀');
-  check('二级示例是自定义分类（is_system=0，可改名、可删除）',
-    (die.children || []).every((c) => Number(c.is_system) === 0),
-    `蝶阀下 ${die.children.length} 个二级全部 is_system=0`);
+  const sanBian = (die.children || []).find((c) => c.name === '三偏心蝶阀');
+  const sanLinks = (sanBian && sanBian.children || []).map((c) => c.name);
+  check('三级名称正确（蝶阀 → 三偏心蝶阀 → 对夹 / 法兰 / 支耳）',
+    sanLinks.join(',') === '对夹,法兰,支耳',
+    `三偏心蝶阀下：${sanLinks.join(' / ') || '（缺失）'}`);
+
+  const allSecond = roots.flatMap((n) => n.children || []);
+  const allThird = allSecond.flatMap((c) => c.children || []);
+  check('二级、三级都是自定义分类（is_system=0，可改名、可删除）',
+    allSecond.length === 22 && allThird.length === 46
+      && allSecond.every((c) => Number(c.is_system) === 0)
+      && allThird.every((c) => Number(c.is_system) === 0),
+    `二级 ${allSecond.length} 个 / 三级 ${allThird.length} 个，is_system 全为 0`);
+
+  const actuator = roots.find((n) => n.name === '执行器');
+  const fujian = (actuator.children || []).find((c) => c.name === '附件');
+  check('执行器 → 附件 没有三级（附件为叶子分类）',
+    !!fujian && (fujian.children || []).length === 0,
+    fujian ? `附件下 ${(fujian.children || []).length} 个三级` : '未找到附件');
 
   const sysDel = await api('DELETE', `/api/product-categories/${die.id}`);
   check('一级分类不可删除（400 SYSTEM_CATEGORY）',
@@ -189,6 +217,33 @@ function findNode(nodes, id) {
     tmpChild.ok && childDel.ok && dieAfter
       && !(dieAfter.children || []).some((c) => Number(c.id) === Number(tmpChild.data.id)),
     `新增 #${tmpChild.data && tmpChild.data.id} → 删除 HTTP ${childDel.status}`);
+
+  /* 三级分类可删除：建临时二级 → 其下建临时三级 → 删三级 → 树上消失 → 再删临时二级 */
+  const tmpParent = await createCat({ name: TAG + '三级父类', parent_id: die.id });
+  const tmpThird = tmpParent.ok
+    ? await createCat({ name: TAG + '三级可删', parent_id: tmpParent.data.id })
+    : { ok: false, data: null };
+  const thirdDel = tmpThird.ok
+    ? await api('DELETE', `/api/product-categories/${tmpThird.data.id}`)
+    : { ok: false, status: 0 };
+  const treeAfterThirdDel = await api('GET', '/api/product-categories?tree=1');
+  const parentAfterDel = tmpParent.ok ? findNode(treeAfterThirdDel.data, tmpParent.data.id) : null;
+  check('三级分类可删除（建临时三级 → 删除 → 树上消失）',
+    tmpParent.ok && tmpThird.ok && thirdDel.ok && parentAfterDel
+      && !(parentAfterDel.children || []).some((c) => Number(c.id) === Number(tmpThird.data.id)),
+    `临时二级 #${tmpParent.data && tmpParent.data.id} → 临时三级 #${tmpThird.data && tmpThird.data.id} → 删除 HTTP ${thirdDel.status}`);
+  if (tmpParent.ok) await api('DELETE', `/api/product-categories/${tmpParent.data.id}`);
+
+  /* 三级分类可改名（挑种子里的「蝶阀 / 三偏心蝶阀 / 对夹」，改完立刻改回） */
+  const sanJia = (sanBian.children || []).find((c) => c.name === '对夹');
+  const renThird = await api('PUT', `/api/product-categories/${sanJia.id}`, { name: '对夹' + TAG });
+  const backThird = renThird.ok
+    ? await api('PUT', `/api/product-categories/${sanJia.id}`, { name: '对夹' })
+    : { ok: false };
+  check('三级分类可改名（改名后名称生效，随后改回）',
+    renThird.ok && renThird.data.name === '对夹' + TAG
+      && backThird.ok && backThird.data.name === '对夹',
+    renThird.ok ? `改名返回 ${renThird.data.name}` : (renThird.message || '改名失败'));
 
   /* 内置分类可改名（改完立刻改回来，尽量不留痕） */
   const renamed = await api('PUT', `/api/product-categories/${die.id}`, { name: '蝶阀' + TAG });
@@ -512,15 +567,32 @@ function findNode(nodes, id) {
     !!expRow && expRow.category_path === TAG + '根分类 / ' + TAG + '子类甲改',
     expRow ? expRow.category_path : '—');
 
-  /* 再在内置分类下建一个产品，验证「蝶阀 / 对夹式」这种内置路径 */
+  /* 再在三级分类「蝶阀 / 三偏心蝶阀 / 对夹」下建产品，验证三级路径与含子孙筛选 */
   const p7 = await createProduct({
-    category_id: die.children[0].id, name: TAG + '内置分类产品', price: 10
+    category_id: sanJia.id, name: TAG + '三级分类产品', price: 10
   });
   const expDie = await api('GET', `/api/products/export-data?category_id=${die.id}&keyword=${encodeURIComponent(TAG)}`);
-  const dieRow = expDie.ok ? expDie.data.find((r) => r.name === TAG + '内置分类产品') : null;
-  check('内置分类路径导出为「蝶阀 / 对夹式」且行数正确（1 条）',
-    p7.ok && expDie.ok && expDie.data.length === 1 && dieRow && dieRow.category_path === '蝶阀 / 对夹式',
+  const dieRow = expDie.ok ? expDie.data.find((r) => r.name === TAG + '三级分类产品') : null;
+  check('三级分类路径导出为「蝶阀 / 三偏心蝶阀 / 对夹」且行数正确（1 条）',
+    p7.ok && expDie.ok && expDie.data.length === 1 && dieRow
+      && dieRow.category_path === '蝶阀 / 三偏心蝶阀 / 对夹',
     dieRow ? `${dieRow.category_path}（${expDie.data.length} 条）` : '未找到');
+
+  const listDie = await api('GET', `/api/products?category_id=${die.id}&keyword=${encodeURIComponent(TAG)}&pageSize=50`);
+  check('按一级分类筛选默认包含三级产品（含全部子孙）',
+    listDie.ok && listDie.data.total === 1
+      && listDie.data.list[0].category_path === '蝶阀 / 三偏心蝶阀 / 对夹',
+    listDie.ok ? `total=${listDie.data.total}，${(listDie.data.list[0] || {}).category_path}` : listDie.message);
+
+  const listSan = await api('GET', `/api/products?category_id=${sanBian.id}&keyword=${encodeURIComponent(TAG)}&pageSize=50`);
+  check('按二级分类筛选同样包含其三级产品',
+    listSan.ok && listSan.data.total === 1,
+    listSan.ok ? `total=${listSan.data.total}` : listSan.message);
+
+  const listDieOnly = await api('GET', `/api/products?category_id=${die.id}&include_children=false&keyword=${encodeURIComponent(TAG)}&pageSize=50`);
+  check('include_children=false 时不含三级产品（只查该分类本身）',
+    listDieOnly.ok && listDieOnly.data.total === 0,
+    listDieOnly.ok ? `total=${listDieOnly.data.total}` : listDieOnly.message);
 
   /* ---------------- 12. 审计日志 ---------------- */
   const prodLogs = await api('GET', `/api/logs?entity_type=product&q=${encodeURIComponent(TAG)}&pageSize=200`);
@@ -564,10 +636,14 @@ function findNode(nodes, id) {
     `${[...catActions2].join(' / ')}，共 ${catLogs2.data && catLogs2.data.total} 条`);
 
   const treeAfterClean = await api('GET', '/api/product-categories?tree=1');
-  check('删除后分类树恢复为 6 个一级 / 23 个二级',
-    treeAfterClean.ok && treeAfterClean.data.length === 6
-      && treeAfterClean.data.reduce((s, n) => s + (n.children || []).length, 0) === 23,
-    `一级 ${treeAfterClean.data && treeAfterClean.data.length}，二级 ${treeAfterClean.data && treeAfterClean.data.reduce((s, n) => s + (n.children || []).length, 0)}`);
+  const cleanRoots = treeAfterClean.data || [];
+  const cleanSecond = cleanRoots.reduce((s, n) => s + (n.children || []).length, 0);
+  const cleanThird = cleanRoots.reduce((s, n) => s
+    + (n.children || []).reduce((t, c) => t + (c.children || []).length, 0), 0);
+  check('删除后分类树恢复为 6 个一级 / 22 个二级 / 46 个三级（共 74）',
+    treeAfterClean.ok && cleanRoots.length === 6 && cleanSecond === 22 && cleanThird === 46
+      && cleanRoots.reduce((s, n) => s + Number(n.product_count || 0), 0) === 0,
+    `一级 ${cleanRoots.length}，二级 ${cleanSecond}，三级 ${cleanThird}，合计 ${cleanRoots.length + cleanSecond + cleanThird}`);
 
   /* 13.2 物理清理残留（软删除的测试产品、测试分类、测试日志） */
   let leftovers = { products: -1, categories: -1 };
@@ -587,11 +663,20 @@ function findNode(nodes, id) {
   const builtin = withDb((db) => ({
     total: db.prepare('SELECT COUNT(*) AS n FROM product_categories WHERE deleted_at IS NULL').get().n,
     sys: db.prepare('SELECT COUNT(*) AS n FROM product_categories WHERE deleted_at IS NULL AND is_system = 1').get().n,
-    roots: db.prepare('SELECT COUNT(*) AS n FROM product_categories WHERE deleted_at IS NULL AND parent_id IS NULL').get().n
+    sysChildren: db.prepare(`SELECT COUNT(*) AS n FROM product_categories
+      WHERE deleted_at IS NULL AND is_system = 1 AND parent_id IS NOT NULL`).get().n,
+    roots: db.prepare('SELECT COUNT(*) AS n FROM product_categories WHERE deleted_at IS NULL AND parent_id IS NULL').get().n,
+    second: db.prepare(`SELECT COUNT(*) AS n FROM product_categories c
+      WHERE c.deleted_at IS NULL AND c.parent_id IS NOT NULL
+        AND (SELECT p.parent_id FROM product_categories p WHERE p.id = c.parent_id) IS NULL`).get().n,
+    third: db.prepare(`SELECT COUNT(*) AS n FROM product_categories c
+      WHERE c.deleted_at IS NULL AND c.parent_id IS NOT NULL
+        AND (SELECT p.parent_id FROM product_categories p WHERE p.id = c.parent_id) IS NOT NULL`).get().n
   }));
-  check('种子分类 29 个（6 个一级内置 + 23 个二级自定义）原样保留',
-    builtin.total === 29 && builtin.sys === 6 && builtin.roots === 6,
-    `分类 ${builtin.total} 个（一级内置 ${builtin.sys} / 一级 ${builtin.roots}）`);
+  check('种子分类 74 个（6 个一级内置 + 22 个二级 + 46 个三级）原样保留，is_system=1 仅 6 个',
+    builtin.total === 74 && builtin.sys === 6 && builtin.sysChildren === 0
+      && builtin.roots === 6 && builtin.second === 22 && builtin.third === 46,
+    `分类 ${builtin.total} 个（一级内置 ${builtin.sys} / 一级 ${builtin.roots} / 二级 ${builtin.second} / 三级 ${builtin.third}）`);
 
   /* ---------------- 汇总 ---------------- */
   const pass = results.filter((r) => r.pass).length;

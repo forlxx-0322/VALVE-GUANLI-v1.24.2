@@ -16,7 +16,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
 
-const SCHEMA_VERSION = 12;
+const SCHEMA_VERSION = 13;
 
 /* ------------------------------------------------------------------ */
 /* 17 张表结构                                                          */
@@ -366,22 +366,94 @@ const FIXED_TAGS = [
 const FIXED_TAG_NAMES = FIXED_TAGS.map((t) => t.name);
 
 /* ------------------------------------------------------------------ */
-/* 产品分类种子（1.24 · v11；v12 起二级改为自定义）                       */
+/* 产品分类种子（1.24 · v11；1.24.2 · v13 起三级）                       */
 /*                                                                     */
-/* 6 个一级分类 is_system=1：可改名、可调排序，但**不可删除**（价目表的骨架）；*/
-/* 23 个二级示例 is_system=0（1.24.1 起）：就是普通自定义分类，             */
-/* 可改名、可挪位、**可删除**，用户也可以随时自己新增。                      */
+/* 层级：一级 = 阀门大类（固定 6 个，is_system=1，可改名不可删）            */
+/*       二级 = 按结构（is_system=0，可改名 / 挪位 / 删除）                 */
+/*       三级 = 按连接/法兰安装方式（同二级，自定义）                      */
+/*                                                                     */
+/* 结构：有子级的节点写成 { name, children: [...] }，叶子节点可写成字符串。  */
+/* 层级顺序即排序（同级序号 × 10），合计 6 + 22 + 46 = 74 个。              */
 /* 全新安装（fromVersion=0）与老库升级（v11 迁移）都走 seedProductCategories， */
 /* 仅在 product_categories 表为空时灌入，因此天然幂等。                   */
 /* ------------------------------------------------------------------ */
 
 const PRODUCT_CATEGORY_SEED = [
-  { name: '蝶阀', children: ['对夹式', '法兰式', '凸耳式', '焊接式'] },
-  { name: '球阀', children: ['浮动球', '固定球', '三通球', '全焊接'] },
-  { name: '止回阀', children: ['旋启式', '升降式', '对夹式', '双瓣式'] },
-  { name: '隔膜阀', children: ['堰式', '直通式', '衬氟'] },
-  { name: '刀闸阀', children: ['手动', '气动', '电动', '浆液专用'] },
-  { name: '执行器', children: ['气动', '电动', '电液联动', '附件'] }
+  {
+    name: '蝶阀',
+    children: [
+      { name: '衬胶蝶阀', children: ['对夹', '法兰', '支耳'] },
+      { name: '双偏心蝶阀', children: ['对夹', '法兰', '支耳'] },
+      { name: '三偏心蝶阀', children: ['对夹', '法兰', '支耳'] }
+    ]
+  },
+  {
+    name: '球阀',
+    children: [
+      { name: '浮动球阀', children: ['法兰', '螺纹', '焊接'] },
+      { name: '固定球阀', children: ['法兰', '螺纹', '焊接'] },
+      { name: '三通球阀', children: ['法兰', '螺纹', '焊接'] },
+      { name: '全焊接球阀', children: ['法兰', '焊接'] }
+    ]
+  },
+  {
+    name: '止回阀',
+    children: [
+      { name: '旋启式止回阀', children: ['法兰', '对夹', '焊接'] },
+      { name: '升降式止回阀', children: ['法兰', '螺纹'] },
+      { name: '对夹式止回阀', children: ['对夹', '法兰'] },
+      { name: '双瓣式止回阀', children: ['对夹', '法兰'] }
+    ]
+  },
+  {
+    name: '隔膜阀',
+    children: [
+      { name: '堰式隔膜阀', children: ['法兰', '螺纹'] },
+      { name: '直通式隔膜阀', children: ['法兰', '螺纹'] },
+      { name: '衬氟隔膜阀', children: ['法兰'] }
+    ]
+  },
+  {
+    name: '刀闸阀',
+    children: [
+      { name: '手动刀闸阀', children: ['法兰', '对夹'] },
+      { name: '气动刀闸阀', children: ['法兰', '对夹'] },
+      { name: '电动刀闸阀', children: ['法兰', '对夹'] },
+      { name: '浆液专用刀闸阀', children: ['法兰'] }
+    ]
+  },
+  {
+    name: '执行器',
+    children: [
+      { name: '气动执行器', children: ['法兰连接', '支架连接'] },
+      { name: '电动执行器', children: ['法兰连接', '支架连接'] },
+      { name: '电液联动执行器', children: ['法兰连接'] },
+      { name: '附件' }
+    ]
+  }
+];
+
+/** 种子节点名称（叶子可写成字符串） */
+function seedName(node) {
+  return typeof node === 'string' ? node : node.name;
+}
+
+/** 种子节点子级（叶子没有 children） */
+function seedChildren(node) {
+  return typeof node === 'string' ? [] : (node.children || []);
+}
+
+/**
+ * 1.24 的两级分类种子路径（v13 迁移据此归档旧二级示例）。
+ * 说明：执行器 / 附件 同时是 v13 新种子的二级节点，迁移里会跳过，不归档。
+ */
+const OLD_SECOND_LEVEL_PATHS = [
+  '蝶阀 / 对夹式', '蝶阀 / 法兰式', '蝶阀 / 凸耳式', '蝶阀 / 焊接式',
+  '球阀 / 浮动球', '球阀 / 固定球', '球阀 / 三通球', '球阀 / 全焊接',
+  '止回阀 / 旋启式', '止回阀 / 升降式', '止回阀 / 对夹式', '止回阀 / 双瓣式',
+  '隔膜阀 / 堰式', '隔膜阀 / 直通式', '隔膜阀 / 衬氟',
+  '刀闸阀 / 手动', '刀闸阀 / 气动', '刀闸阀 / 电动', '刀闸阀 / 浆液专用',
+  '执行器 / 气动', '执行器 / 电动', '执行器 / 电液联动', '执行器 / 附件'
 ];
 
 /* ------------------------------------------------------------------ */
@@ -1090,6 +1162,109 @@ const MIGRATIONS = [
         WHERE parent_id IS NOT NULL AND is_system = 1`).run(now());
       return `二级分类改为自定义 ${before} 个`;
     }
+  },
+
+  /* v12 → v13：分类扩为三级（1.24.2）
+   *
+   * 目标结构：一级＝阀门大类（6 个，固定）；二级＝按结构（22 个）；三级＝按连接/
+   * 法兰安装方式（46 个），合计 74 个。二三级都是自定义分类（is_system=0）。
+   *
+   * 做两件事，全部幂等、可重入：
+   *   1. 按种子路径逐层「缺则补」：一级按名称找，缺则插入；二级在对应一级下按名称
+   *      找，缺则插入；三级同理。sort = 同级种子序号 × 10。一级补齐时确保 is_system=1。
+   *   2. 归档 1.24 的旧二级示例（23 条旧路径，如「蝶阀 / 对夹式」）：只软删除
+   *      **名字与父级都匹配旧种子**、**没有产品、没有未删除子分类**的行。
+   *      - 用户改过名的 → 路径不匹配，保留；
+   *      - 已挂产品的 → 保留（不硬删，产品照常可查）；
+   *      - 加了子分类的 → 保留（避免连带丢失用户内容）；
+   *      - 「执行器 / 附件」同时是新种子的二级节点 → 不在归档范围。
+   *
+   * 空库/纯种子库（v12 的 6 + 23）迁移完成后：6 + 22 + 46 = 74 个存活分类。 */
+  {
+    version: 13,
+    note: '产品分类扩为三级（6 / 22 / 46 = 74）：补齐二级与三级，归档 1.24 的旧二级示例',
+    run(db) {
+      const ts = now();
+      const added = { root: 0, second: 0, third: 0 };
+      const find = db.prepare(`SELECT id, is_system FROM product_categories
+        WHERE deleted_at IS NULL AND parent_id IS ? AND name = ? LIMIT 1`);
+      const ins = db.prepare(`INSERT INTO product_categories
+        (parent_id, name, sort, is_system, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)`);
+      const markSystem = db.prepare(
+        'UPDATE product_categories SET is_system = 1, updated_at = ? WHERE id = ?'
+      );
+
+      /* ---------- 1. 递归补齐种子路径 ---------- */
+      const walk = (nodes, parentId, depth) => {
+        nodes.forEach((node, i) => {
+          const name = seedName(node);
+          const hit = find.get(parentId, name);
+          let id;
+          if (hit) {
+            id = Number(hit.id);
+            /* 一级必须是系统分类（老库里理论上是 1，这里兜底，幂等） */
+            if (depth === 0 && Number(hit.is_system) !== 1) markSystem.run(ts, id);
+          } else {
+            const r = ins.run(parentId, name, (i + 1) * 10, depth === 0 ? 1 : 0, ts, ts);
+            id = Number(r.lastInsertRowid);
+            if (depth === 0) added.root++;
+            else if (depth === 1) added.second++;
+            else added.third++;
+          }
+          const children = seedChildren(node);
+          if (children.length) walk(children, id, depth + 1);
+        });
+      };
+      walk(PRODUCT_CATEGORY_SEED, null, 0);
+
+      /* ---------- 2. 归档旧二级示例（软删除） ---------- */
+      const newPaths = new Set();
+      for (const root of PRODUCT_CATEGORY_SEED) {
+        for (const child of seedChildren(root)) {
+          newPaths.add(`${root.name} / ${seedName(child)}`);
+        }
+      }
+      const findOldPath = db.prepare(`SELECT c.id
+        FROM product_categories c
+        JOIN product_categories p ON p.id = c.parent_id
+        WHERE c.deleted_at IS NULL AND p.deleted_at IS NULL AND p.parent_id IS NULL
+          AND p.name = ? AND c.name = ?`);
+      const countProducts = db.prepare(`SELECT COUNT(*) AS n FROM products
+        WHERE deleted_at IS NULL AND category_id = ?`);
+      const countChildren = db.prepare(`SELECT COUNT(*) AS n FROM product_categories
+        WHERE deleted_at IS NULL AND parent_id = ?`);
+      const softDelete = db.prepare(
+        'UPDATE product_categories SET deleted_at = ?, updated_at = ? WHERE id = ?'
+      );
+
+      let archived = 0;
+      let kept = 0;
+      for (const p of OLD_SECOND_LEVEL_PATHS) {
+        if (newPaths.has(p)) continue;              // 新种子沿用的节点（执行器 / 附件）
+        const [rootName, catName] = p.split(' / ');
+        const row = findOldPath.get(rootName, catName);
+        if (!row) continue;                          // 改过名 / 已删：保留现状
+        if (countProducts.get(row.id).n > 0 || countChildren.get(row.id).n > 0) {
+          kept++;                                    // 有产品或子级：保留，不硬删
+          continue;
+        }
+        softDelete.run(ts, ts, row.id);
+        archived++;
+      }
+
+      const total = db.prepare(
+        'SELECT COUNT(*) AS n FROM product_categories WHERE deleted_at IS NULL'
+      ).get().n;
+
+      const parts = [];
+      if (added.root) parts.push(`补一级 ${added.root} 个`);
+      parts.push(`补二级 ${added.second} 个`, `补三级 ${added.third} 个`,
+        `归档旧二级示例 ${archived} 个`);
+      if (kept) parts.push(`保留有产品或子级的旧示例 ${kept} 个`);
+      parts.push(`当前存活分类 ${total} 个`);
+      return parts.join('、');
+    }
   }
 ];
 
@@ -1420,32 +1595,32 @@ function seedRegion(db) {
  *   - 老库升级 v10 → v11 也走同一函数，保证两边的内置分类完全一致。
  * 幂等：只要表里已有任何一行（含软删除的）就整体跳过，绝不会重复插入。
  *
- * @returns {number} 本次灌入的分类条数（6 个一级 + 23 个二级 = 29）
+ * 1.24.2 起种子是三级嵌套（一级 6 / 二级 22 / 三级 46 = 74 个），
+ * 递归插入；一级 is_system=1（固定不可删），二级及以下 is_system=0（自定义）。
+ *
+ * @returns {number} 本次灌入的分类条数（74）
  */
 function seedProductCategories(db) {
   const n = db.prepare('SELECT COUNT(*) AS n FROM product_categories').get().n;
   if (n > 0) return 0;
 
   const ts = now();
-  const insRoot = db.prepare(`INSERT INTO product_categories
+  const insert = db.prepare(`INSERT INTO product_categories
     (parent_id, name, sort, is_system, created_at, updated_at)
-    VALUES (?, ?, ?, 1, ?, ?)`);
-  const insChild = db.prepare(`INSERT INTO product_categories
-    (parent_id, name, sort, is_system, created_at, updated_at)
-    VALUES (?, ?, ?, 0, ?, ?)`);
+    VALUES (?, ?, ?, ?, ?, ?)`);
   let added = 0;
   db.exec('BEGIN');
   try {
-    PRODUCT_CATEGORY_SEED.forEach((root, i) => {
-      const r = insRoot.run(null, root.name, (i + 1) * 10, ts, ts);
-      const parentId = Number(r.lastInsertRowid);
-      added++;
-      root.children.forEach((child, j) => {
-        /* 二级示例是普通自定义分类：用户想删就删、想改就改 */
-        insChild.run(parentId, child, (j + 1) * 10, ts, ts);
+    const walk = (nodes, parentId, depth) => {
+      nodes.forEach((node, i) => {
+        const r = insert.run(parentId, seedName(node), (i + 1) * 10,
+          depth === 0 ? 1 : 0, ts, ts);
         added++;
+        const children = seedChildren(node);
+        if (children.length) walk(children, Number(r.lastInsertRowid), depth + 1);
       });
-    });
+    };
+    walk(PRODUCT_CATEGORY_SEED, null, 0);
     db.exec('COMMIT');
   } catch (e) {
     db.exec('ROLLBACK');

@@ -1,9 +1,10 @@
 /**
- * 产品价目表服务（1.24 新增）
+ * 产品价目表服务（1.24 新增；1.24.2 起分类三级）
  *
  * 两块内容：
  *   1. 分类树 product_categories —— 任意层级；6 个一级分类 is_system=1（可改名/挪位，不可删），
- *      二级及以下都是自定义分类（is_system=0），可改名、可删除
+ *      二级（按结构）、三级（按连接/法兰安装方式）及以下都是自定义分类（is_system=0），
+ *      可改名、可删除；categoryWithDescendants 按树递归，三级产品在按一级筛选时也会带出
  *   2. 产品 products —— 单价 / 货期 / 材质 / 压力等级 / 设定折扣 / 编号
  *
  * 口径与约定：
@@ -275,7 +276,7 @@ function removeCategory(db, id) {
   const cur = categoryRow(db, id);
   if (!cur) bad(404, 'NOT_FOUND', '产品分类不存在或已删除');
   if (Number(cur.is_system) === 1) {
-    bad(400, 'SYSTEM_CATEGORY', '一级分类不可删除（可改名、可调整排序）；二级分类可自由删除');
+    bad(400, 'SYSTEM_CATEGORY', '一级分类不可删除（可改名、可调整排序）；二级及以下分类可自由删除');
   }
 
   const children = db.prepare(`SELECT COUNT(*) AS n FROM product_categories
@@ -300,7 +301,7 @@ function removeCategory(db, id) {
 /* 产品                                                                */
 /* ================================================================== */
 
-/** 分类 id → "蝶阀 / 对夹式" 全路径（含已软删除的分类，历史产品也能显示路径） */
+/** 分类 id → "蝶阀 / 三偏心蝶阀 / 对夹" 全路径（含已软删除的分类，历史产品也能显示路径） */
 function loadCategoryPaths(db) {
   const rows = plainAll(db.prepare('SELECT id, parent_id, name FROM product_categories').all());
   const byId = new Map(rows.map((r) => [Number(r.id), r]));
@@ -657,7 +658,7 @@ function copy(db, id) {
 
 /**
  * 导出数据（扁平，供前端 SheetJS 生成 xlsx）。
- * category_path 形如「蝶阀 / 对夹式」；不含软删除与分类已删的产品。
+ * category_path 形如「蝶阀 / 三偏心蝶阀 / 对夹」；不含软删除与分类已删的产品。
  */
 function exportData(db, q) {
   const { whereSql, params } = buildWhere(db, q);

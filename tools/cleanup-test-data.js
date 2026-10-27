@@ -82,22 +82,30 @@ if (process.argv.includes('--all')) {
       n[t] = db.prepare(`DELETE FROM ${t}`).run().changes;
     }
     /* 清掉测试期间新增的自定义字典项；
-     * 产品分类只删「用户自己建的」：6 个一级内置 + 23 个种子示例（1.24.1 起是自定义分类）都保留，
-     * 避免清理后价目表只剩 6 个空骨架。 */
+     * 产品分类只删「用户自己建的」：6 个一级内置 + 22 个二级 + 46 个三级（1.24.2 起共 74 个）
+     * 都保留，避免清理后价目表只剩空骨架。 */
     n.dict = db.prepare('DELETE FROM dict WHERE is_system = 0').run().changes;
     const seed = require('../server/db').PRODUCT_CATEGORY_SEED || [];
+    /* 递归展开种子（叶子是字符串，有下级的节点是 { name, children }） */
     const seedNames = [];
-    for (const root of seed) {
-      seedNames.push(root.name);
-      for (const child of root.children || []) seedNames.push(child);
-    }
-    const marks = seedNames.map(() => '?').join(',');
+    const flatten = (nodes) => {
+      for (const node of nodes) {
+        const name = typeof node === 'string' ? node : node.name;
+        seedNames.push(name);
+        if (typeof node !== 'string' && node.children && node.children.length) flatten(node.children);
+      }
+    };
+    flatten(seed);
+    /* 三级里「对夹 / 法兰 / 支耳…」会重复出现，SQL 的 NOT IN 去重后执行即可 */
+    const seedUnique = [...new Set(seedNames)];
+    const marks = seedUnique.map(() => '?').join(',');
     n.product_categories = db.prepare(
       `DELETE FROM product_categories WHERE is_system = 0 AND name NOT IN (${marks})`
-    ).run(...seedNames).changes;
+    ).run(...seedUnique).changes;
     db.exec('COMMIT');
     console.log('已清空全部业务数据：');
     for (const [t, c] of Object.entries(n)) console.log(`  ${t}\t${c} 条`);
+    console.log(`（产品分类种子保护名单：递归展开 ${seedNames.length} 个节点 / 去重后 ${seedUnique.length} 个名称）`);
   } catch (e) {
     db.exec('ROLLBACK');
     console.error('清理失败，已回滚：', e.message);

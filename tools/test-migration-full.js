@@ -4,7 +4,8 @@
  * 与 test-migration.js 的区别：
  *   - test-migration.js 专测 v1 → 最新版本的完整升级链路
  *   - 本文件覆盖**迁移到最新版本**的完整链路，且版本无关（目标取自 SCHEMA_VERSION），
- *     并逐版核对各版本的产物（v8 删表、v9 costs、v10 客户精简与一客户一项目、v11 产品价目表）
+ *     并逐版核对各版本的产物（v8 删表、v9 costs、v10 客户精简与一客户一项目、v11 产品价目表、
+ *     v12 二级分类自定义、v13 三级分类 6 / 22 / 46 = 74）
  *
  * 起点自适应（重要）：
  *   全套件连跑时，运行器会先清库重建为**最新版本**，此时真实库没有"旧版本"可迁移。
@@ -60,6 +61,58 @@ function makeLegacyDb(file) {
   ]);
   markVersion(db, 1);
   db.close();
+}
+
+/** 1.24 / v12 的两级分类种子（6 + 23），用来构造升级前的老库 */
+const OLD_TWO_LEVEL_SEED = [
+  ['蝶阀', ['对夹式', '法兰式', '凸耳式', '焊接式']],
+  ['球阀', ['浮动球', '固定球', '三通球', '全焊接']],
+  ['止回阀', ['旋启式', '升降式', '对夹式', '双瓣式']],
+  ['隔膜阀', ['堰式', '直通式', '衬氟']],
+  ['刀闸阀', ['手动', '气动', '电动', '浆液专用']],
+  ['执行器', ['气动', '电动', '电液联动', '附件']]
+];
+/** 1.24 的 23 条二级示例路径，以及其中未被新种子沿用的 22 条 */
+const OLD_EXAMPLE_PATHS = OLD_TWO_LEVEL_SEED.flatMap(([root, kids]) => kids.map((k) => `${root} / ${k}`));
+const OLD_ONLY_PATHS = OLD_EXAMPLE_PATHS.filter((p) => p !== '执行器 / 附件');
+
+/**
+ * 造一个 v12 老库：先按当前代码建库拿到完整表结构，再把分类还原成 v12 的
+ * 6 + 23 两级种子、版本号降到 12，并可按需模拟用户改动（改名 / 加产品 / 自建分类）。
+ */
+function makeV12Db(dbMod, tmp, mutate) {
+  const dataDir = path.join(tmp, 'data');
+  const dbFile = path.join(dataDir, 'crm.db');
+  fs.mkdirSync(path.join(dataDir, 'backups'), { recursive: true });
+  const boot = dbMod.initDatabase({ dataDir, dbFile, backupDir: path.join(dataDir, 'backups') });
+  dbMod.closeDatabase(boot.db);
+
+  const db = new DatabaseSync(dbFile);
+  const ts = new Date().toISOString();
+  db.exec('DELETE FROM products; DELETE FROM product_categories;');
+  const ins = db.prepare(`INSERT INTO product_categories
+    (parent_id, name, sort, is_system, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`);
+  const ids = {};
+  for (const [i, [name, kids]] of OLD_TWO_LEVEL_SEED.entries()) {
+    const r = ins.run(null, name, (i + 1) * 10, 1, ts, ts);
+    const pid = Number(r.lastInsertRowid);
+    ids[name] = pid;
+    kids.forEach((k, j) => ins.run(pid, k, (j + 1) * 10, 0, ts, ts));
+  }
+  if (mutate) mutate(db, ids, ts);
+  db.prepare('DELETE FROM schema_version WHERE version >= 13').run();
+  db.prepare(`INSERT OR REPLACE INTO schema_version (version, applied_at, note)
+    VALUES (12, ?, 'v12 fixture')`).run(ts);
+  db.close();
+  return { dataDir, dbFile };
+}
+
+function insertProduct(db, categoryId, name, code, ts) {
+  db.prepare(`INSERT INTO products
+    (category_id, name, code, unit, price, lead_time_days, body_material,
+     pressure_rating, discount, remark, enabled, sort, created_at, updated_at)
+    VALUES (?, ?, ?, '台', 100, 3, '', '', 0, '', 1, 10, ?, ?)`)
+    .run(categoryId, name, code, ts, ts);
 }
 
 (async () => {
@@ -227,16 +280,44 @@ function makeLegacyDb(file) {
 
     const rootCount = after.prepare(`SELECT COUNT(*) AS n FROM product_categories
       WHERE deleted_at IS NULL AND is_system = 1 AND parent_id IS NULL`).get().n;
-    const childTotal = after.prepare(`SELECT COUNT(*) AS n FROM product_categories
-      WHERE deleted_at IS NULL AND parent_id IS NOT NULL`).get().n;
+    const secondTotal = after.prepare(`SELECT COUNT(*) AS n FROM product_categories c
+      WHERE c.deleted_at IS NULL AND c.parent_id IS NOT NULL
+        AND (SELECT p.parent_id FROM product_categories p WHERE p.id = c.parent_id) IS NULL`).get().n;
+    const thirdTotal = after.prepare(`SELECT COUNT(*) AS n FROM product_categories c
+      WHERE c.deleted_at IS NULL AND c.parent_id IS NOT NULL
+        AND (SELECT p.parent_id FROM product_categories p WHERE p.id = c.parent_id) IS NOT NULL`).get().n;
+    const totalCats = after.prepare(
+      'SELECT COUNT(*) AS n FROM product_categories WHERE deleted_at IS NULL'
+    ).get().n;
+    const systemCats = after.prepare(`SELECT COUNT(*) AS n FROM product_categories
+      WHERE deleted_at IS NULL AND is_system = 1`).get().n;
     const systemChildren = after.prepare(`SELECT COUNT(*) AS n FROM product_categories
       WHERE deleted_at IS NULL AND is_system = 1 AND parent_id IS NOT NULL`).get().n;
+    const maxDepth = after.prepare(`WITH RECURSIVE d(id, depth) AS (
+        SELECT id, 1 FROM product_categories WHERE deleted_at IS NULL AND parent_id IS NULL
+        UNION ALL
+        SELECT c.id, d.depth + 1 FROM product_categories c JOIN d ON c.parent_id = d.id
+        WHERE c.deleted_at IS NULL
+      ) SELECT MAX(depth) AS m FROM d`).get().m;
     const rootNames = after.prepare(`SELECT name FROM product_categories
       WHERE deleted_at IS NULL AND parent_id IS NULL ORDER BY sort, id`).all().map((r) => r.name);
-    check('v11 分类种子：一级 6 个（内置）+ 二级 23 个（自定义），名称正确',
-      rootCount === 6 && childTotal === 23 && systemChildren === 0
+    check('v13 分类扩为三级：一级 6 个（内置）+ 二级 22 + 三级 46 = 74，最大深度 3',
+      rootCount === 6 && secondTotal === 22 && thirdTotal === 46 && totalCats === 74
+        && systemCats === 6 && systemChildren === 0 && maxDepth === 3
         && ['蝶阀', '球阀', '止回阀', '隔膜阀', '刀闸阀', '执行器'].every((n) => rootNames.includes(n)),
-      `一级 ${rootCount}（${rootNames.join(' / ')}），二级 ${childTotal}，其中系统分类 ${systemChildren}`);
+      `一级 ${rootCount}（${rootNames.join(' / ')}），二级 ${secondTotal}，三级 ${thirdTotal}，`
+        + `合计 ${totalCats}，is_system=1 共 ${systemCats}，最大深度 ${maxDepth}`);
+
+    /* 三级抽样：蝶阀 → 三偏心蝶阀 → 对夹 / 法兰 / 支耳 */
+    const dieRow = after.prepare(`SELECT id FROM product_categories
+      WHERE deleted_at IS NULL AND parent_id IS NULL AND name = '蝶阀'`).get();
+    const sanRow = dieRow && after.prepare(`SELECT id FROM product_categories
+      WHERE deleted_at IS NULL AND parent_id = ? AND name = '三偏心蝶阀'`).get(dieRow.id);
+    const sanLinks = sanRow ? after.prepare(`SELECT name FROM product_categories
+      WHERE deleted_at IS NULL AND parent_id = ? ORDER BY sort, id`).all(sanRow.id).map((r) => r.name) : [];
+    check('v13 三级名称正确（蝶阀 → 三偏心蝶阀 → 对夹 / 法兰 / 支耳）',
+      sanLinks.join(',') === '对夹,法兰,支耳',
+      `三偏心蝶阀下：${sanLinks.join(' / ') || '（缺失）'}`);
 
     const prodIdx = after.prepare(
       "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name IN ('product_categories','products')"
@@ -252,17 +333,29 @@ function makeLegacyDb(file) {
       prodCount === 0 && countsAfter.customers === countsBefore.customers,
       `products ${prodCount} 条；客户 ${countsBefore.customers} → ${countsAfter.customers}`);
 
-    /* 迁移后旧库再打开一次也不应重复灌分类（幂等） —— 由下面「重复启动」统一验证 */
-    const catsAfterFirst = after.prepare(
-      'SELECT COUNT(*) AS n FROM product_categories WHERE deleted_at IS NULL'
-    ).get().n;
-    check('v11 分类数量正确（29 个，不多不少）', catsAfterFirst === 29,
-      `分类 ${catsAfterFirst} 个`);
-
     /* ---------- v12：二级分类降级为自定义（可删除） ---------- */
-    check('v12 二级分类已改为自定义（is_system=0，可删除），一级仍为系统分类',
-      systemChildren === 0 && rootCount === 6 && childTotal === 23,
-      `一级系统 ${rootCount} / 二级自定义 ${childTotal} / 二级系统 ${systemChildren}`);
+    check('v12 二级/三级分类均为自定义（is_system=0，可删除），一级仍为系统分类',
+      systemChildren === 0 && rootCount === 6 && totalCats === 74,
+      `一级系统 ${rootCount} / 非一级系统 ${systemChildren} / 分类合计 ${totalCats}`);
+
+    /* ---------- v13：归档 1.24 的旧二级示例 ----------
+     * 旧种子共 23 条二级路径，其中「执行器 / 附件」被 1.24.2 的新三级结构沿用，
+     * 因此真正需要归档的是另外 22 条旧路径；附件保留为新种子的二级节点。 */
+    const livePairs = new Set(after.prepare(`SELECT p.name || ' / ' || c.name AS path
+      FROM product_categories c JOIN product_categories p ON p.id = c.parent_id
+      WHERE c.deleted_at IS NULL AND p.deleted_at IS NULL AND p.parent_id IS NULL`).all()
+      .map((r) => r.path));
+    const oldLeft = OLD_ONLY_PATHS.filter((p) => livePairs.has(p));
+    check('v13 已归档 1.24 的 22 条旧二级示例路径（旧名单里仅「执行器 / 附件」被新结构沿用）',
+      oldLeft.length === 0,
+      oldLeft.length ? `仍在：${oldLeft.join('、')}` : `22 条旧路径均已消失；附件保留=${livePairs.has('执行器 / 附件')}`);
+    check('v13 旧 23 条示例中的「执行器 / 附件」作为新种子保留（且只有 1 个）',
+      livePairs.has('执行器 / 附件')
+        && after.prepare(`SELECT COUNT(*) AS n FROM product_categories c
+            JOIN product_categories p ON p.id = c.parent_id
+            WHERE c.deleted_at IS NULL AND p.deleted_at IS NULL
+              AND p.name = '执行器' AND c.name = '附件'`).get().n === 1,
+      '附件（无三级，自定义分类）存在且唯一');
   }
 
   /* ---------- v2/v3 的列变更 ---------- */
@@ -356,8 +449,8 @@ function makeLegacyDb(file) {
     const catsAfterSecond = info2.db.prepare(
       'SELECT COUNT(*) AS n FROM product_categories WHERE deleted_at IS NULL'
     ).get().n;
-    check('重复启动不会重复灌入内置分类（仍为 29 个）',
-      catsAfterSecond === 29, `分类 ${catsAfterSecond} 个`);
+    check('重复启动不会重复灌入内置分类（仍为 74 个）',
+      catsAfterSecond === 74, `分类 ${catsAfterSecond} 个`);
   }
 
   /* ---------- 迁移前自动备份 ---------- */
@@ -366,6 +459,138 @@ function makeLegacyDb(file) {
     : [];
   check('迁移前自动做了备份（可回退）', backups.length >= 1,
     backups.length ? backups.join('、') : '未发现备份');
+
+  /* ================================================================ */
+  /* v12 → v13 专项：带 1.24 旧 23 个二级示例的库                       */
+  /* （全链 v1 → v13 时 v11 已直接灌入新种子，这里单独构造 v12 现场）     */
+  /* ================================================================ */
+  const tmpV12a = fs.mkdtempSync(path.join(os.tmpdir(), 'migv13a-'));
+  let dbV12a = null;
+  try {
+    const fx = makeV12Db(dbMod, tmpV12a, null);
+    const mig = dbMod.initDatabase({
+      dataDir: fx.dataDir, dbFile: fx.dbFile, backupDir: path.join(fx.dataDir, 'backups')
+    });
+    dbV12a = mig.db;
+    const n = (sql) => dbV12a.prepare(sql).get().n;
+    const live = n('SELECT COUNT(*) AS n FROM product_categories WHERE deleted_at IS NULL');
+    const roots = n('SELECT COUNT(*) AS n FROM product_categories WHERE deleted_at IS NULL AND parent_id IS NULL');
+    const second = n(`SELECT COUNT(*) AS n FROM product_categories c WHERE c.deleted_at IS NULL
+      AND c.parent_id IS NOT NULL AND (SELECT p.parent_id FROM product_categories p WHERE p.id = c.parent_id) IS NULL`);
+    const third = n(`SELECT COUNT(*) AS n FROM product_categories c WHERE c.deleted_at IS NULL
+      AND c.parent_id IS NOT NULL AND (SELECT p.parent_id FROM product_categories p WHERE p.id = c.parent_id) IS NOT NULL`);
+    const sys = n('SELECT COUNT(*) AS n FROM product_categories WHERE deleted_at IS NULL AND is_system = 1');
+    const sysChildren = n(`SELECT COUNT(*) AS n FROM product_categories
+      WHERE deleted_at IS NULL AND is_system = 1 AND parent_id IS NOT NULL`);
+    const maxDepth = dbV12a.prepare(`WITH RECURSIVE d(id, depth) AS (
+        SELECT id, 1 FROM product_categories WHERE deleted_at IS NULL AND parent_id IS NULL
+        UNION ALL
+        SELECT c.id, d.depth + 1 FROM product_categories c JOIN d ON c.parent_id = d.id
+        WHERE c.deleted_at IS NULL
+      ) SELECT MAX(depth) AS m FROM d`).get().m;
+    check('v13 从 v12 纯种子库升级：执行 1 步迁移，分类 74 个 / 系统 6 / 深度 3',
+      mig.fromVersion === 12 && mig.schemaVersion === 13 && mig.migrations.length === 1
+        && live === 74 && roots === 6 && second === 22 && third === 46
+        && sys === 6 && sysChildren === 0 && maxDepth === 3,
+      `v${mig.fromVersion} → v${mig.schemaVersion}（${mig.migrations.length} 步）；`
+        + `一级 ${roots} / 二级 ${second} / 三级 ${third} / 系统 ${sys} / 深度 ${maxDepth}`);
+
+    const livePairs = new Set(dbV12a.prepare(`SELECT p.name || ' / ' || c.name AS path
+      FROM product_categories c JOIN product_categories p ON p.id = c.parent_id
+      WHERE c.deleted_at IS NULL AND p.deleted_at IS NULL AND p.parent_id IS NULL`).all()
+      .map((r) => r.path));
+    const oldLeft = OLD_ONLY_PATHS.filter((p) => livePairs.has(p));
+    const tomb = n('SELECT COUNT(*) AS n FROM product_categories WHERE deleted_at IS NOT NULL');
+    check('v13 旧 23 个示例已不在（22 条旧路径归档，「附件」由新种子沿用）',
+      oldLeft.length === 0 && livePairs.has('执行器 / 附件') && tomb === 22,
+      oldLeft.length ? `仍在：${oldLeft.join('、')}` : `22 条旧路径消失，附件保留，软删除 ${tomb} 条`);
+
+    dbMod.closeDatabase(dbV12a);
+    dbV12a = null;
+  } catch (e) {
+    check('v13 从 v12 纯种子库升级（专项）', false, e.message);
+  } finally {
+    if (dbV12a) { try { dbMod.closeDatabase(dbV12a); } catch (_) { /* 忽略 */ } }
+    try { fs.rmSync(tmpV12a, { recursive: true, force: true }); } catch (_) { /* 忽略 */ }
+  }
+
+  /* ---------- v12 老库 + 用户改动：改名 / 已有产品 / 自建分类 ---------- */
+  const tmpV12b = fs.mkdtempSync(path.join(os.tmpdir(), 'migv13b-'));
+  let dbV12b = null;
+  try {
+    const fx = makeV12Db(dbMod, tmpV12b, (db, ids, ts) => {
+      const jia = db.prepare("SELECT id FROM product_categories WHERE parent_id = ? AND name = '对夹式'").get(ids['蝶阀']);
+      db.prepare('UPDATE product_categories SET name = ? WHERE id = ?').run('夹套式（改名）', jia.id);
+      const fa = db.prepare("SELECT id FROM product_categories WHERE parent_id = ? AND name = '法兰式'").get(ids['蝶阀']);
+      insertProduct(db, fa.id, '老产品 法兰式', 'OLD-1', ts);
+      const fj = db.prepare("SELECT id FROM product_categories WHERE parent_id = ? AND name = '附件'").get(ids['执行器']);
+      insertProduct(db, fj.id, '老产品 附件', 'OLD-2', ts);
+      const ur = db.prepare(`INSERT INTO product_categories
+        (parent_id, name, sort, is_system, created_at, updated_at) VALUES (NULL, ?, 70, 0, ?, ?)`)
+        .run('用户自定义大类', ts, ts);
+      db.prepare(`INSERT INTO product_categories
+        (parent_id, name, sort, is_system, created_at, updated_at) VALUES (?, ?, 10, 0, ?, ?)`)
+        .run(Number(ur.lastInsertRowid), '用户自定义子类', ts, ts);
+      db.prepare(`INSERT INTO customers (name, short_name, industry, created_at, updated_at)
+        VALUES ('迁移测试客户V12', 'V12', '石油', ?, ?)`).run(ts, ts);
+    });
+    const mig = dbMod.initDatabase({
+      dataDir: fx.dataDir, dbFile: fx.dbFile, backupDir: path.join(fx.dataDir, 'backups')
+    });
+    dbV12b = mig.db;
+    const n = (sql) => dbV12b.prepare(sql).get().n;
+    const live = n('SELECT COUNT(*) AS n FROM product_categories WHERE deleted_at IS NULL');
+    const roots = n('SELECT COUNT(*) AS n FROM product_categories WHERE deleted_at IS NULL AND parent_id IS NULL');
+    const second = n(`SELECT COUNT(*) AS n FROM product_categories c WHERE c.deleted_at IS NULL
+      AND c.parent_id IS NOT NULL AND (SELECT p.parent_id FROM product_categories p WHERE p.id = c.parent_id) IS NULL`);
+    const third = n(`SELECT COUNT(*) AS n FROM product_categories c WHERE c.deleted_at IS NULL
+      AND c.parent_id IS NOT NULL AND (SELECT p.parent_id FROM product_categories p WHERE p.id = c.parent_id) IS NOT NULL`);
+    const sys = n('SELECT COUNT(*) AS n FROM product_categories WHERE deleted_at IS NULL AND is_system = 1');
+    const tomb = n('SELECT COUNT(*) AS n FROM product_categories WHERE deleted_at IS NOT NULL');
+    const products = n('SELECT COUNT(*) AS n FROM products WHERE deleted_at IS NULL');
+    const customers = n('SELECT COUNT(*) AS n FROM customers WHERE deleted_at IS NULL');
+    const renamedKept = n(`SELECT COUNT(*) AS n FROM product_categories
+      WHERE deleted_at IS NULL AND name = '夹套式（改名）'`);
+    const productCatKept = n(`SELECT COUNT(*) AS n FROM product_categories c
+      WHERE c.deleted_at IS NULL AND c.name = '法兰式'
+        AND EXISTS (SELECT 1 FROM products p WHERE p.deleted_at IS NULL AND p.category_id = c.id)`);
+    const userKept = n(`SELECT COUNT(*) AS n FROM product_categories
+      WHERE deleted_at IS NULL AND name IN ('用户自定义大类', '用户自定义子类')`);
+    const fujian = n(`SELECT COUNT(*) AS n FROM product_categories c
+      JOIN product_categories p ON p.id = c.parent_id
+      WHERE c.deleted_at IS NULL AND p.deleted_at IS NULL AND p.name = '执行器' AND c.name = '附件'`);
+    const fujianProduct = n(`SELECT COUNT(*) AS n FROM products p
+      JOIN product_categories c ON c.id = p.category_id
+      WHERE p.deleted_at IS NULL AND c.deleted_at IS NULL AND c.name = '附件'`);
+    const livePairs = new Set(dbV12b.prepare(`SELECT p.name || ' / ' || c.name AS path
+      FROM product_categories c JOIN product_categories p ON p.id = c.parent_id
+      WHERE c.deleted_at IS NULL AND p.deleted_at IS NULL AND p.parent_id IS NULL`).all()
+      .map((r) => r.path));
+    const oldOnlyLeft = OLD_ONLY_PATHS.filter((p) => livePairs.has(p));
+
+    check('v13 用户改过名 / 已挂产品 / 自建分类的库：分类与产品都不丢',
+      mig.schemaVersion === 13 && live === 78 && roots === 7 && second === 25 && third === 46
+        && sys === 6 && tomb === 20
+        && products === 2 && customers === 1
+        && renamedKept === 1 && productCatKept === 1 && userKept === 2
+        && fujian === 1 && fujianProduct === 1,
+      `分类 ${live}（一级 ${roots} / 二级 ${second} / 三级 ${third} / 系统 ${sys} / 归档 ${tomb}）；`
+        + `产品 ${products}、客户 ${customers}；改名保留 ${renamedKept}、有产品旧类保留 ${productCatKept}、`
+        + `自建分类保留 ${userKept}、附件 ${fujian}（产品 ${fujianProduct}）`);
+
+    check('v13 旧示例只归档"空"的路径：有产品的旧分类仍留在树上',
+      oldOnlyLeft.join('、') === '蝶阀 / 法兰式'
+        && livePairs.has('蝶阀 / 夹套式（改名）'),
+      `仍存活的旧路径：${oldOnlyLeft.join('、') || '（无）'}`);
+
+    dbMod.closeDatabase(dbV12b);
+    dbV12b = null;
+  } catch (e) {
+    check('v13 用户改动场景（专项）', false, e.message);
+  } finally {
+    if (dbV12b) { try { dbMod.closeDatabase(dbV12b); } catch (_) { /* 忽略 */ } }
+    try { fs.rmSync(tmpV12b, { recursive: true, force: true }); } catch (_) { /* 忽略 */ }
+  }
 
   try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (_) { /* 忽略 */ }
 

@@ -919,10 +919,11 @@ const created = { customers: [], projects: [], tags: [], dict: [] };
   /* ================================================================ */
   console.log('\n--- 验收 29：产品价目表 ---');
 
-  /* 先在系统分类「蝶阀 / 对夹式」下建一个验收产品，页面才有数据可看 */
+  /* 先在三级分类「蝶阀 / 三偏心蝶阀 / 对夹」下建一个验收产品，页面才有数据可看 */
   const catTree = await api('GET', '/api/product-categories?tree=1');
   const dieCat = (catTree.data || []).find((c) => c.name === '蝶阀');
-  const jiaCat = dieCat && (dieCat.children || []).find((c) => c.name === '对夹式');
+  const sanCat = dieCat && (dieCat.children || []).find((c) => c.name === '三偏心蝶阀');
+  const jiaCat = sanCat && (sanCat.children || []).find((c) => c.name === '对夹');
   const testProduct = await api('POST', '/api/products', {
     category_id: jiaCat ? jiaCat.id : (dieCat ? dieCat.id : ''),
     name: `验收产品${ts} DN200 蝶阀`, code: `ACC-${ts}`,
@@ -953,11 +954,13 @@ const created = { customers: [], projects: [], tags: [], dict: [] };
       fatal: !!document.querySelector('.fatal')
     };
   })()`);
-  check('29a', '产品价目表页可打开，左侧分类树与右侧产品表格都渲染',
+  check('29a', '产品价目表页可打开，左侧三级分类树与右侧产品表格都渲染',
     prodUi.hasLayout && prodUi.hasTree && prodUi.hasTable && prodUi.hasPager && !prodUi.fatal
-      && prodUi.cats.includes('蝶阀') && prodUi.cats.includes('对夹式')
+      && prodUi.cats.includes('蝶阀') && prodUi.cats.includes('三偏心蝶阀')
+      && prodUi.cats.includes('对夹') && prodUi.cats.includes('支耳')
       && prodUi.navCount === 5 && prodUi.hasProduct,
-    `分类节点 ${prodUi.cats.length} 个（含蝶阀/对夹式=${prodUi.cats.includes('对夹式')}）；`
+    `分类节点 ${prodUi.cats.length} 个（含蝶阀/三偏心蝶阀/对夹/支耳=`
+      + `${prodUi.cats.includes('三偏心蝶阀') && prodUi.cats.includes('对夹') && prodUi.cats.includes('支耳')}）；`
       + `验收产品可见=${prodUi.hasProduct}；导航 ${prodUi.navCount} 项`);
 
   check('29b', '产品表格列头为 1.24 口径（名称/编号/材质/压力/单价/货期/折扣/折后价/操作）',
@@ -990,10 +993,17 @@ const created = { customers: [], projects: [], tags: [], dict: [] };
     setVal('设定折扣', '30');
     await new Promise(r => setTimeout(r, 400));
     const net = (d.querySelector('.prod-net') || {}).textContent || '';
+    const catField = [...d.querySelectorAll('.field')].find(x => {
+      const l = x.querySelector('.field-label');
+      return l && l.textContent.trim().startsWith('产品分类');
+    });
+    const catOptions = catField
+      ? [...catField.querySelectorAll('select option')].map(o => ({ value: o.value, label: o.textContent.trim() }))
+      : [];
     const x = [...d.querySelectorAll('.drawer-head button')].pop();
     x.click();
     await new Promise(r => setTimeout(r, 600));
-    return { labels, net: net.trim() };
+    return { labels, net: net.trim(), catOptions };
   })()`);
   check('29c', '产品抽屉字段齐全（分类/名称/单价/货期/材质/压力/折扣/备注/启用），折后价实时计算',
     !prodDrawer.err
@@ -1007,6 +1017,47 @@ const created = { customers: [], projects: [], tags: [], dict: [] };
     cdp.errors.length === errBeforeProducts
       ? '0 条错误'
       : cdp.errors.slice(errBeforeProducts, errBeforeProducts + 3).join(' | '));
+
+  /* 三级节点操作：选中「蝶阀 / 三偏心蝶阀 / 对夹」，确认五项按钮齐全且删除可用（非系统分类） */
+  const thirdOps = await cdp.js(`(async () => {
+    const rows = [...document.querySelectorAll('.prod-cat')];
+    let second = '';
+    let target = null;
+    for (const r of rows) {
+      const pad = parseFloat(String(r.style.paddingLeft || '0').replace('px', '')) || 0;
+      const name = ((r.querySelector('.prod-cat-name') || {}).textContent || '').trim();
+      if (!name) continue;
+      if (pad <= 20) second = name;
+      if (pad >= 30 && name === '对夹' && second === '三偏心蝶阀') { target = r; break; }
+    }
+    if (!target) return { err: '未找到三级节点「蝶阀 / 三偏心蝶阀 / 对夹」' };
+    target.click();
+    await new Promise(r => setTimeout(r, 1200));
+    const active = [...document.querySelectorAll('.prod-cat.active')].pop();
+    const btns = active ? [...active.querySelectorAll('.prod-cat-ops .icon-btn')] : [];
+    const out = { count: btns.length, titles: btns.map(b => b.title), disabled: btns.map(b => !!b.disabled) };
+    const all = [...document.querySelectorAll('.prod-cat')].find(r => (r.textContent || '').includes('全部产品'));
+    if (all) { all.click(); await new Promise(r => setTimeout(r, 900)); }
+    return out;
+  })()`);
+  check('29e', '三级分类节点可选中，新增子分类 / 改名 / 上移 / 下移 / 删除五项按钮齐全且删除可用',
+    !thirdOps.err && thirdOps.count === 5
+      && ['新增子分类', '改名', '上移', '下移', '删除']
+        .every((k, i) => String(thirdOps.titles[i] || '').includes(k))
+      && thirdOps.disabled.filter(Boolean).length === 0,
+    thirdOps.err || `按钮 ${thirdOps.count} 个：${(thirdOps.titles || []).join(' / ')}；`
+      + `禁用 ${thirdOps.disabled.filter(Boolean).length} 个`);
+
+  /* 产品抽屉的分类下拉：74 个分类全部列出，三级带缩进且能选到「对夹」 */
+  const jiaOpt = jiaCat
+    ? (prodDrawer.catOptions || []).find((o) => String(o.value) === String(jiaCat.id))
+    : null;
+  check('29f', '产品抽屉的分类下拉可选到三级（含「蝶阀 / 三偏心蝶阀 / 对夹」）',
+    !!jiaCat && (prodDrawer.catOptions || []).length >= 74
+      && !!jiaOpt && String(jiaOpt.label).includes('对夹') && String(jiaOpt.label).includes('└'),
+    jiaOpt
+      ? `下拉 ${prodDrawer.catOptions.length} 项，对夹选项「${jiaOpt.label}」`
+      : `下拉 ${(prodDrawer.catOptions || []).length} 项，未找到该三级分类`);
 
   /* 清理验收产品（软删除即可，不影响其它套件） */
   if (productId) await api('DELETE', `/api/products/${productId}`);
