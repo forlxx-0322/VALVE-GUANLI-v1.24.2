@@ -161,6 +161,13 @@ window.CRM = window.CRM || {};
     checkDuplicate: (name, phone, excludeId) =>
       request('GET', '/api/customers/check-duplicate?' + toQuery({ name, phone, excludeId })),
 
+    /* 客户的项目档案（1:1，1.23）与财务汇总 */
+    customerProject: (id) => request('GET', `/api/customers/${id}/project`),
+    saveCustomerProject: (id, data) => request('PUT', `/api/customers/${id}/project`, data),
+    archiveCustomerProject: (id) => request('POST', `/api/customers/${id}/project/archive`),
+    customerHistoryProjects: (id) => request('GET', `/api/customers/${id}/history-projects`),
+    customerFinance: (id) => request('GET', `/api/customers/${id}/finance`),
+
     /* 联系人 */
     saveContact: (data) => request('POST', '/api/contacts', data),
     deleteContact: (id) => request('DELETE', `/api/contacts/${id}`),

@@ -1,9 +1,17 @@
 /**
- * 阶段三 API 验收测试 —— 项目 / 回款 / 待办
- * 用法：node tools/test-phase3-api.js
+ * 阶段三 API 验收测试 —— 项目档案（1:1）/ 回款 / 成本 / 待办（1.23）
  *
- * 重点验证「钱」的逻辑：欠款、回款率、回款状态、核销、逾期、超收提醒，
- * 以及登记实收后客户累计成交额的自动同步。
+ * 1.23 起没有独立「项目管理」模块：项目是客户详情里的 1:1 档案。
+ * 本套件验证：
+ *   - 一客户一项目约束（第二个当前项目被拒 / 转历史后可再建）
+ *   - 历史项目只读
+ *   - 回款计划与实收：欠款、回款率、回款状态、核销、逾期、超收提醒
+ *   - 成本台账：分类 / 金额校验 / 自动挂项目 / 增删改查
+ *   - 财务汇总与项目汇总口径
+ *   - 待办中心四视图、完成切换、优先级排序、按项目筛选
+ *   - 字段白名单与软删除 / 回收站
+ *
+ * 用法：node tools/test-phase3-api.js
  */
 
 'use strict';
@@ -40,19 +48,19 @@ function dayOffset(n) {
 const created = {};
 
 (async () => {
-  console.log('=== 阶段三 API 验收测试（项目 / 回款 / 待办）===\n');
+  console.log('=== 阶段三 API 验收测试（项目档案 / 回款 / 成本 / 待办）===\n');
 
   /* ---------- 0. 清理残留 ---------- */
   try {
-    const kw = ['阶段三测试', '回款测试'];
     const ids = [];
-    for (const k of kw) {
+    for (const k of ['阶段三测试', '回款测试', '一客户一项目']) {
       const c = await api('GET', '/api/customers?pageSize=100&q=' + encodeURIComponent(k));
       ids.push(...((c.data && c.data.list) || []).map((x) => x.id));
     }
     for (const id of [...new Set(ids)]) {
-      const pl = await api('GET', `/api/projects?customer_id=${id}&pageSize=200`);
-      for (const p of (pl.data.list || [])) await api('DELETE', `/api/projects/${p.id}`);
+      const pl = await api('GET', `/api/projects?customer_id=${id}&pageSize=200&archived=all`);
+      const pids = (pl.data.list || []).map((p) => p.id);
+      if (pids.length) await api('POST', '/api/projects/batch-delete', { ids: pids });
       await api('POST', '/api/customers/batch-delete', { ids: [id] });
     }
     if (ids.length) console.log(`（清理残留 ${new Set(ids).size} 条测试客户及其项目）\n`);
@@ -67,78 +75,78 @@ const created = {};
     stages.data.active.length === 12 && stages.data.won.length === 6,
     `进行中 ${stages.data.active.length} 个（已排除已暂停/已终止），已成交 ${stages.data.won.length} 个`);
 
-  /* ---------- 建立测试客户 ---------- */
+  /* ---------- 3. 建立测试客户 ---------- */
   const cust = await api('POST', '/api/customers', {
     name: '阶段三测试客户（中国石化塔河炼化）', short_name: '塔河炼化',
-    type: '终端用户', industry: '石油', level: 'A 重点客户', status: '跟进中',
-    phone: '0997-1234567', province: '新疆维吾尔自治区', city: '阿克苏地区'
+    industry: '石油', source: '工程公司配套',
+    province: '新疆维吾尔自治区', city: '阿克苏地区',
+    contact_name: '李工', contact_position: '采购经理', contact_phone: '13900001111'
   });
   created.customer = cust.data.id;
-  check(3, '准备测试客户', cust.data && cust.data.created === true, `id=${cust.data && cust.data.id}`);
+  check(3, '准备测试客户（新字段模型）',
+    cust.data && cust.data.created === true && !!cust.data.id,
+    `id=${cust.data && cust.data.id}`);
 
-  /* ---------- 4. 新建项目 ---------- */
-  const p1 = await api('POST', '/api/projects', {
+  /* ---------- 4. 建立项目档案（1:1） ---------- */
+  const p1 = await api('PUT', `/api/customers/${created.customer}/project`, {
     name: '塔河炼化 2026 年大修阀门采购项目',
-    customer_id: created.customer,
     stage: '投标/议价',
     progress: 30,
-    end_user: '塔河炼化炼油一部',
-    design_institute: '中石化洛阳工程公司',
-    valve_needs: '闸阀,截止阀,止回阀',
     quantity: 260,
-    contract_amount: 0,
     bid_date: dayOffset(-5),
     bid_result: '已投标待开标',
-    owner: '本人',
     remark: '阶段三测试项目'
   });
-  created.project = p1.data.id;
-  check(4, '新建项目成功（含招投标字段）',
-    p1.data && p1.data.created === true,
-    `id=${p1.data && p1.data.id}`);
+  created.project = p1.data && p1.data.id;
+  check(4, '通过客户接口建立项目档案（1:1，含招投标字段）',
+    p1.status === 200 && p1.data && p1.data.created === true && p1.data.project
+      && p1.data.project.name === '塔河炼化 2026 年大修阀门采购项目',
+    `project id=${created.project}`);
 
   const d1 = await api('GET', `/api/projects/${created.project}`);
-  check(5, '项目详情返回完整字段与关联客户',
+  check(5, '项目档案详情返回完整字段与关联客户',
     d1.data && d1.data.name.includes('大修阀门采购') && d1.data.customer
       && d1.data.customer.short_name === '塔河炼化'
       && d1.data.bid_result === '已投标待开标'
-      && d1.data.valve_needs === '闸阀,截止阀,止回阀',
-    `客户=${d1.data.customer && d1.data.customer.short_name}，投标结果=${d1.data.bid_result}，数量=${d1.data.quantity}`);
+      && d1.data.archived === 0,
+    `客户=${d1.data.customer && d1.data.customer.short_name}，投标结果=${d1.data.bid_result}，archived=${d1.data.archived}`);
 
   check(6, '未签约项目的回款状态为「未签约」且欠款为 0',
     d1.data.payment_status === '未签约' && d1.data.debt_amount === 0,
     `回款状态=${d1.data.payment_status}，欠款=${d1.data.debt_amount}`);
 
-  /* ---------- 7. 必填校验 ---------- */
+  /* ---------- 7. 一客户一项目：第二个当前项目被拒 ---------- */
+  const second = await api('POST', '/api/projects', {
+    name: '一客户一项目：第二个当前项目', customer_id: created.customer
+  });
+  check(7, '同一客户已有当前项目时，再建第二个被拒绝（一客户一项目）',
+    second.status === 400 && second.json.code === 'PROJECT_EXISTS',
+    `HTTP ${second.status} code=${second.json && second.json.code}`);
+
+  /* ---------- 8. 必填校验 ---------- */
   const bad1 = await api('POST', '/api/projects', { name: '' });
   const bad2 = await api('POST', '/api/projects', { name: '无客户项目' });
-  check(7, '项目名称与所属客户必填校验',
+  check(8, '项目名称与所属客户必填校验',
     bad1.status === 400 && bad2.status === 400 && bad2.json.code === 'CUSTOMER_REQUIRED',
     `空名称→${bad1.status}/${bad1.json.code}，无客户→${bad2.status}/${bad2.json.code}`);
 
-  /* ---------- 8. 阶段流转（看板拖动） ---------- */
+  /* ---------- 9. 阶段流转 ---------- */
   const mv = await api('POST', `/api/projects/${created.project}/move-stage`, { stage: '已中标/已签约' });
   const afterMv = await api('GET', `/api/projects/${created.project}`);
-  check(8, '看板改阶段成功，进入签约阶段自动补签约日期',
+  check(9, '改阶段成功，进入签约阶段自动补签约日期',
     mv.data.changed === true && afterMv.data.stage === '已中标/已签约' && !!afterMv.data.signed_at,
     `${mv.data.from} → ${mv.data.stage}，签约日期=${afterMv.data.signed_at}`);
 
   const badStage = await api('POST', `/api/projects/${created.project}/move-stage`, { stage: '不存在的阶段' });
-  check(9, '非法阶段被拒绝', badStage.status === 400, `HTTP ${badStage.status} ${badStage.json.message}`);
+  check(10, '非法阶段被拒绝', badStage.status === 400, `HTTP ${badStage.status} ${badStage.json.message}`);
 
-  /* ---------- 10. 签约金额与欠款计算 ---------- */
-  const setAmount = await api('PUT', `/api/projects/${created.project}`, { contract_amount: 1860000, progress: 40 });
+  /* ---------- 11. 合同额与欠款 ---------- */
+  await api('PUT', `/api/projects/${created.project}`, { contract_amount: 1860000, progress: 40 });
   const afterAmount = await api('GET', `/api/projects/${created.project}`);
-  check(10, '合同金额写入后欠款 = 合同额（尚未收款）',
+  check(11, '合同额写入后欠款 = 合同额（尚未收款）',
     afterAmount.data.contract_amount === 1860000 && afterAmount.data.debt_amount === 1860000
       && afterAmount.data.payment_status === '未开始',
     `合同额=${afterAmount.data.contract_amount}，欠款=${afterAmount.data.debt_amount}，状态=${afterAmount.data.payment_status}`);
-
-  /* ---------- 11. 客户累计成交额自动同步 ---------- */
-  const custAfter = await api('GET', `/api/customers/${created.customer}`);
-  check(11, '项目进入已签约阶段后，客户累计成交额自动同步',
-    custAfter.data.deal_amount === 1860000,
-    `客户累计成交额=${custAfter.data.deal_amount}（无需人工维护）`);
 
   /* ---------- 12. 回款计划 ---------- */
   const plan1 = await api('POST', '/api/payments', {
@@ -160,14 +168,12 @@ const created = {};
     plan1.data.created && plan2.data.created && plan3.data.created,
     `计划合计 ${558000 + 930000 + 372000} = 合同额 ${1860000}`);
 
-  /* ---------- 13. 计划自动生成待办 ---------- */
   const tasksAfterPlan = await api('GET', `/api/tasks?view=all&project_id=${created.project}`);
   const planTasks = (tasksAfterPlan.data.list || []).filter((t) => t.source === '回款计划');
   check(13, '新建回款计划自动生成待办（按提醒天数提前）',
     planTasks.length === 3,
     planTasks.map((t) => `${t.due_at.slice(0, 10)}(${t.priority})`).join(' / '));
 
-  /* ---------- 14. 逾期计划判定 ---------- */
   const ov = await api('GET', '/api/projects?quick=overdue_payment');
   const ovRow = (ov.data.list || []).find((p) => p.id === created.project);
   check(14, '逾期回款计划被正确识别',
@@ -186,19 +192,17 @@ const created = {};
       && s1.data.payment_rate === 30 && s1.data.payment_status === '部分回款',
     `已收=${s1.data.received_amount}，欠款=${s1.data.debt_amount}，回款率=${s1.data.payment_rate}%，状态=${s1.data.payment_status}`);
 
-  /* ---------- 16. 计划核销 ---------- */
   const plan1After = s1.data.plans.find((p) => p.id === created.plan1);
   check(16, '实收关联计划后该计划显示已核销',
     plan1After.is_settled === true && plan1After.settled_amount === 558000 && plan1After.remain === 0,
     `计划 558000 已核销=${plan1After.is_settled}，已收 ${plan1After.settled_amount}，余 ${plan1After.remain}`);
 
-  /* ---------- 17. 汇总正确 ---------- */
   check(17, '项目汇总正确（计划/已核销/未核销/逾期数）',
     s1.data.summary.planned_amount === 1860000
       && s1.data.summary.settled_amount === 558000
       && s1.data.summary.unsettled_amount === 1302000
       && s1.data.summary.overdue_count === 0,
-    `计划 ${s1.data.summary.planned_amount}，已核销 ${s1.data.summary.settled_amount}，未核销 ${s1.data.summary.unsettled_amount}，逾期 ${s1.data.summary.overdue_count}（预付款已收，逾期清零）`);
+    `计划 ${s1.data.summary.planned_amount}，已核销 ${s1.data.summary.settled_amount}，未核销 ${s1.data.summary.unsettled_amount}，逾期 ${s1.data.summary.overdue_count}`);
 
   /* ---------- 18. 超收提醒 ---------- */
   const over = await api('POST', '/api/payments', {
@@ -210,14 +214,13 @@ const created = {};
     over.data.warning || '未提示');
   created.receiptOver = over.data.id;
 
-  /* ---------- 19. 删除超收记录后恢复 ---------- */
   await api('DELETE', `/api/payments/${created.receiptOver}`);
   const s2 = await api('GET', `/api/projects/${created.project}`);
   check(19, '删除实收后金额自动回退',
     s2.data.received_amount === 558000 && s2.data.debt_amount === 1302000,
     `已收回到 ${s2.data.received_amount}，欠款 ${s2.data.debt_amount}`);
 
-  /* ---------- 20. 收满后状态变已结清 ---------- */
+  /* ---------- 20. 收满 ---------- */
   const rec2 = await api('POST', '/api/payments', {
     project_id: created.project, type: '实收', amount: 1302000,
     actual_date: dayOffset(0), method: '承兑汇票', plan_id: created.plan2
@@ -228,7 +231,7 @@ const created = {};
     s3.data.payment_status === '已结清' && s3.data.debt_amount === 0 && s3.data.payment_rate === 100,
     `状态=${s3.data.payment_status}，欠款=${s3.data.debt_amount}，回款率=${s3.data.payment_rate}%`);
 
-  /* ---------- 21. 金额必填校验 ---------- */
+  /* ---------- 21. 参数校验 ---------- */
   const badAmt1 = await api('POST', '/api/payments', { project_id: created.project, type: '实收', amount: 0 });
   const badAmt2 = await api('POST', '/api/payments', { project_id: created.project, type: '计划', amount: 100 });
   check(21, '金额与计划日期必填校验',
@@ -244,29 +247,24 @@ const created = {};
   check(22, '项目列表与筛选（阶段 / 回款状态）',
     listAll.data.total >= 1 && listStage.data.total >= 1 && listPay.data.total >= 1
       && !(listDebt.data.list || []).some((p) => p.id === created.project),
-    `全部 ${listAll.data.total}，已签约阶段 ${listStage.data.total}，已结清 ${listPay.data.total}，有欠款 ${listDebt.data.total}（本项目已结清，不应出现）`);
+    `全部 ${listAll.data.total}，已签约阶段 ${listStage.data.total}，已结清 ${listPay.data.total}，有欠款 ${listDebt.data.total}`);
 
-  const listSum = await api('GET', '/api/projects?pageSize=50');
   check(23, '列表返回合同额与已收汇总',
-    listSum.data.summary && typeof listSum.data.summary.debt_total === 'number',
-    `合同总额 ${listSum.data.summary.contract_total}，已收 ${listSum.data.summary.received_total}，欠款 ${listSum.data.summary.debt_total}`);
+    listAll.data.summary && typeof listAll.data.summary.debt_total === 'number',
+    `合同总额 ${listAll.data.summary.contract_total}，已收 ${listAll.data.summary.received_total}，欠款 ${listAll.data.summary.debt_total}`);
 
-  /* ---------- 24. 搜索 ---------- */
   const search = await api('GET', '/api/projects?q=' + encodeURIComponent('塔河炼化'));
-  const search2 = await api('GET', '/api/projects?q=' + encodeURIComponent('闸阀'));
-  check(24, '项目搜索覆盖客户名与阀门需求',
-    search.data.total >= 1 && search2.data.total >= 1,
-    `按客户名命中 ${search.data.total}，按阀门需求命中 ${search2.data.total}`);
+  check(24, '项目搜索覆盖客户名',
+    search.data.total >= 1,
+    `按客户名命中 ${search.data.total}`);
 
-  /* ---------- 25. 看板 ---------- */
   const board = await api('GET', '/api/projects/board');
   const col = (board.data.columns || []).find((c) => c.stage === '已中标/已签约');
-  check(25, '看板按 14 个阶段分组并统计每列金额',
-    board.data.columns.length === 14 && col && col.count >= 1 && col.contract_total >= 1860000,
-    `14 列；「已中标/已签约」列 ${col && col.count} 个项目，金额 ${col && col.contract_total}`);
+  check(25, '看板接口仍可用（API 兼容，前端已无入口）：按 14 个阶段分组',
+    board.data.columns.length === 14 && col && col.count >= 1,
+    `14 列；「已中标/已签约」列 ${col && col.count} 个项目`);
 
-  /* ---------- 26. 回款总览（含未核销的逾期计划） ---------- */
-  /* 先造一条「逾期且未收款」的计划，验证它真的出现在逾期列表里 */
+  /* ---------- 26. 回款总览 ---------- */
   const ovPlan = await api('POST', '/api/payments', {
     project_id: created.project, type: '计划', amount: 88000,
     plan_date: dayOffset(-3), remark: '阶段三测试：逾期未收计划'
@@ -283,158 +281,241 @@ const created = {};
       && !!upHit && upHit.remain === 66000
       && overview.data.overdue_amount >= 88000,
     ovHit
-      ? `逾期：${ovHit.project_name} 余 ${ovHit.remain} 元，已逾期 ${ovHit.overdue_days} 天；近期：余 ${upHit && upHit.remain} 元（计划日 ${upHit && upHit.plan_date}）；逾期总额 ${overview.data.overdue_amount}`
+      ? `逾期：${ovHit.project_name} 余 ${ovHit.remain} 元；近期：余 ${upHit && upHit.remain} 元`
       : '逾期计划未被列出');
-
-  /* 已核销的计划不应出现在逾期列表 */
-  const settledNotOverdue = !overview.data.overdue.some((x) => x.id === created.plan1);
   check('26b', '已核销的计划不再计入逾期（避免误报）',
-    settledNotOverdue,
-    settledNotOverdue ? '已收款的计划已从逾期列表移除' : '已核销计划仍被列为逾期');
+    !overview.data.overdue.some((x) => x.id === created.plan1),
+    '已收款的计划已从逾期列表移除');
 
-  /* 清掉这两条测试计划，避免影响后续断言 */
   await api('DELETE', `/api/payments/${ovPlan.data.id}`);
   await api('DELETE', `/api/payments/${ovUpPlan.data.id}`);
 
-  /* ---------- 27. 待办四视图 ---------- */
+  /* ---------- 27. 成本台账 ---------- */
+  const cost1 = await api('POST', '/api/costs', {
+    customer_id: created.customer, category: '采购成本', amount: 900000,
+    spent_at: dayOffset(-5), supplier: '某阀门制造厂', remark: '阶段三测试采购成本'
+  });
+  const cost2 = await api('POST', '/api/costs', {
+    customer_id: created.customer, category: '维护成本', amount: 20000, spent_at: dayOffset(-4)
+  });
+  const cost3 = await api('POST', '/api/costs', {
+    customer_id: created.customer, category: '差旅', amount: 5000, spent_at: dayOffset(-3)
+  });
+  const costNoProject = await api('GET', `/api/customers/${created.customer}/project`);
+  check(27, '成本台账可登记（只给客户时自动归属到项目档案）',
+    cost1.status === 200 && cost2.status === 200 && cost3.status === 200
+      && cost1.data.customer_id === created.customer
+      && cost1.data.project_id === created.project
+      && costNoProject.data.project.id === created.project,
+    `成本 #${cost1.data.id} 项目=${cost1.data.project_id}，客户当前项目=${costNoProject.data.project.id}`);
+
+  const badCat = await api('POST', '/api/costs', { customer_id: created.customer, category: '随便', amount: 1 });
+  const badCostAmt = await api('POST', '/api/costs', { customer_id: created.customer, category: '其他', amount: -5 });
+  const noOwner = await api('POST', '/api/costs', { category: '其他', amount: 1 });
+  check(28, '成本分类 / 金额 / 归属校验',
+    badCat.status === 400 && /分类/.test(badCat.json.message || '')
+      && badCostAmt.status === 400 && /金额/.test(badCostAmt.json.message || '')
+      && noOwner.status === 400,
+    `分类→HTTP ${badCat.status}，金额→HTTP ${badCostAmt.status}，无归属→HTTP ${noOwner.status}`);
+
+  const costList = await api('GET', `/api/costs?customer_id=${created.customer}`);
+  check(29, '成本列表按客户筛选并分类汇总',
+    costList.data.total === 3 && costList.data.amount === 925000
+      && costList.data.by_category.length === 3,
+    `共 ${costList.data.total} 笔 ${costList.data.amount} 元，分类 ${costList.data.by_category.map((x) => x.category + ':' + x.amount).join(' / ')}`);
+
+  const costUpd = await api('PUT', `/api/costs/${cost3.data.id}`, { amount: 8000 });
+  const costDel = await api('DELETE', `/api/costs/${cost2.data.id}`);
+  check(30, '成本可修改与删除（软删除）',
+    costUpd.status === 200 && costUpd.data.amount === 8000
+      && costDel.status === 200 && costDel.data.deleted === true,
+    `修改后差旅=${costUpd.data.amount}，删除维护成本 #${cost2.data.id}`);
+
+  /* ---------- 31. 财务汇总 ---------- */
+  const fin = await api('GET', `/api/customers/${created.customer}/finance`);
+  const f = fin.data || {};
+  check(31, '客户财务汇总与回款/成本口径一致',
+    fin.status === 200
+      && f.contract_amount === 1860000 && f.received_amount === 1860000
+      && f.receivable_amount === 0 && f.purchase_cost === 900000
+      && f.maintain_cost === 0 && f.other_cost === 8000
+      && f.total_cost === 908000 && f.profit === 952000
+      && Math.abs(f.margin - 51.2) < 0.06,
+    `合同额=${f.contract_amount} 已收=${f.received_amount} 应收=${f.receivable_amount} 采购=${f.purchase_cost} 其他=${f.other_cost} 毛利=${f.profit} 毛利率=${f.margin}%`);
+
+  /* ---------- 32. 转为历史 + 历史只读 ---------- */
+  const arch = await api('POST', `/api/customers/${created.customer}/project/archive`);
+  const afterArch = await api('GET', `/api/customers/${created.customer}/project`);
+  const hist = await api('GET', `/api/customers/${created.customer}/history-projects`);
+  check(32, '当前项目可「转为历史」，转后客户没有当前项目、历史里能查到',
+    arch.status === 200 && arch.data.archived === true
+      && afterArch.data.project === null
+      && hist.data.length === 1 && hist.data[0].id === created.project
+      && hist.data[0].archived === 1,
+    `归档 id=${arch.data.id}，历史 ${hist.data.length} 条`);
+
+  const editArchived = await api('PUT', `/api/projects/${created.project}`, { name: '试图修改历史项目' });
+  const delArchived = await api('PUT', `/api/customers/${created.customer}/project`, {
+    id: created.project, name: '通过客户接口改历史'
+  });
+  check(33, '历史项目只读（普通接口与客户接口都拒绝修改）',
+    editArchived.status === 400 && editArchived.json.code === 'ARCHIVED_READONLY'
+      && delArchived.status === 400 && delArchived.json.code === 'ARCHIVED_READONLY',
+    `普通接口 HTTP ${editArchived.status} ${editArchived.json && editArchived.json.code}；客户接口 HTTP ${delArchived.status} ${delArchived.json && delArchived.json.code}`);
+
+  /* ---------- 34. 归档后可再建新当前项目 ---------- */
+  const p2 = await api('PUT', `/api/customers/${created.customer}/project`, {
+    name: '一客户一项目：第二个项目（新当前档案）', stage: '技术交流', contract_amount: 250000
+  });
+  const listAfter = await api('GET', '/api/customers?q=' + encodeURIComponent('塔河炼化'));
+  const rowAfter = (listAfter.data.list || []).find((x) => x.id === created.customer);
+  check(34, '归档后可以建立新的当前项目（仍然一客户一项目）',
+    p2.data.created === true && p2.data.id !== created.project
+      && rowAfter && rowAfter.project_count === 1,
+    `新当前项目 id=${p2.data.id}，列表项目数=${rowAfter && rowAfter.project_count}`);
+  created.project2 = p2.data.id;
+
+  /* 历史项目的实收仍计入客户财务（换档案不丢账） */
+  const finAfter = await api('GET', `/api/customers/${created.customer}/finance`);
+  check(35, '换项目档案后，历史项目的实收与成本仍计入客户财务',
+    finAfter.data.received_amount === 1860000 && finAfter.data.profit === 952000
+      && finAfter.data.contract_amount === 250000,
+    `合同额（新档案）=${finAfter.data.contract_amount}，已收=${finAfter.data.received_amount}，毛利=${finAfter.data.profit}`);
+
+  /* ---------- 36. 第一次登记回款自动建档案 ---------- */
+  const custB = await api('POST', '/api/customers', {
+    name: '阶段三测试客户-自动建档（回款测试）', industry: '化工'
+  });
+  const payAuto = await api('POST', '/api/payments', {
+    customer_id: custB.data.id, type: '实收', amount: 10000, actual_date: dayOffset(0)
+  });
+  const custBProject = await api('GET', `/api/customers/${custB.data.id}/project`);
+  check(36, '第一次登记回款时自动建一条空项目档案（财务数据有归属）',
+    payAuto.status === 200 && custBProject.data.project
+      && custBProject.data.project.id === payAuto.data.project_id,
+    `回款 project_id=${payAuto.data.project_id}，客户当前项目=${custBProject.data.project && custBProject.data.project.id}`);
+
+  const costAuto = await api('POST', '/api/costs', {
+    customer_id: custB.data.id, category: '采购成本', amount: 4000
+  });
+  check('36b', '只登记成本时也自动归属到项目档案',
+    costAuto.status === 200 && costAuto.data.project_id === payAuto.data.project_id,
+    `成本 project_id=${costAuto.data.project_id}`);
+  created.custB = custB.data.id;
+
+  /* ---------- 37. 待办中心 ---------- */
   const tToday = await api('GET', '/api/tasks?view=today');
   const tWeek = await api('GET', '/api/tasks?view=week');
   const tOverdue = await api('GET', '/api/tasks?view=overdue');
   const tDone = await api('GET', '/api/tasks?view=done');
-  check(27, '待办四视图均可查询并带计数',
+  check(37, '待办四视图均可查询并带计数',
     tToday.status === 200 && tWeek.status === 200 && tOverdue.status === 200 && tDone.status === 200
       && tToday.data.counts && typeof tToday.data.counts.overdue === 'number',
-    `今日 ${tToday.data.list.length}，本周 ${tWeek.data.list.length}，逾期 ${tOverdue.data.list.length}，已完成 ${tDone.data.list.length}；计数对象=${JSON.stringify(tToday.data.counts)}`);
+    `今日 ${tToday.data.list.length}，本周 ${tWeek.data.list.length}，逾期 ${tOverdue.data.list.length}，已完成 ${tDone.data.list.length}`);
 
-  /* ---------- 28. 待办逾期判定 ---------- */
-  const overdueTask = (tOverdue.data.list || []).find((t) => t.project_id === created.project);
-  check(28, '回款计划待办在到期前属于逾期/今日视图',
-    tOverdue.data.list.every((t) => t.is_overdue === 1) || tToday.data.list.length >= 0,
-    `逾期视图 ${tOverdue.data.list.length} 条，每条 is_overdue=${(tOverdue.data.list[0] || {}).is_overdue}`);
-
-  /* ---------- 29. 手动新增待办 ---------- */
   const manual = await api('POST', '/api/tasks', {
     title: '阶段三测试：给塔河炼化寄送技术方案与报价单',
     customer_id: created.customer,
-    project_id: created.project,
+    project_id: created.project2,
     due_at: dayOffset(2) + ' 10:00:00',
     priority: '高',
     remark: '阶段三测试待办'
   });
   created.task = manual.data.id;
-  check(29, '手动新增待办（自动带出客户）',
+  check(38, '手动新增待办（自动带出客户）',
     manual.data.created === true,
     `id=${manual.data.id}`);
 
-  /* ---------- 30. 完成 / 取消完成 ---------- */
   const done = await api('POST', `/api/tasks/${created.task}/toggle`, { done: true });
   const undone = await api('POST', `/api/tasks/${created.task}/toggle`, { done: false });
   const done2 = await api('POST', `/api/tasks/${created.task}/toggle`, {});
-  check(30, '待办完成与取消完成切换正常',
+  check(39, '待办完成与取消完成切换正常',
     done.data.status === '已完成' && !!done.data.done_at
       && undone.data.status === '待办' && undone.data.done_at === null
       && done2.data.status === '已完成',
     `完成→${done.data.status}，取消→${undone.data.status}，再次切换→${done2.data.status}`);
 
-  /* ---------- 31. 待办标题必填 ---------- */
   const badTask = await api('POST', '/api/tasks', { title: '   ' });
-  check(31, '待办标题必填校验',
+  check(40, '待办标题必填校验',
     badTask.status === 400 && badTask.json.code === 'TITLE_REQUIRED',
     `HTTP ${badTask.status} code=${badTask.json.code}`);
 
-  /* ---------- 32. 待办优先级排序 ---------- */
   const sorted = await api('GET', '/api/tasks?view=all');
   const prioOrder = { '高': 1, '中': 2, '低': 3 };
   const prios = sorted.data.list.map((t) => prioOrder[t.priority] || 4);
-  const prioSorted = prios.every((v, i) => i === 0 || prios[i - 1] <= v);
-  check(32, '待办按优先级排序（高→中→低）',
-    prioSorted,
+  check(41, '待办按优先级排序（高→中→低）',
+    prios.every((v, i) => i === 0 || prios[i - 1] <= v),
     `优先级序列：${sorted.data.list.slice(0, 6).map((t) => t.priority).join('')}`);
 
-  /* ---------- 33. 项目待办隔离 ---------- */
-  const projTasks = await api('GET', `/api/tasks?view=all&project_id=${created.project}`);
-  check(33, '按项目筛选待办',
-    projTasks.data.list.every((t) => t.project_id === created.project),
-    `本项目 ${projTasks.data.list.length} 条待办`);
+  const projTasks = await api('GET', `/api/tasks?view=done&project_id=${created.project2}`);
+  check(42, '按项目筛选待办（项目档案仍挂待办）',
+    projTasks.data.list.length >= 1 && projTasks.data.list.every((t) => t.project_id === created.project2),
+    `本项目已完成待办 ${projTasks.data.list.length} 条`);
 
-  /* ---------- 34. 项目详情标签页数据 ---------- */
+  /* ---------- 43. 项目日志 ---------- */
   const full = await api('GET', `/api/projects/${created.project}`);
-  check(34, '项目详情返回 5 个标签页所需的全部数据',
-    Array.isArray(full.data.plans) && Array.isArray(full.data.receipts)
-      && Array.isArray(full.data.tasks) && Array.isArray(full.data.logs)
-      && full.data.summary && full.data.customer,
-    `回款计划 ${full.data.plans.length}，实收 ${full.data.receipts.length}，待办 ${full.data.tasks.length}，日志 ${full.data.logs.length}`);
-
-  /* ---------- 35. 操作日志 ---------- */
   const hasOps = full.data.logs.some((l) => l.action === 'create')
     && full.data.logs.some((l) => l.action === 'payment')
     && full.data.logs.some((l) => l.action === 'update');
-  check(35, '项目操作日志记录新建/修改/回款',
+  check(43, '项目档案操作日志记录新建/修改/回款',
     hasOps,
     `日志动作：${[...new Set(full.data.logs.map((l) => l.action))].join(', ')}`);
 
-  /* ---------- 36. 实收超收拦截后删除，数据一致 ---------- */
-  const s4 = await api('GET', `/api/projects/${created.project}`);
-  const receiptSum = s4.data.receipts.reduce((s, r) => s + r.amount, 0);
-  check(36, '实收流水合计与项目已回款一致',
-    Math.round(receiptSum * 100) / 100 === s4.data.received_amount,
-    `流水合计 ${receiptSum} = 项目已回款 ${s4.data.received_amount}`);
-
-  /* ---------- 37. 删除项目软删除 ---------- */
-  const p2 = await api('POST', '/api/projects', {
-    name: '阶段三测试：待删除项目', customer_id: created.customer, stage: '信息收集', contract_amount: 100000
+  /* ---------- 44. 项目白名单 ---------- */
+  await api('PUT', `/api/projects/${created.project2}`, {
+    name: '一客户一项目：第二个项目（新当前档案）',
+    received_amount: 999999, deleted_at: '2020-01-01T00:00:00', archived: 1, created_at: '1999-01-01'
   });
-  const delP = await api('DELETE', `/api/projects/${p2.data.id}`);
-  const getDel = await api('GET', `/api/projects/${p2.data.id}`);
-  check(37, '项目删除为软删除（可回收）',
-    delP.data.count === 1 && getDel.status === 404,
-    `删除 ${delP.data.count} 个，详情 HTTP ${getDel.status}`);
+  const afterHack = await api('GET', `/api/projects/${created.project2}`);
+  check(44, '项目字段白名单拦截越权写入（received_amount / deleted_at / archived / created_at）',
+    afterHack.data.received_amount === 0 && afterHack.data.deleted_at === null
+      && afterHack.data.archived === 0 && !String(afterHack.data.created_at).startsWith('1999'),
+    `received_amount=${afterHack.data.received_amount}，archived=${afterHack.data.archived}，deleted_at=${afterHack.data.deleted_at}`);
 
-  /* ---------- 38. 回收站与还原 ---------- */
+  /* ---------- 45. 软删除与回收站 ---------- */
+  const p3 = await api('PUT', `/api/customers/${created.custB}/project`, { name: '待删除项目档案' });
+  const delP = await api('DELETE', `/api/projects/${p3.data.id}`);
+  const getDel = await api('GET', `/api/projects/${p3.data.id}`);
   const trash = await api('GET', '/api/trash?type=project');
-  const inTrash = (trash.data || []).some((x) => x.id === p2.data.id);
-  const restore = await api('POST', '/api/trash/restore', { ids: [p2.data.id], type: 'project' });
-  const afterRestore = await api('GET', `/api/projects/${p2.data.id}`);
-  check(38, '项目回收站可见并还原',
-    inTrash && restore.data.count === 1 && afterRestore.status === 200,
-    `回收站 ${trash.data.length} 条，还原 ${restore.data.count} 个，还原后 HTTP ${afterRestore.status}`);
+  const inTrash = (trash.data || []).some((x) => x.id === p3.data.id);
+  const restore = await api('POST', '/api/trash/restore', { ids: [p3.data.id], type: 'project' });
+  const afterRestore = await api('GET', `/api/projects/${p3.data.id}`);
+  check(45, '项目删除为软删除，回收站可见并还原',
+    delP.data.count === 1 && getDel.status === 404 && inTrash
+      && restore.data.count === 1 && afterRestore.status === 200,
+    `删除 ${delP.data.count}，详情 HTTP ${getDel.status}，回收站可见=${inTrash}，还原=${restore.data.count}`);
 
-  /* ---------- 39. 无客户项目不可创建 ---------- */
-  const noCust = await api('POST', '/api/projects', { name: '孤立项目' });
-  check(39, '项目必须归属客户', noCust.status === 400, noCust.json.message);
-
-  /* ---------- 40. 不存在的项目 404 ---------- */
+  /* ---------- 46. 不存在的项目 ---------- */
   const nf = await api('GET', '/api/projects/99999999');
-  check(40, '查询不存在项目返回 404',
+  check(46, '查询不存在项目返回 404',
     nf.status === 404 && nf.json.code === 'NOT_FOUND',
     `HTTP ${nf.status} code=${nf.json.code}`);
 
-  /* ---------- 41. 白名单拦截 ---------- */
-  await api('PUT', `/api/projects/${created.project}`, {
-    name: '塔河炼化 2026 年大修阀门采购项目',
-    received_amount: 999999, deleted_at: '2020-01-01T00:00:00', created_at: '1999-01-01'
-  });
-  const afterHack = await api('GET', `/api/projects/${created.project}`);
-  check(41, '字段白名单拦截越权写入（received_amount / deleted_at / created_at）',
-    afterHack.data.received_amount === 1860000 && afterHack.data.deleted_at === null
-      && !String(afterHack.data.created_at).startsWith('1999'),
-    `received_amount=${afterHack.data.received_amount}（只能由实收流水决定），deleted_at=${afterHack.data.deleted_at}`);
-
-  /* ---------- 42. 区域划分：清理已完成待办 ---------- */
+  /* ---------- 47. 清理已完成待办 ---------- */
   const purge = await api('POST', '/api/tasks/purge-done', { keepDays: 30 });
-  check(42, '清理已完成待办接口可用（保留最近 30 天）',
+  check(47, '清理已完成待办接口可用（保留最近 30 天）',
     purge.status === 200 && typeof purge.data.removed === 'number',
     `清理 ${purge.data.removed} 条（保留 ${purge.data.keepDays} 天）`);
 
   /* ---------- 清理测试数据 ---------- */
-  const pl = await api('GET', `/api/projects?customer_id=${created.customer}&pageSize=200`);
-  const pids = (pl.data.list || []).map((p) => p.id);
-  if (pids.length) await api('POST', '/api/projects/batch-delete', { ids: pids });
-  const tl = await api('GET', `/api/tasks?view=all&customer_id=${created.customer}`);
-  const tids = (tl.data.list || []).map((t) => t.id);
-  if (tids.length) await api('POST', '/api/tasks/batch-delete', { ids: tids });
-  await api('POST', '/api/customers/batch-delete', { ids: [created.customer] });
-  console.log(`\n（已清理测试数据：${pids.length} 个项目、${tids.length} 条待办、1 个客户）`);
+  for (const cid of [created.customer, created.custB]) {
+    const pl = await api('GET', `/api/projects?customer_id=${cid}&pageSize=200&archived=all`);
+    const pids = (pl.data.list || []).map((p) => p.id);
+    /* 先删回款（无软删除），再删成本，避免污染报表 */
+    for (const pid of pids) {
+      const d = await api('GET', `/api/projects/${pid}`);
+      const rows = [].concat((d.data && d.data.plans) || [], (d.data && d.data.receipts) || []);
+      for (const row of rows) await api('DELETE', `/api/payments/${row.id}`);
+    }
+    const cl = await api('GET', `/api/costs?customer_id=${cid}&pageSize=200`);
+    for (const row of (cl.data && cl.data.list) || []) await api('DELETE', `/api/costs/${row.id}`);
+    if (pids.length) await api('POST', '/api/projects/batch-delete', { ids: pids });
+    const tl = await api('GET', `/api/tasks?view=all&customer_id=${cid}`);
+    const tids = (tl.data.list || []).map((t) => t.id);
+    if (tids.length) await api('POST', '/api/tasks/batch-delete', { ids: tids });
+    await api('POST', '/api/customers/batch-delete', { ids: [cid] });
+  }
+  console.log('\n（已清理测试数据：2 个客户及其项目 / 回款 / 成本 / 待办）');
 
   const pass = results.filter((r) => r.pass).length;
   const fail = results.length - pass;

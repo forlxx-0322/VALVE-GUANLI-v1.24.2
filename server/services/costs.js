@@ -94,6 +94,13 @@ function create(db, data) {
     const e = new Error('请至少指定客户或项目');
     e.status = 400; e.code = 'NO_OWNER'; throw e;
   }
+  /* 1.23：只登记到客户时，保证该客户有一条项目档案，成本才有项目归属 */
+  if (v.customer_id && !v.project_id) {
+    try {
+      const pm = require('./pm');
+      v.project_id = pm.ensureProjectForCustomer(db, v.customer_id);
+    } catch (_) { /* 项目档案建立失败不阻断成本登记 */ }
+  }
   const ts = now();
   const r = db.prepare(`INSERT INTO costs
     (customer_id, project_id, category, amount, spent_at, supplier, remark, created_at, updated_at)

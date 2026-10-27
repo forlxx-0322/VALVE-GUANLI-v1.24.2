@@ -13,73 +13,30 @@
 'use strict';
 
 const { now } = require('../db');
-const { syncCustomerRegion } = require('./crm');
+const { syncCustomerRegion, nextCustomerNo } = require('./crm');
 
 /* ------------------------------------------------------------------ */
 /* 导入字段定义（也是导出与模板的列定义）                                */
 /* ------------------------------------------------------------------ */
 
-/** 客户导入字段：key 为数据库字段，label 为 Excel 表头 */
+/** 客户导入字段（1.23 精简模型：只有公司资料 + 主联系人 + 回访 + 地址） */
 const CUSTOMER_FIELDS = [
   { key: 'name', label: '客户全称', required: true, width: 34, sample: '中国石油天然气股份有限公司独山子石化分公司' },
-  { key: 'short_name', label: '客户简称', required: true, width: 16, sample: '独山子石化' },
-  /* 主体类型与下游行业与界面表单保持一致（表单里也是必填），
-     否则导入进来的客户在界面上是"缺必填项"的状态；列表与筛选也依赖这两列。 */
-  { key: 'type', label: '主体类型', dict: 'customer_type', required: true, width: 16, sample: '终端用户' },
-  { key: 'industry', label: '下游行业', dict: 'industry', required: true, width: 12, sample: '石油' },
-  { key: 'level', label: '客户等级', dict: 'customer_level', width: 12, sample: 'A 重点客户' },
-  { key: 'status', label: '客户状态', dict: 'customer_status', width: 12, sample: '跟进中' },
+  { key: 'short_name', label: '客户简称', width: 16, sample: '独山子石化' },
+  { key: 'customer_no', label: '客户编号', width: 16, hint: '留空自动生成 KH-YYYY-0001' },
+  { key: 'industry', label: '行业', dict: 'industry', width: 12, sample: '石油' },
   { key: 'source', label: '客户来源', dict: 'customer_source', width: 14, sample: '设计院推荐' },
-  { key: 'owner', label: '归属业务员', width: 12, sample: '本人' },
-  { key: 'phone', label: '公司电话', width: 16, sample: '0992-3862000' },
-  { key: 'fax', label: '传真', width: 14 },
-  { key: 'email', label: '公司邮箱', width: 22 },
-  { key: 'website', label: '网址', width: 22 },
-  { key: 'wechat', label: '微信', width: 14 },
-  { key: 'credit_code', label: '统一社会信用代码', width: 22, sample: '91650200123456789X' },
+  { key: 'contact_name', label: '联系人', width: 12, sample: '王建国' },
+  { key: 'contact_position', label: '联系人职务', dict: 'contact_position', width: 14, sample: '采购经理' },
+  { key: 'contact_phone', label: '联系人手机', width: 16, sample: '13909920001' },
+  { key: 'contact_birthday', label: '联系人生日', width: 14, sample: '1980-05-20' },
+  { key: 'email', label: '邮箱', width: 22, sample: 'procurement@example.com' },
   { key: 'province', label: '省/自治区', width: 16, sample: '新疆维吾尔自治区' },
   { key: 'city', label: '市/地区', width: 16, sample: '克拉玛依市' },
   { key: 'district', label: '区/县', width: 14, sample: '独山子区' },
   { key: 'address', label: '详细地址', width: 26, sample: '独山子区大庆路 1 号' },
-  { key: 'zip_code', label: '邮编', width: 10 },
-  { key: 'enterprise_nature', label: '企业性质', dict: 'enterprise_nature', width: 14, sample: '央企' },
-  { key: 'parent_group', label: '所属集团', width: 26, sample: '中国石油天然气集团有限公司' },
-  { key: 'scale', label: '企业规模', width: 12, sample: '大型' },
-  { key: 'founded_at', label: '成立日期', width: 14, sample: '1936-10-01' },
-  { key: 'employees', label: '员工人数', width: 14, sample: '1000人以上' },
-  { key: 'legal_person', label: '法定代表人', width: 12 },
-  { key: 'is_listed', label: '是否上市', type: 'yesno', width: 10, sample: '是' },
-  { key: 'purchase_mode', label: '采购模式', dict: 'purchase_mode', width: 16, sample: '框架协议' },
-  { key: 'end_user', label: '最终用户', width: 20, sample: '独山子石化炼油厂' },
-  { key: 'design_institute', label: '关联设计院', width: 22, sample: '中国石化工程建设有限公司' },
-  { key: 'epc_contractor', label: '关联工程公司', width: 20 },
-  { key: 'valve_types', label: '常用阀门类型', type: 'multiline', width: 24, sample: '球阀,闸阀,截止阀' },
-  { key: 'drive_mode', label: '常用驱动方式', type: 'multiline', width: 16, sample: '气动,电动' },
-  { key: 'body_material', label: '常用阀体材质', type: 'multiline', width: 22, sample: '不锈钢 316L,碳钢 WCB' },
-  { key: 'pressure_rating', label: '常用压力等级', type: 'multiline', width: 20, sample: 'Class300,Class600' },
-  { key: 'size_range', label: '常用口径范围', width: 18, sample: 'DN50~DN600' },
-  { key: 'design_standard', label: '常用设计标准', type: 'multiline', width: 18, sample: 'API,ANSI/ASME' },
-  { key: 'connection_type', label: '连接方式', type: 'multiline', width: 16, sample: '法兰连接' },
-  { key: 'cert_required', label: '认证要求', type: 'multiline', width: 26, sample: '特种设备制造许可证 TS,API 6D' },
-  { key: 'annual_demand', label: '年需求量(万元)', type: 'number', width: 16, sample: 800 },
-  { key: 'purchase_cycle', label: '采购周期', width: 14, sample: '年度' },
-  { key: 'account_period', label: '账期', dict: 'account_period', width: 20, sample: '月结60天' },
-  { key: 'warranty_ratio', label: '质保金比例(%)', type: 'number', width: 16, sample: 10 },
-  { key: 'warranty_months', label: '质保期(月)', type: 'number', width: 14, sample: 24 },
-  { key: 'payer', label: '付款方', width: 16, sample: '集团财务' },
-  { key: 'tender_platform', label: '常用招标平台', width: 18, sample: '中石油' },
-  { key: 'qualification', label: '客户要求资质', type: 'multiline', width: 24 },
-  { key: 'has_ts_license', label: '要求TS许可证', type: 'yesno', width: 14, sample: '是' },
-  { key: 'has_explosion_proof', label: '要求防爆认证', type: 'yesno', width: 14, sample: '否' },
-  { key: 'quality_grade', label: '客户分级', width: 20, sample: '中石油一级供应商' },
-  { key: 'supplier_code', label: '供应商编码', width: 20, sample: 'CNPC-SUP-20240001' },
-  { key: 'credit_rating', label: '信用评级', width: 12, sample: '优' },
-  { key: 'introducer', label: '介绍人', width: 18, sample: '李工（石化设计院）' },
-  { key: 'competitor', label: '主要竞争对手', width: 16, sample: '纽威阀门' },
-  { key: 'customer_since', label: '合作起始日期', width: 16, sample: '2020-03-15' },
-  { key: 'next_follow_at', label: '下次跟进时间', width: 20, sample: '2026-03-01 10:00' },
-  { key: 'longitude', label: '经度', type: 'number', width: 12 },
-  { key: 'latitude', label: '纬度', type: 'number', width: 12 },
+  { key: 'follow_cycle_days', label: '回访周期(天)', type: 'number', width: 14, sample: 30 },
+  { key: 'next_follow_at', label: '下次回访', width: 20, sample: '2026-03-01 10:00' },
   { key: 'remark', label: '备注', width: 30 }
 ];
 
@@ -187,7 +144,7 @@ function normValue(field, raw, dictCache) {
     const n = Number(s.replace(/[,，\s]/g, ''));
     return isFinite(n) ? n : 0;
   }
-  if (field.key === 'founded_at' || field.key === 'customer_since'
+  if (field.key === 'contact_birthday'
     || field.key === 'signed_at' || field.key === 'bid_date' || field.key === 'delivery_date'
     || field.key === 'start_date' || field.key === 'end_date' || field.key === 'birthday') {
     return normDateRaw(s);
@@ -287,9 +244,8 @@ function exportData(db, entity, options) {
       params.push(...opts.ids.map(Number));
     } else {
       if (opts.industry) { where.push('industry = ?'); params.push(opts.industry); }
-      if (opts.status) { where.push('status = ?'); params.push(opts.status); }
-      if (opts.type) { where.push('type = ?'); params.push(opts.type); }
-      if (opts.level) { where.push('level = ?'); params.push(opts.level); }
+      if (opts.source) { where.push('source = ?'); params.push(opts.source); }
+      if (opts.region_code) { where.push('region_code = ?'); params.push(opts.region_code); }
     }
     const cols = fields.map((f) => f.key).join(', ');
     rows = db.prepare(
@@ -620,43 +576,20 @@ function updateExisting(db, entity, id, d, ts) {
 
 function insertCustomer(db, d, ts) {
   const COLS = [
-    'name', 'short_name', 'type', 'industry', 'source', 'level', 'status', 'owner',
-    'phone', 'fax', 'website', 'email', 'wechat', 'credit_code',
-    'province', 'city', 'district', 'address', 'zip_code',
-    'enterprise_nature', 'parent_group', 'scale', 'founded_at', 'employees', 'legal_person', 'is_listed',
-    'purchase_mode', 'end_user', 'design_institute', 'epc_contractor', 'valve_types', 'drive_mode',
-    'body_material', 'pressure_rating', 'size_range', 'design_standard', 'connection_type', 'cert_required',
-    'annual_demand', 'purchase_cycle', 'account_period', 'warranty_ratio', 'warranty_months',
-    'payer', 'tender_platform',
-    'qualification', 'has_ts_license', 'has_explosion_proof', 'quality_grade', 'supplier_code', 'credit_rating',
-    'introducer', 'competitor', 'customer_since', 'next_follow_at', 'longitude', 'latitude', 'remark',
-    'created_at', 'updated_at'
+    'name', 'short_name', 'customer_no', 'industry', 'source', 'email',
+    'contact_name', 'contact_position', 'contact_phone', 'contact_birthday',
+    'follow_cycle_days', 'province', 'city', 'district', 'address',
+    'next_follow_at', 'remark', 'created_at', 'updated_at'
   ];
 
-  const num = (v) => {
-    if (v === '' || v === null || v === undefined) return null;
-    const n = Number(v);
-    return isFinite(n) ? n : null;
-  };
+  const customerNo = String(d.customer_no || '').trim() || nextCustomerNo(db);
 
   const VALUES = [
-    d.name, d.short_name || '', d.type || '', d.industry || '', d.source || '',
-    d.level || '', d.status || '潜在', d.owner || '',
-    d.phone || '', d.fax || '', d.website || '', d.email || '', d.wechat || '', d.credit_code || '',
-    d.province || '', d.city || '', d.district || '', d.address || '', d.zip_code || '',
-    d.enterprise_nature || '', d.parent_group || '', d.scale || '', d.founded_at || null,
-    d.employees || '', d.legal_person || '', Number(d.is_listed) || 0,
-    d.purchase_mode || '', d.end_user || '', d.design_institute || '', d.epc_contractor || '',
-    d.valve_types || '', d.drive_mode || '', d.body_material || '', d.pressure_rating || '',
-    d.size_range || '', d.design_standard || '', d.connection_type || '', d.cert_required || '',
-    Number(d.annual_demand) || 0, d.purchase_cycle || '', d.account_period || '',
-    Number(d.warranty_ratio) || 0, Number(d.warranty_months) || 0,
-    d.payer || '', d.tender_platform || '',
-    d.qualification || '', Number(d.has_ts_license) || 0, Number(d.has_explosion_proof) || 0,
-    d.quality_grade || '', d.supplier_code || '', d.credit_rating || '',
-    d.introducer || '', d.competitor || '', d.customer_since || null, d.next_follow_at || null,
-    num(d.longitude), num(d.latitude), d.remark || '',
-    ts, ts
+    d.name, d.short_name || '', customerNo, d.industry || '', d.source || '', d.email || '',
+    d.contact_name || '', d.contact_position || '', d.contact_phone || '',
+    d.contact_birthday || '', Number(d.follow_cycle_days) || 0,
+    d.province || '', d.city || '', d.district || '', d.address || '',
+    d.next_follow_at || null, d.remark || '', ts, ts
   ];
 
   if (COLS.length !== VALUES.length) {
@@ -668,10 +601,20 @@ function insertCustomer(db, d, ts) {
   ).run(...VALUES);
 
   const id = Number(info.lastInsertRowid);
+
+  /* 主联系人：导入也同步到 contacts（is_primary=1） */
+  if (String(d.contact_name || '').trim()) {
+    db.prepare(
+      `INSERT INTO contacts (customer_id, name, position, mobile, birthday, is_primary, is_decision, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, 1, 0, ?, ?)`
+    ).run(id, d.contact_name, d.contact_position || '', d.contact_phone || '',
+      d.contact_birthday || null, ts, ts);
+  }
+
   db.prepare(
     `INSERT INTO activity_logs (entity_type, entity_id, action, summary, detail, created_at)
      VALUES ('customer', ?, 'create', ?, '', ?)`
-  ).run(id, `Excel 导入新建客户：${d.name}`, ts);
+  ).run(id, `Excel 导入新建客户：${d.name}（${customerNo}）`, ts);
   return id;
 }
 
@@ -690,30 +633,42 @@ function insertContact(db, d, ts) {
   if (Number(d.is_primary) === 1) {
     db.prepare('UPDATE contacts SET is_primary = 0 WHERE customer_id = ? AND id <> ?')
       .run(cust.id, Number(info.lastInsertRowid));
+    /* 主联系人反向同步到客户表内嵌字段（列表里的「联系人（职务）」要能看到） */
+    db.prepare(
+      `UPDATE customers SET contact_name = ?, contact_position = ?, contact_phone = ?,
+              contact_birthday = ?, updated_at = ? WHERE id = ?`
+    ).run(d.name || '', d.position || '', d.mobile || '', d.birthday || '', ts, cust.id);
   }
   return Number(info.lastInsertRowid);
 }
 
+/**
+ * 导入项目：1.23 起一客户一项目。
+ * 已有当前项目时，导入的这条直接落成「历史项目」（archived=1），不阻断导入。
+ */
 function insertProject(db, d, ts) {
   const cust = db.prepare('SELECT id FROM customers WHERE name = ? AND deleted_at IS NULL').get(d.customer_name);
   if (!cust) throw new Error(`找不到客户「${d.customer_name}」`);
+  const current = db.prepare(
+    'SELECT id FROM projects WHERE customer_id = ? AND deleted_at IS NULL AND archived = 0'
+  ).get(cust.id);
   const info = db.prepare(`
     INSERT INTO projects (name, customer_id, stage, progress, end_user, design_institute,
       valve_needs, quantity, contract_amount, signed_at, bid_date, bid_result, win_rate_note,
-      start_date, end_date, delivery_date, owner, remark, data_origin, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Excel 导入', ?, ?)
+      start_date, end_date, delivery_date, owner, remark, archived, data_origin, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Excel 导入', ?, ?)
   `).run(
     d.name, cust.id, d.stage || '信息收集', Number(d.progress) || 0,
     d.end_user || '', d.design_institute || '', d.valve_needs || '', Number(d.quantity) || 0,
     Number(d.contract_amount) || 0, d.signed_at || null, d.bid_date || null,
     d.bid_result || '', d.win_rate_note || '', d.start_date || null, d.end_date || null,
-    d.delivery_date || null, d.owner || '', d.remark || '', ts, ts
+    d.delivery_date || null, d.owner || '', d.remark || '', current ? 1 : 0, ts, ts
   );
   const id = Number(info.lastInsertRowid);
   db.prepare(
     `INSERT INTO activity_logs (entity_type, entity_id, action, summary, detail, created_at)
      VALUES ('project', ?, 'create', ?, '', ?)`
-  ).run(id, `Excel 导入新建项目：${d.name}`, ts);
+  ).run(id, `Excel 导入新建项目：${d.name}${current ? '（该客户已有当前项目，本条转为历史）' : ''}`, ts);
   return id;
 }
 

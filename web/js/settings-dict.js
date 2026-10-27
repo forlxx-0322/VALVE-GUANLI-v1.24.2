@@ -1,6 +1,10 @@
 /**
  * 设置页 · 字典管理
- * 18+ 类下拉选项的增删改、停用/启用、排序、改名（改名不影响历史数据）
+ * 下拉选项的增删改、停用/启用、排序、改名（改名不影响历史数据）
+ *
+ * 1.23 客户精简后，客户只用到「行业 / 客户来源」两类；
+ * 其余与客户旧字段绑定的字典（主体类型 / 采购模式 / 企业性质 / 账期 /
+ * 客户等级 / 客户状态）不再出现在界面，但数据保留（不影响历史报表）。
  */
 'use strict';
 
@@ -10,17 +14,30 @@ window.CRM = window.CRM || {};
 
   const DICT_GROUPS = [
     {
-      title: 'A. 客户画像',
+      title: 'A. 客户资料',
       cats: [
-        { key: 'industry', label: '下游行业' },
-        { key: 'customer_type', label: '客户主体类型' },
-        { key: 'purchase_mode', label: '采购模式' },
-        { key: 'enterprise_nature', label: '企业性质' },
+        { key: 'industry', label: '行业' },
         { key: 'customer_source', label: '客户来源' }
       ]
     },
     {
-      title: 'B. 阀门产品参数',
+      title: 'B. 项目与回款',
+      cats: [
+        { key: 'project_stage', label: '项目阶段' },
+        { key: 'payment_method', label: '收款方式' }
+      ]
+    },
+    {
+      title: 'C. 跟进与联系人',
+      cats: [
+        { key: 'follow_method', label: '跟进方式' },
+        { key: 'follow_result', label: '跟进结果' },
+        { key: 'contact_position', label: '联系人职位' },
+        { key: 'contact_influence', label: '联系人影响力' }
+      ]
+    },
+    {
+      title: 'D. 阀门产品参数（1.24 产品模块使用）',
       cats: [
         { key: 'valve_type', label: '阀门类型' },
         { key: 'drive_mode', label: '驱动方式' },
@@ -30,25 +47,6 @@ window.CRM = window.CRM || {};
         { key: 'design_standard', label: '设计标准' },
         { key: 'connection_type', label: '连接方式' },
         { key: 'cert_required', label: '认证要求' }
-      ]
-    },
-    {
-      title: 'C. 商务与流程',
-      cats: [
-        { key: 'account_period', label: '账期' },
-        { key: 'customer_level', label: '客户等级' },
-        { key: 'customer_status', label: '客户状态' },
-        { key: 'project_stage', label: '项目阶段' },
-        { key: 'follow_method', label: '跟进方式' },
-        { key: 'follow_result', label: '跟进结果' },
-        { key: 'payment_method', label: '收款方式' }
-      ]
-    },
-    {
-      title: 'D. 人员与联系人',
-      cats: [
-        { key: 'contact_position', label: '联系人职位' },
-        { key: 'contact_influence', label: '联系人影响力' }
       ]
     }
   ];

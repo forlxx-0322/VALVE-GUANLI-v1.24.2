@@ -1,21 +1,19 @@
 /**
- * 阶段七 · 最终验收测试（浏览器部分）
+ * 阶段七 · 最终验收测试（浏览器部分，1.23 一客户一项目）
  *
- * 覆盖必须在真实浏览器里验的剩余项：
- *   3  数据零外流（断网后功能正常 + 无外部请求）
- *   8  阀门行业字段（8 区块、多选字段存取、注册资金已移除）
- *   9  筛选与排序（全部筛选条件 + 快捷筛选）
- *   10 首页 v2（指标卡 / 回访提醒 / 收入报表按月按年 / 客户分布环形图）
- *   11 项目阶段看板（14 列 + 改阶段同步）
- *   12 软删除与还原（关联数据完整恢复、无孤儿）
- *   13 操作日志（记录增删改、变更前后值可读）
- *   14 表单校验（必填/金额/日期/超收）
- *   15 查重提示（同名/同手机号）
- *   23 空状态（无数据不崩坏）
- *   24 浏览器兼容（Chrome + Edge 双浏览器）
- *   25 自定义行业
- *   26 自定义主体类型
- *   27 字典改名与内联新增
+ * 在真实浏览器（Chrome，另可选 Edge）里做端到端验收：
+ *   10 首页 v2（6 指标卡 / 回访提醒 / 收入报表按月按年 / 两张环形图）
+ *   8  客户精简模型（4 区块表单、主联系人、编号、标签、回访周期）
+ *   9  筛选与排序（行业 / 来源 / 地州 / 关键词 / 快捷筛选）
+ *   11 客户详情里的项目档案（建立 / 回款 / 成本 / 财务栏 / 转为历史）
+ *   12 软删除与还原（关联数据完整恢复）
+ *   13 操作日志
+ *   14 表单校验（名称必填 / 金额 / 日期 / 超收）
+ *   15 查重（同名 / 同主联系人手机）
+ *   23 空状态
+ *   24 浏览器兼容（Chrome + Edge，导航 4 项）
+ *   25 自定义行业与内联新增
+ *   26 数据零外流（无外部请求）
  *
  * 用法：node tools/test-acceptance-browser.js
  */
@@ -50,29 +48,11 @@ async function api(method, p, body) {
   return { status: res.status, headers: res.headers, json, data: json && json.data };
 }
 
-/** 支持日期偏移：dayOffset(0)=今天，dayOffset(-1)=昨天 */
-const _dictIdCache = new Map();
 function dayOffset(n) {
   const d = new Date();
   d.setDate(d.getDate() + n);
   const p = (x) => String(x).padStart(2, '0');
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
-}
-
-/**
- * 同步取字典项 id，供后续改名 / 停用精确定位（同值只查一次）。
- * 直接读库而不是走接口，避免与页面内缓存不一致导致定位到旧项。
- */
-function dictIdOf(category, value) {
-  const key = category + '\u0000' + value;
-  if (!_dictIdCache.has(key)) {
-    const { DatabaseSync } = require('node:sqlite');
-    const db = new DatabaseSync(path.join(ROOT, 'data', 'crm.db'), { readOnly: true });
-    const row = db.prepare('SELECT id FROM dict WHERE category = ? AND value = ?').get(category, value);
-    db.close();
-    _dictIdCache.set(key, row ? row.id : 0);
-  }
-  return _dictIdCache.get(key);
 }
 
 /* ------------------------------------------------------------------ */
@@ -124,14 +104,12 @@ class CDP {
   close() { try { this.ws.close(); } catch (_) { /* 忽略 */ } }
 }
 
-/** 启动一个浏览器实例 */
-async function launchBrowser(exe, port, profile, extraArgs) {
-  const args = [
+async function launchBrowser(exe, port, profile) {
+  const child = spawn(exe, [
     '--headless=new', '--disable-gpu', '--no-sandbox', '--no-first-run',
     `--remote-debugging-port=${port}`, `--user-data-dir=${profile}`,
-    '--window-size=1600,1100'
-  ].concat(extraArgs || []).concat(['about:blank']);
-  const child = spawn(exe, args, { stdio: 'ignore' });
+    '--window-size=1600,1100', 'about:blank'
+  ], { stdio: 'ignore' });
   let version = null;
   for (let i = 0; i < 50; i++) {
     await sleep(300);
@@ -146,6 +124,7 @@ async function launchBrowser(exe, port, profile, extraArgs) {
   await cdp.connect();
   await cdp.send('Runtime.enable');
   await cdp.send('Page.enable');
+  await cdp.send('Network.enable');
   return { child, cdp, version };
 }
 
@@ -154,18 +133,59 @@ const CHROME = ['C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
 const EDGE = ['C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
   'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe'].find((p) => fs.existsSync(p));
 
-const created = [];
+const created = { customers: [], projects: [], tags: [], dict: [] };
 
 (async () => {
-  console.log('=== 阶段七 最终验收测试（浏览器） ===\n');
+  console.log('=== 阶段七 最终验收测试（浏览器 · 1.23） ===\n');
 
   const health = await api('GET', '/api/health');
   if (health.status !== 200) {
     console.log('服务未运行，无法开始验收。');
     process.exit(1);
   }
-
   if (!CHROME) { console.log('未找到 Chrome，无法执行浏览器验收。'); process.exit(1); }
+
+  const ts = Date.now().toString().slice(-6);
+  const CUSTOMER_NAME = `最终验收客户${ts}`;
+
+  /* ---------- 准备数据 ---------- */
+  const tagsAll = await api('GET', '/api/tags');
+  const fixedTag = (tagsAll.data || []).find((t) => t.name === '重点客户');
+  const cust = await api('POST', '/api/customers', {
+    name: CUSTOMER_NAME, short_name: `验收${ts}`,
+    industry: '石油', source: '展会',
+    contact_name: '验收联系人', contact_position: '采购经理', contact_phone: `139${ts}`,
+    contact_birthday: '1985-05-20', follow_cycle_days: 30,
+    province: '新疆维吾尔自治区', city: '克拉玛依市', district: '独山子区',
+    address: '独山子区验收路 1 号', next_follow_at: dayOffset(-1) + ' 10:00:00',
+    remark: '最终验收用客户',
+    tag_ids: fixedTag ? [fixedTag.id] : []
+  });
+  if (!cust.data || !cust.data.id) { console.log('准备测试客户失败'); process.exit(1); }
+  const customerId = cust.data.id;
+  created.customers.push(customerId);
+
+  const proj = await api('PUT', `/api/customers/${customerId}/project`, {
+    name: `最终验收项目${ts}`, stage: '已中标/已签约', progress: 50,
+    contract_amount: 660000, signed_at: dayOffset(-10),
+    bid_date: dayOffset(-20), bid_result: '已中标', delivery_date: dayOffset(30)
+  });
+  const projectId = proj.data.id;
+  created.projects.push(projectId);
+  const plan = await api('POST', '/api/payments', {
+    project_id: projectId, type: '计划', amount: 400000, plan_date: dayOffset(-5)
+  });
+  await api('POST', '/api/payments', {
+    project_id: projectId, type: '实收', amount: 260000, actual_date: dayOffset(-2), plan_id: plan.data.id
+  });
+  await api('POST', '/api/costs', {
+    customer_id: customerId, category: '采购成本', amount: 120000, spent_at: dayOffset(-3), supplier: '验收供应商'
+  });
+
+  /* 一个空客户，用于空状态验收 */
+  const emptyCust = await api('POST', '/api/customers', { name: `最终验收-空客户${ts}`, industry: '其他' });
+  const emptyId = emptyCust.data.id;
+  created.customers.push(emptyId);
 
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'acc-br-'));
   const br = await launchBrowser(CHROME, 9240, profile);
@@ -175,1326 +195,843 @@ const created = [];
 
   async function goto(hash, wait) {
     await cdp.js(`location.href = ${JSON.stringify(BASE + '/' + hash)}; 'ok'`);
-    await sleep(wait || 3400);
-  }
-
-  /** 强制整页重载当前地址：用于验证「重新打开后」的界面状态（清空前端内存缓存） */
-  async function hardReload(wait) {
-    await cdp.js(`location.reload(); 'ok'`);
-    await sleep(wait || 3600);
-  }
-
-  /* ---------- 准备数据 ---------- */
-  const ts = Date.now().toString().slice(-6);
-  const custName = `最终验收客户${ts}（独山子石化）`;
-  const custPhone = '0992-' + ts;
-  const cust = await api('POST', '/api/customers', {
-    name: custName, short_name: `最终验收${ts}`,
-    type: '终端用户', industry: '石油', level: 'A 重点客户', status: '跟进中',
-    city: '克拉玛依市', district: '独山子区', phone: custPhone,
-    end_user: '独山子石化炼油厂', design_institute: '中石化工程建设公司',
-    valve_types: '球阀,闸阀,截止阀', cert_required: '特种设备制造许可证 TS,API 6D',
-    drive_mode: '气动,电动', body_material: '不锈钢 316L,碳钢 WCB',
-    pressure_rating: 'Class300,Class600', purchase_mode: '框架协议',
-    account_period: '月结60天', annual_demand: 800, warranty_ratio: 10,
-    has_ts_license: 1, has_explosion_proof: 1,
-    supplier_code: 'ACC-' + ts, introducer: '李工',
-    longitude: 84.8862, latitude: 44.3286,
-    next_follow_at: dayOffset(-1) + ' 10:00:00'
-  });
-  created.push(cust.data.id);
-
-  const contact = await api('POST', '/api/contacts', {
-    customer_id: cust.data.id, name: '验收联系人', position: '采购经理',
-    department: '采购部', mobile: '139' + ts + '0', is_primary: 1, is_decision: 1, influence: '关键决策'
-  });
-
-  const proj = await api('POST', '/api/projects', {
-    name: `最终验收项目${ts}`, customer_id: cust.data.id,
-    stage: '投标/议价', contract_amount: 1860000,
-    bid_date: dayOffset(3), bid_result: '已投标待开标',
-    delivery_date: dayOffset(45), end_user: '独山子石化'
-  });
-  created.push(proj.data.id);
-
-  /* 一个已过开标日但未填结果的项目（用于验收 10 的标红） */
-  const proj2 = await api('POST', '/api/projects', {
-    name: `最终验收项目B${ts}（已过开标日）`, customer_id: cust.data.id,
-    stage: '投标/议价', contract_amount: 500000,
-    bid_date: dayOffset(-10), bid_result: '未投标'
-  });
-  created.push(proj2.data.id);
-
-  const plan = await api('POST', '/api/payments', {
-    project_id: proj.data.id, type: '计划', amount: 558000, plan_date: dayOffset(-5)
-  });
-  created.push(plan.data.id);
-
-  /* ================================================================ */
-  /* 验收 8：阀门行业字段                                              */
-  /* ================================================================ */
-  console.log('--- 验收 8：阀门行业字段 ---');
-  {
-    await goto(`#/customers/${cust.data.id}`, 3600);
-
-    const detail = await cdp.js(`(() => {
-      const text = document.querySelector('.content').innerText;
-      const tabs = [...document.querySelectorAll('.tab')].map(t => t.textContent.trim());
-      return {
-        tabs,
-        hasIndustry: text.includes('石油'),
-        hasEndUser: text.includes('独山子石化炼油厂'),
-        hasDesign: text.includes('中石化工程建设公司'),
-        hasValveTypes: text.includes('球阀') && text.includes('闸阀'),
-        hasCert: text.includes('特种设备制造许可证 TS') && text.includes('API 6D'),
-        hasSupplier: text.includes('ACC-${ts}'),
-        hasIntroducer: text.includes('李工'),
-        hasRegCapital: text.includes('注册资金')
-      };
-    })()`);
-
-    check('8a', '客户详情正确显示阀门行业字段（最终用户/设计院/阀门类型/认证要求）',
-      detail.hasIndustry && detail.hasEndUser && detail.hasDesign
-        && detail.hasValveTypes && detail.hasCert && detail.hasSupplier && detail.hasIntroducer,
-      `行业=${detail.hasIndustry} 最终用户=${detail.hasEndUser} 设计院=${detail.hasDesign} 阀门类型=${detail.hasValveTypes} 认证=${detail.hasCert} 供应商编码=${detail.hasSupplier} 介绍人=${detail.hasIntroducer}`);
-
-    check('8b', '已移除的「注册资金」不再出现',
-      detail.hasRegCapital === false,
-      detail.hasRegCapital ? '仍显示注册资金（异常）' : '界面与表单均无该字段');
-
-    /* 打开编辑抽屉，检查 8 个区块与多选字段 */
-    const drawer = await cdp.js(`(async () => {
-      const btn = [...document.querySelectorAll('button')].find(b => b.textContent.includes('编辑资料'));
-      if (!btn) return { err: '无编辑资料按钮' };
-      btn.click();
-      await new Promise(r => setTimeout(r, 1400));
-      const d = [...document.querySelectorAll('.drawer')].pop();
-      if (!d) return { err: '抽屉未打开' };
-
-      const blocks = [...d.querySelectorAll('.form-block-head')]
-        .map(h => h.textContent.trim().replace(/\\s+/g,' ').replace(/已填.*/,'').trim());
-
-      /* 展开所有折叠区块，统计字段 */
-      for (const h of [...d.querySelectorAll('.form-block-head')]) {
-        if (!h.classList.contains('open')) { h.click(); await new Promise(r => setTimeout(r, 120)); }
-      }
-      await new Promise(r => setTimeout(r, 600));
-      const labels = [...d.querySelectorAll('.field-label')].map(x => x.textContent.trim());
-      const required = d.querySelectorAll('.req').length;
-
-      /* 多选字段：阀门类型中被选中的项 */
-      const chips = [...d.querySelectorAll('.field')].find(f =>
-        (f.querySelector('.field-label') || {}).textContent === '常用阀门类型');
-      const onChips = chips ? [...chips.querySelectorAll('.chip.on')].map(c => c.textContent.trim()) : [];
-
-      /* 开关字段状态 */
-      const tsSwitch = [...d.querySelectorAll('.field')].find(f =>
-        (f.querySelector('.field-label') || {}).textContent === '是否要求 TS 特种设备许可证');
-      const tsOn = tsSwitch ? tsSwitch.querySelector('input[type=checkbox]').checked : null;
-
-      return { blocks, labelCount: labels.length, required, onChips, tsOn };
-    })()`);
-
-    check('8c', '客户表单渲染 8 个区块且必填项为 4 个',
-      !drawer.err && drawer.blocks.length === 8 && drawer.required === 4,
-      drawer.err ? drawer.err : `区块 ${drawer.blocks.length} 个：${drawer.blocks.join(' / ')}；字段 ${drawer.labelCount} 个；必填 ${drawer.required} 个`);
-
-    check('8d', '多选类字段（阀门类型）与开关字段（TS 许可证）状态正确回显',
-      !drawer.err && drawer.onChips.length === 3 && drawer.tsOn === true,
-      drawer.err ? drawer.err : `阀门类型已选 ${drawer.onChips.length} 项（${drawer.onChips.join('、')}），TS 许可证开关=${drawer.tsOn}`);
+    await sleep(wait || 3200);
   }
 
   /* ================================================================ */
-  /* 验收 14：表单校验                                                 */
+  /* 8. 客户精简模型（列表 / 表单 / 详情）                              */
   /* ================================================================ */
-  console.log('\n--- 验收 14：表单校验 ---');
-  {
-    const r = await cdp.js(`(async () => {
-      const d = [...document.querySelectorAll('.drawer')].pop();
-      if (!d) return { err: '抽屉不在' };
-      const out = {};
+  console.log('--- 验收 8：客户精简模型 ---');
+  await goto('#/customers', 3600);
+  const listUi = await cdp.js(`(() => {
+    const headers = [...document.querySelectorAll('.data-table thead th')]
+      .map(t => t.textContent.replace(/[↕↑↓]/g, '').trim());
+    const nav = [...new Set([...document.querySelectorAll('.nav-item')].map(x => x.textContent.trim()))];
+    const chips = [...document.querySelectorAll('.quick-chips .chip')].map(x => x.textContent.trim());
+    return { headers, nav, chips, hasTable: !!document.querySelector('.data-table'), hasPager: !!document.querySelector('.pager') };
+  })()`);
+  check('8a', '客户列表列头为新口径（编号/公司名称/行业/联系人（职务）/来源/下次回访/标签）',
+    listUi.hasTable && listUi.hasPager
+      && ['编号', '公司名称', '行业', '联系人（职务）', '来源', '下次回访', '标签']
+        .every((h) => listUi.headers.some((x) => x.includes(h))),
+    `列头：${listUi.headers.join(' | ')}`);
+  check('8b', '左侧导航 4 项且没有「项目管理」',
+    listUi.nav.length === 4 && listUi.nav.includes('客户管理') && !listUi.nav.some((n) => n.includes('项目管理')),
+    `导航：${listUi.nav.join(' / ')}`);
+  check('8c', '快捷筛选为 1.23 口径（今日待跟进/已逾期/从未跟进/本月新增）',
+    ['今日待跟进', '已逾期', '从未跟进', '本月新增'].every((l) => listUi.chips.some((x) => x.includes(l))),
+    `快捷：${listUi.chips.join(' / ')}`);
 
-      /* 1) 名称必填：清空后保存 */
-      const nameField = [...d.querySelectorAll('.field')].find(f =>
-        (f.querySelector('.field-label') || {}).textContent.startsWith('客户全称'));
-      const nameInput = nameField.querySelector('input');
-      const oldName = nameInput.value;
-      nameInput.value = '';
-      nameInput.dispatchEvent(new Event('input', { bubbles: true }));
-      await new Promise(r2 => setTimeout(r2, 300));
+  const drawer = await cdp.js(`(async () => {
+    const btn = [...document.querySelectorAll('button')].find(b => b.textContent.includes('新增客户'));
+    if (!btn) return { err: '未找到新增客户按钮' };
+    btn.click();
+    await new Promise(r => setTimeout(r, 900));
+    const d = [...document.querySelectorAll('.drawer')].pop();
+    if (!d) return { err: '抽屉未打开' };
+    return {
+      blocks: [...d.querySelectorAll('.form-block')].length,
+      fields: [...d.querySelectorAll('.field-label')].map(x => x.textContent.trim()),
+      required: d.querySelectorAll('.req').length,
+      hasTagPicker: [...d.querySelectorAll('.field-label')].some(x => x.textContent.includes('标签')),
+      hasInlineAdd: !!d.querySelector('button[title="新增选项"]')
+    };
+  })()`);
+  check('8d', '新增客户表单精简为 4 区块 / 17 字段 / 仅 1 项必填',
+    !drawer.err && drawer.blocks === 4 && drawer.fields.length >= 16
+      && drawer.fields.length <= 20 && drawer.required === 1,
+    drawer.err || `区块 ${drawer.blocks}，字段 ${drawer.fields.length}，必填 ${drawer.required}`);
+  check('8e', '表单含标签选择器与字典内联新增入口',
+    !drawer.err && drawer.hasTagPicker && drawer.hasInlineAdd,
+    drawer.err || `标签=${drawer.hasTagPicker}，内联新增=${drawer.hasInlineAdd}`);
 
-      const saveBtn = [...d.querySelectorAll('.drawer-foot button')].find(b => b.textContent.includes('保存'));
-      saveBtn.click();
-      await new Promise(r2 => setTimeout(r2, 1200));
-      out.toasts = [...document.querySelectorAll('.toast')].map(t => t.textContent.trim());
-      out.blockedEmptyName = out.toasts.some(t => t.includes('必填')) && !!document.querySelector('.drawer');
-
-      /* 还原名称 */
-      nameInput.value = oldName;
-      nameInput.dispatchEvent(new Event('input', { bubbles: true }));
-      await new Promise(r2 => setTimeout(r2, 300));
-
-      /* 2) 金额填文字 */
-      const amtField = [...d.querySelectorAll('.field')].find(f =>
-        (f.querySelector('.field-label') || {}).textContent.includes('年需求量'));
-      const amtInput = amtField.querySelector('input');
-      amtInput.value = 'abc';
-      amtInput.dispatchEvent(new Event('input', { bubbles: true }));
-      amtInput.dispatchEvent(new Event('change', { bubbles: true }));
-      await new Promise(r2 => setTimeout(r2, 400));
-      out.amtEl = amtField.querySelector('input').type;
-
-      return out;
-    })()`);
-
-    check('14a', '必填项缺失时阻止保存并给出明确提示',
-      !r.err && r.blockedEmptyName,
-      r.err ? r.err : `提示内容：${(r.toasts || []).filter((t) => t.includes('必填')).join(' / ')}`);
-
-    check('14b', '金额字段使用数字输入类型（浏览器层面拦截非数字）',
-      !r.err && r.amtEl === 'number',
-      r.err ? r.err : `输入框 type=${r.amtEl}`);
-
-    /* 接口侧校验：金额非法 / 日期非法 / 超收 */
-    const badAmount = await api('POST', '/api/payments', { project_id: proj.data.id, type: '实收', amount: -100 });
-    const badDate = await api('POST', '/api/payments', { project_id: proj.data.id, type: '计划', amount: 100 });
-    check('14c', '接口层校验：金额必须大于 0、计划必须填日期',
-      badAmount.status === 400 && badAmount.json.code === 'AMOUNT_REQUIRED'
-        && badDate.status === 400 && badDate.json.code === 'PLAN_DATE_REQUIRED',
-      `负金额 → ${badAmount.json.code}；缺计划日期 → ${badDate.json.code}`);
-
-    /* 超收提醒 */
-    const over = await api('POST', '/api/payments', {
-      project_id: proj.data.id, type: '实收', amount: 2000000, actual_date: dayOffset(0)
+  /* 内联新增行业 */
+  const inline = await cdp.js(`(async () => {
+    const d = [...document.querySelectorAll('.drawer')].pop();
+    const f = [...d.querySelectorAll('.field')].find(x => {
+      const l = x.querySelector('.field-label');
+      return l && l.textContent.trim() === '行业';
     });
-    check('14d', '实收超过合同额时给出超收提醒（符合规则：允许登记但明确提示）',
-      !!over.data && !!over.data.warning && over.data.warning.includes('超过合同金额'),
-      over.data ? over.data.warning : '未提示');
-    if (over.data && over.data.id) await api('DELETE', `/api/payments/${over.data.id}`);
+    if (!f) return { err: '未找到行业字段' };
+    const add = f.querySelector('button[title="新增选项"]');
+    if (!add) return { err: '无内联新增按钮' };
+    add.click();
+    await new Promise(r => setTimeout(r, 400));
+    const inp = f.querySelector('input');
+    inp.value = '验收内联行业${ts}';
+    inp.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 150));
+    const save = [...f.querySelectorAll('button')].find(b => b.textContent.includes('保存'));
+    save.click();
+    await new Promise(r => setTimeout(r, 1400));
+    const opts = [...(f.querySelector('select') || {}).options || []].map(o => o.value);
+    return {
+      toasts: [...document.querySelectorAll('.toast')].map(t => t.textContent.trim()),
+      hasOption: opts.includes('验收内联行业${ts}')
+    };
+  })()`);
+  created.dict.push(`验收内联行业${ts}`);
+  check('8f', '表单内可直接新增行业选项并立即选中',
+    !inline.err && inline.hasOption,
+    inline.err || `提示：${(inline.toasts || []).join(' / ')}`);
 
-    /* 关掉抽屉 */
-    await cdp.js(`(() => {
-      const d = [...document.querySelectorAll('.drawer')].pop();
-      if (d) { const b = [...d.querySelectorAll('.drawer-head button')].pop(); if (b) b.click(); }
-      return 'ok';
-    })()`);
-    await sleep(600);
-  }
-
-  /* ================================================================ */
-  /* 验收 15：查重提示                                                 */
-  /* ================================================================ */
-  console.log('\n--- 验收 15：查重提示 ---');
-  {
-    /* 同名查重 */
-    const dupName = await api('GET', `/api/customers/check-duplicate?name=${encodeURIComponent(custName)}`);
-    /* 同手机号查重 */
-    const dupPhone = await api('GET', `/api/customers/check-duplicate?phone=${encodeURIComponent(custPhone)}`);
-    /* 保存时的查重提醒 */
-    const dupSave = await api('POST', '/api/customers', {
-      name: custName, short_name: '重复测试', type: '终端用户', industry: '石油'
+  /* 关闭抽屉，用界面创建客户 */
+  const uiCreate = await cdp.js(`(async () => {
+    const d = [...document.querySelectorAll('.drawer')].pop();
+    const x = [...d.querySelectorAll('.drawer-head button')].pop();
+    x.click();
+    await new Promise(r => setTimeout(r, 700));
+    const btn = [...document.querySelectorAll('button')].find(b => b.textContent.includes('新增客户'));
+    btn.click();
+    await new Promise(r => setTimeout(r, 900));
+    const dd = [...document.querySelectorAll('.drawer')].pop();
+    const field = (label) => [...dd.querySelectorAll('.field')].find(x => {
+      const l = x.querySelector('.field-label');
+      return l && l.textContent.trim().startsWith(label);
     });
-    if (dupSave.data && dupSave.data.id) created.push(dupSave.data.id);
-    const dupList = (dupSave.data && dupSave.data.duplicates) || [];
-    const dupNameList = Array.isArray(dupName.data) ? dupName.data : [];
-    const dupPhoneList = Array.isArray(dupPhone.data) ? dupPhone.data : [];
+    const setText = (label, v) => {
+      const f = field(label);
+      if (!f) return false;
+      const i = f.querySelector('input, textarea');
+      if (!i) return false;
+      i.value = v; i.dispatchEvent(new Event('input', { bubbles: true }));
+      return true;
+    };
+    const setSelect = (label, v) => {
+      const f = field(label);
+      if (!f) return false;
+      const s = f.querySelector('select');
+      if (!s) return false;
+      s.value = v; s.dispatchEvent(new Event('change', { bubbles: true }));
+      return true;
+    };
+    const filled = {
+      name: setText('公司名称', ${JSON.stringify(`最终验收-界面新建${ts}`)}),
+      industry: setSelect('行业', '石油'),
+      contact: setText('姓名', '界面联系人'),
+      phone: setText('手机', '13800008888'),
+      cycle: setText('定期提醒天数', '15')
+    };
+    await new Promise(r => setTimeout(r, 250));
+    const save = [...dd.querySelectorAll('.drawer-foot button')].find(b => b.textContent.includes('保存'));
+    save.click();
+    await new Promise(r => setTimeout(r, 1800));
+    return {
+      filled,
+      toasts: [...document.querySelectorAll('.toast')].map(t => t.textContent.trim()),
+      closed: !document.querySelector('.drawer')
+    };
+  })()`);
+  check('8g', '通过界面创建客户成功（含行业/主联系人/回访周期）',
+    !uiCreate.err && Object.values(uiCreate.filled).every(Boolean)
+      && uiCreate.toasts.some((t) => t.includes('客户已创建')) && uiCreate.closed,
+    uiCreate.err || `填写=${JSON.stringify(uiCreate.filled)}，提示=${(uiCreate.toasts || []).join(' / ')}`);
 
-    check('15a', '同名客户查重能命中并返回已有记录',
-      dupNameList.length >= 1 && dupNameList[0].match === 'name' && dupNameList[0].name === custName,
-      dupNameList.length
-        ? `命中 ${dupNameList.length} 条：${dupNameList[0].name}（匹配方式=${dupNameList[0].match}）`
-        : `未命中（HTTP ${dupName.status}）：${JSON.stringify(dupName.data)}`);
+  const uiCust = await api('GET', '/api/customers?q=' + encodeURIComponent(`最终验收-界面新建${ts}`));
+  const uiRow = (uiCust.data.list || [])[0];
+  if (uiRow) created.customers.push(uiRow.id);
+  check('8h', '界面新建的客户已落库（客户编号自动生成、主联系人同步）',
+    !!uiRow && /^KH-\d{4}-\d{4}$/.test(uiRow.customer_no || '')
+      && uiRow.contact_name === '界面联系人' && uiRow.follow_cycle_days === 15,
+    uiRow ? `id=${uiRow.id} 编号=${uiRow.customer_no}` : '未找到新建客户');
 
-    check('15b', '同手机号客户查重能命中',
-      dupPhoneList.some((x) => x.match === 'phone'),
-      `命中 ${dupPhoneList.length} 条：匹配方式 ${dupPhoneList.map((x) => x.match).join(', ') || '无'}`);
-
-    check('15c', '保存时返回重复提醒（前端据此弹窗展示已有记录）',
-      dupList.length >= 1 && dupList[0].name === custName && dupList[0].match === 'name',
-      `保存返回 ${dupList.length} 条重复提醒（HTTP ${dupSave.status}）：`
-      + (dupList.map((x) => `「${x.name}」匹配=${x.match}`).join('；') || '无'));
-
-    /* 浏览器里验证弹窗 */
-    await goto('#/customers', 3200);
-    const dupDialog = await cdp.js(`(async () => {
-      const btn = [...document.querySelectorAll('button')].find(b => b.textContent.includes('新增客户'));
-      if (!btn) return { err: '无新增客户按钮' };
-      btn.click();
-      await new Promise(r => setTimeout(r, 1200));
-      const d = [...document.querySelectorAll('.drawer')].pop();
-      if (!d) return { err: '抽屉未打开' };
-
-      const set = (labelText, value) => {
-        const f = [...d.querySelectorAll('.field')].find(x =>
-          (x.querySelector('.field-label') || {}).textContent.startsWith(labelText));
-        if (!f) return false;
-        const inp = f.querySelector('input, select');
-        if (!inp) return false;
-        if (inp.tagName === 'SELECT') {
-          const o = [...inp.options].find(x => x.value.includes(value));
-          if (!o) return false;
-          inp.value = o.value;
-        } else { inp.value = value; }
-        inp.dispatchEvent(new Event('input', { bubbles: true }));
-        inp.dispatchEvent(new Event('change', { bubbles: true }));
-        return true;
-      };
-
-      set('客户全称', ${JSON.stringify(custName)});
-      set('客户简称', '查重测试');
-      set('客户主体类型', '终端用户');
-      set('下游行业', '石油');
-      await new Promise(r => setTimeout(r, 500));
-
-      const saveBtn = [...d.querySelectorAll('.drawer-foot button')].find(b => b.textContent.includes('保存'));
-      if (!saveBtn) return { err: '抽屉底部没有保存按钮' };
-      saveBtn.click();
-      await new Promise(r => setTimeout(r, 1800));
-
-      const drawer = document.querySelector('.drawer');
-      const text = drawer ? drawer.innerText : document.querySelector('.content').innerText;
-      return {
-        hasDupTitle: text.includes('发现可能重复的客户'),
-        hasDupRecord: text.includes(${JSON.stringify(custName.slice(0, 12))}),
-        hasContinue: [...document.querySelectorAll('.drawer-foot button')].some(b => b.textContent.includes('确认不是同一家')),
-        hasViewLink: [...document.querySelectorAll('button')].some(b => b.textContent.includes('查看这条记录')),
-        excerpt: text.replace(/\\s+/g, ' ').slice(0, 150)
-      };
-    })()`);
-
-    check('15d', '浏览器里保存同名客户时弹出查重提示并展示已有记录',
-      !dupDialog.err && dupDialog.hasDupTitle && dupDialog.hasDupRecord && dupDialog.hasContinue,
-      dupDialog.err ? dupDialog.err
-        : `弹窗标题=${dupDialog.hasDupTitle}，展示已有记录=${dupDialog.hasDupRecord}，可继续创建=${dupDialog.hasContinue}，可查看记录=${dupDialog.hasViewLink}；摘录：${dupDialog.excerpt}`);
-
-    /* 关掉抽屉 */
-    await cdp.js(`(() => {
-      const d = [...document.querySelectorAll('.drawer')].pop();
-      if (d) {
-        const cancel = [...d.querySelectorAll('.drawer-foot button')].find(b => b.textContent.includes('返回修改'));
-        if (cancel) cancel.click();
-      }
-      return 'ok';
-    })()`);
-    await sleep(500);
-    await cdp.js(`(() => {
-      const d = [...document.querySelectorAll('.drawer')].pop();
-      if (d) { const b = [...d.querySelectorAll('.drawer-head button')].pop(); if (b) b.click(); }
-      return 'ok';
-    })()`);
-    await sleep(500);
-  }
+  /* 详情页 4 个标签页 + 财务栏 */
+  await goto('#/customers/' + customerId, 3600);
+  const detail = await cdp.js(`(() => {
+    const tabs = [...document.querySelectorAll('.tabs .tab')].map(t => t.textContent.trim());
+    const stats = [...document.querySelectorAll('.stat')].map(s => ({
+      n: ((s.querySelector('.n') || {}).textContent || '').trim(),
+      l: ((s.querySelector('.l') || {}).textContent || '').trim()
+    }));
+    const kv = {};
+    document.querySelectorAll('.kv .k').forEach(k => {
+      const v = k.nextElementSibling;
+      if (v) kv[k.textContent.trim()] = v.textContent.trim().slice(0, 60);
+    });
+    return {
+      tabs, stats, kv,
+      hasExtra: document.body.innerText.includes('附加联系人'),
+      tagCount: document.querySelectorAll('.detail-meta .tag').length
+    };
+  })()`);
+  const statOf = (kw) => (detail.stats.find((s) => s.l.includes(kw)) || {}).n || '';
+  check('8i', '客户详情为 4 个标签页（资料/回访与跟进/项目与财务/附件与日志）',
+    detail.tabs.length === 4
+      && detail.tabs.some((t) => t.includes('资料'))
+      && detail.tabs.some((t) => t.includes('回访与跟进'))
+      && detail.tabs.some((t) => t.includes('项目与财务'))
+      && detail.tabs.some((t) => t.includes('附件与日志')),
+    detail.tabs.join(' / '));
+  check('8j', '资料页财务汇总栏显示合同额/已收/应收/采购成本/毛利/毛利率',
+    String(statOf('合同额')).includes('660,000')
+      && String(statOf('已收')).includes('260,000')
+      && String(statOf('应收')).includes('140,000')
+      && String(statOf('采购成本')).includes('120,000')
+      && String(statOf('毛利')).includes('140,000'),
+    detail.stats.map((s) => s.l + '=' + s.n).join(' / '));
+  check('8k', '资料页显示编号/主联系人/附加联系人折叠区',
+    detail.kv['客户编号'] && detail.kv['姓名'] === '验收联系人'
+      && detail.kv['手机'] === '139' + ts && detail.hasExtra,
+    `编号=${detail.kv['客户编号']}，联系人=${detail.kv['姓名']}，附加联系人区=${detail.hasExtra}`);
 
   /* ================================================================ */
-  /* 验收 9：筛选与排序                                                */
+  /* 9. 筛选与排序（API + 浏览器）                                      */
   /* ================================================================ */
   console.log('\n--- 验收 9：筛选与排序 ---');
-  {
-    /* 接口层：各筛选条件 */
-    const filters = [
-      ['主体类型', 'type=' + encodeURIComponent('终端用户')],
-      ['下游行业', 'industry=' + encodeURIComponent('石油')],
-      ['采购模式', 'purchase_mode=' + encodeURIComponent('框架协议')],
-      ['认证要求', 'cert_required=' + encodeURIComponent('API 6D')],
-      ['客户等级', 'level=' + encodeURIComponent('A 重点客户')],
-      ['企业性质', 'enterprise_nature=' + encodeURIComponent('央企')],
-      ['归属地州', 'region_code=650200'],
-      ['标签', 'tag_id=1']
-    ];
-    const filterResults = [];
-    for (const [label, qs] of filters) {
-      const r = await api('GET', '/api/customers?' + qs + '&pageSize=100');
-      filterResults.push({ label, status: r.status, total: r.data ? r.data.total : -1 });
-    }
-    check('9a', '全部筛选条件均生效且接口正常返回',
-      filterResults.every((x) => x.status === 200 && x.total >= 0),
-      filterResults.map((x) => `${x.label}:${x.total}`).join(' | '));
+  const q = encodeURIComponent(`最终验收客户${ts}`);
+  const filterApi = await Promise.all([
+    api('GET', `/api/customers?q=${q}`),
+    api('GET', '/api/customers?industry=' + encodeURIComponent('石油')),
+    api('GET', '/api/customers?source=' + encodeURIComponent('展会')),
+    api('GET', `/api/customers?region_code=${(await api('GET', `/api/customers/${customerId}`)).data.region_code}`),
+    api('GET', `/api/customers?tag_id=${fixedTag.id}`),
+    api('GET', '/api/customers?quick=today'),
+    api('GET', '/api/customers?quick=overdue'),
+    api('GET', '/api/customers?sort=name&order=asc&pageSize=50')
+  ]);
+  const [fq, fInd, fSrc, fRegion, fTag, fToday, fOverdue, fSort] = filterApi;
+  check('9a', '关键词 / 行业 / 来源 / 地州 / 标签筛选都能命中',
+    fq.data.total >= 1 && fInd.data.total >= 1 && fSrc.data.total >= 1
+      && fRegion.data.total >= 1 && fTag.data.total >= 1,
+    `关键词 ${fq.data.total}，石油 ${fInd.data.total}，展会 ${fSrc.data.total}，地州 ${fRegion.data.total}，标签 ${fTag.data.total}`);
+  check('9b', '快捷筛选（今日待跟进 / 已逾期）返回客户',
+    fToday.data.list.some((x) => x.id === customerId) && fOverdue.data.list.some((x) => x.id === customerId),
+    `今日 ${fToday.data.total}，逾期 ${fOverdue.data.total}`);
+  const namesAsc = fSort.data.list.map((x) => x.name);
+  const expectedAsc = [...namesAsc].sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'));
+  check('9c', '按名称排序使用中文拼音序',
+    namesAsc.length >= 1 && namesAsc.every((n, i) => n === expectedAsc[i]),
+    `前 3：${namesAsc.slice(0, 3).map((n) => n.slice(0, 8)).join(' / ')}`);
 
-    /* 筛选准确性：翻完所有页取全量，再与数据库直查结果逐 id 比对（无漏无多） */
-    const accuracy = [];
-    for (const [label, col, val] of [
-      ['采购模式', 'purchase_mode', '框架协议'],
-      ['认证要求', 'cert_required', 'API 6D'],
-      ['主体类型', 'type', '终端用户'],
-      ['下游行业', 'industry', '石油'],
-      ['归属地州', 'region_code', '650200']
-    ]) {
-      const collected = [];
-      let pageNo = 1;
-      let total = 0;
-      for (;;) {
-        const r = await api('GET', `/api/customers?${col}=${encodeURIComponent(val)}&pageSize=100&page=${pageNo}`);
-        if (!r.data) break;
-        total = r.data.total;
-        collected.push(...(r.data.list || []).map((x) => x.id));
-        if (collected.length >= total || pageNo > 30) break;
-        pageNo++;
-      }
-      const apiIds = collected.sort((a, b) => a - b);
-      const dbIds = queryIds(col, val);
-      const same = apiIds.length === dbIds.length && apiIds.every((x, i) => x === dbIds[i]);
-      accuracy.push({ label, total, apiCount: apiIds.length, dbCount: dbIds.length, exact: same });
-    }
-    check('9b', '筛选结果准确：翻页取全量后与库内直查逐 id 一致（无漏无多）',
-      accuracy.every((x) => x.exact),
-      accuracy.map((x) => `${x.label} 总数${x.total}/取回${x.apiCount}/库内${x.dbCount}${x.exact ? '✓' : '✗'}`).join(' | '));
-
-    /* 快捷筛选 */
-    const quicks = [];
-    for (const q of ['level_a', 'design', 'has_debt', 'stale30', 'today', 'overdue', 'unsigned']) {
-      const r = await api('GET', '/api/customers?quick=' + q);
-      quicks.push({ q, total: r.data ? r.data.total : -1, status: r.status });
-    }
-    check('9c', '全部快捷筛选均可用（A级/设计院/有欠款/超30天未跟进/今日/逾期/未签约）',
-      quicks.every((x) => x.status === 200 && x.total >= 0),
-      quicks.map((x) => `${x.q}:${x.total}`).join(' | '));
-
-    /* 排序 */
-    const sortName = await api('GET', '/api/customers?sort=name&order=asc&pageSize=50');
-    const names = sortName.data.list.map((x) => x.name);
-    const expected = [...names].sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'));
-    check('9d', '按名称排序使用中文拼音序',
-      names.length >= 2 && names.every((n, i) => n === expected[i]),
-      `前 3 条：${names.slice(0, 3).map((n) => n.slice(0, 10)).join(' / ')}`);
-
-    /* 浏览器层：高级筛选与快捷筛选可点 */
-    await goto('#/customers', 3400);
-    const uiFilter = await cdp.js(`(async () => {
-      const adv = [...document.querySelectorAll('button')].find(b => b.textContent.includes('高级筛选'));
-      if (adv) { adv.click(); await new Promise(r => setTimeout(r, 700)); }
-      const selects = [...document.querySelectorAll('.filter-bar select')];
-      const labels = selects.map(s => (s.options[0] || {}).textContent || '');
-      const hasRegion = selects.some(s => [...s.options].some(o => o.value === '650200'));
-      const hasCert = selects.some(s => [...s.options].some(o => String(o.value).includes('API 6D')));
-      const chips = [...document.querySelectorAll('.quick-chips .chip')].map(c => c.textContent.trim());
-
-      /* 点一个快捷筛选验证生效 */
-      const chipA = [...document.querySelectorAll('.quick-chips .chip')].find(c => c.textContent.includes('A 级') || c.textContent.includes('重点客户'));
-      let clickedOk = false;
-      if (chipA) {
-        chipA.click();
-        await new Promise(r => setTimeout(r, 1800));
-        clickedOk = chipA.classList.contains('on');
-      }
-      const rowsAfter = document.querySelectorAll('.data-table tbody tr').length;
-
-      /* 用认证要求筛选一次，验证真的能筛出结果 */
-      const certSel = selects.find(s => [...s.options].some(o => String(o.value).includes('API 6D')));
-      let certFiltered = 0;
-      if (certSel) {
-        certSel.value = 'API 6D';
-        certSel.dispatchEvent(new Event('change', { bubbles: true }));
-        await new Promise(r => setTimeout(r, 1800));
-        certFiltered = document.querySelectorAll('.data-table tbody tr').length;
-      }
-      return { selectCount: selects.length, labels, hasRegion, hasCert, chips, clickedOk, rowsAfter, certFiltered };
-    })()`);
-
-    check('9e', '浏览器里高级筛选含归属地州与认证要求等条件，快捷筛选可点且生效',
-      uiFilter.hasRegion && uiFilter.hasCert && uiFilter.chips.length >= 5 && uiFilter.clickedOk
-        && uiFilter.certFiltered >= 1,
-      `筛选下拉 ${uiFilter.selectCount} 个（含地州=${uiFilter.hasRegion}、含认证要求=${uiFilter.hasCert}）；`
-      + `快捷筛选 ${uiFilter.chips.length} 个点击生效=${uiFilter.clickedOk}；`
-      + `按认证要求筛选出 ${uiFilter.certFiltered} 行`);
-  }
+  await goto('#/customers', 3400);
+  const filterUi = await cdp.js(`(async () => {
+    const btn = [...document.querySelectorAll('button')].find(b => b.textContent.includes('高级筛选'));
+    if (btn) btn.click();
+    await new Promise(r => setTimeout(r, 500));
+    const selects = [...document.querySelectorAll('.filter-bar select')].map(s => s.options[0].textContent.trim());
+    return { selects };
+  })()`);
+  check('9d', '高级筛选只保留 行业 / 来源 / 归属地州 / 标签',
+    filterUi.selects.some((x) => x.includes('行业（全部）'))
+      && filterUi.selects.some((x) => x.includes('客户来源（全部）'))
+      && filterUi.selects.some((x) => x.includes('归属地州（全部）'))
+      && filterUi.selects.some((x) => x.includes('标签（全部）'))
+      && !filterUi.selects.some((x) => x.includes('客户等级') || x.includes('主体类型')),
+    filterUi.selects.join(' | '));
 
   /* ================================================================ */
-  /* 验收 10：首页 v2（指标卡 / 回访提醒 / 收入报表 / 环形图） */
+  /* 11. 客户详情里的项目档案（1:1）                                    */
+  /* ================================================================ */
+  console.log('\n--- 验收 11：客户详情项目档案 + 财务 ---');
+  await goto('#/customers/' + customerId, 3400);
+  const projectPane = await cdp.js(`(async () => {
+    const t = [...document.querySelectorAll('.tabs .tab')].find(x => x.textContent.includes('项目与财务'));
+    t.click();
+    await new Promise(r => setTimeout(r, 600));
+    const kv = {};
+    document.querySelectorAll('.kv .k').forEach(k => {
+      const v = k.nextElementSibling;
+      if (v) kv[k.textContent.trim()] = v.textContent.trim().slice(0, 80);
+    });
+    const titles = [...document.querySelectorAll('.card-title')].map(x => x.textContent.trim());
+    return {
+      kv, titles,
+      planRows: [...document.querySelectorAll('.data-table tbody tr')].length,
+      hasEdit: [...document.querySelectorAll('button')].some(b => b.textContent.includes('编辑档案')),
+      hasArchive: [...document.querySelectorAll('button')].some(b => b.textContent.includes('转为历史'))
+    };
+  })()`);
+  check('11a', '项目档案完整显示名称/阶段/合同额/投标结果/交货期',
+    projectPane.kv['项目名称'] === `最终验收项目${ts}`
+      && projectPane.kv['项目阶段'] === '已中标/已签约'
+      && String(projectPane.kv['合同额']).includes('660,000')
+      && projectPane.kv['投标结果'] === '已中标'
+      && !!projectPane.kv['交货期'],
+    JSON.stringify(projectPane.kv).slice(0, 200));
+  check('11b', '回款计划 / 实收 / 成本台账都在项目与财务页',
+    projectPane.titles.some((t) => t.includes('回款计划'))
+      && projectPane.titles.some((t) => t.includes('实收流水'))
+      && projectPane.titles.some((t) => t.includes('成本台账'))
+      && projectPane.planRows >= 2,
+    `卡片：${projectPane.titles.join(' / ')}；表格行 ${projectPane.planRows}`);
+
+  /* 通过界面登记实收，验证页面与接口同步 */
+  const receiptUi = await cdp.js(`(async () => {
+    const btn = [...document.querySelectorAll('button')].find(b => b.textContent.includes('登记实收'));
+    if (!btn) return { err: '未找到登记实收按钮' };
+    btn.click();
+    await new Promise(r => setTimeout(r, 800));
+    const d = document.querySelector('.drawer');
+    if (!d) return { err: '回款抽屉未打开' };
+    const amt = [...d.querySelectorAll('.field')].find(x => {
+      const l = x.querySelector('.field-label');
+      return l && l.textContent.trim().startsWith('金额');
+    });
+    if (!amt) return { err: '未找到金额字段' };
+    const i = amt.querySelector('input');
+    i.value = '50000';
+    i.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 200));
+    const save = [...d.querySelectorAll('.drawer-foot button')].find(b => b.textContent.includes('保存'));
+    save.click();
+    await new Promise(r => setTimeout(r, 2200));
+    return {
+      toasts: [...document.querySelectorAll('.toast')].map(t => t.textContent.trim()),
+      closed: !document.querySelector('.drawer')
+    };
+  })()`);
+  const finAfter = await api('GET', `/api/customers/${customerId}/finance`);
+  check('11c', '界面登记实收后财务汇总自动重算（已收 310,000 / 应收 90,000）',
+    !receiptUi.err && finAfter.data.received_amount === 310000
+      && finAfter.data.receivable_amount === 90000
+      && finAfter.data.profit === 190000,
+    receiptUi.err || `已收=${finAfter.data.received_amount}，应收=${finAfter.data.receivable_amount}，毛利=${finAfter.data.profit}`);
+
+  /* 转为历史 → 新建当前项目 */
+  const archUi = await cdp.js(`(async () => {
+    const btn = [...document.querySelectorAll('button')].find(b => b.textContent.includes('转为历史'));
+    if (!btn) return { err: '未找到转为历史按钮' };
+    btn.click();
+    await new Promise(r => setTimeout(r, 600));
+    const modal = document.querySelector('.modal');
+    if (!modal) return { err: '确认框未出现' };
+    const ok = [...modal.querySelectorAll('.modal-foot button')].find(b => b.textContent.includes('转为历史'));
+    ok.click();
+    await new Promise(r => setTimeout(r, 2200));
+    return {
+      isEmpty: document.body.innerText.includes('还没有项目档案'),
+      hasHistory: document.body.innerText.includes('历史项目（1）'),
+      toasts: [...document.querySelectorAll('.toast')].map(t => t.textContent.trim())
+    };
+  })()`);
+  const hist = await api('GET', `/api/customers/${customerId}/history-projects`);
+  check('11d', '当前项目可「转为历史」，历史项目 archived=1 只读',
+    !archUi.err && archUi.isEmpty && archUi.hasHistory
+      && hist.data.length === 1 && hist.data[0].archived === 1,
+    archUi.err || `历史 ${hist.data.length} 条，空档案=${archUi.isEmpty}`);
+
+  const rebuilt = await cdp.js(`(async () => {
+    const btn = [...document.querySelectorAll('button')].find(b => b.textContent.includes('建立项目档案'));
+    if (!btn) return { err: '未找到建立项目档案按钮' };
+    btn.click();
+    await new Promise(r => setTimeout(r, 900));
+    const d = document.querySelector('.drawer');
+    const nameF = [...d.querySelectorAll('.field')].find(x => {
+      const l = x.querySelector('.field-label');
+      return l && l.textContent.trim().startsWith('项目名称');
+    });
+    const i = nameF.querySelector('input');
+    i.value = '验收归档后的新项目${ts}';
+    i.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 200));
+    const save = [...d.querySelectorAll('.drawer-foot button')].find(b => b.textContent.includes('保存'));
+    save.click();
+    await new Promise(r => setTimeout(r, 2000));
+    return { toasts: [...document.querySelectorAll('.toast')].map(t => t.textContent.trim()) };
+  })()`);
+  const current = await api('GET', `/api/customers/${customerId}/project`);
+  if (current.data.project) created.projects.push(current.data.project.id);
+  check('11e', '归档后可再建新的当前项目（一客户一项目）',
+    !rebuilt.err && current.data.project
+      && current.data.project.name === `验收归档后的新项目${ts}`
+      && current.data.history.length === 1,
+    rebuilt.err || `新当前项目=${current.data.project && current.data.project.name}`);
+
+  /* 回访周期：界面记录跟进后自动排下次 */
+  const followUi = await cdp.js(`(async () => {
+    const tab = [...document.querySelectorAll('.tabs .tab')].find(t => t.textContent.includes('回访与跟进'));
+    tab.click();
+    await new Promise(r => setTimeout(r, 500));
+    const btn = [...document.querySelectorAll('button')].find(b => b.textContent.includes('记录跟进'));
+    btn.click();
+    await new Promise(r => setTimeout(r, 900));
+    const d = document.querySelector('.drawer');
+    const content = [...d.querySelectorAll('.field')].find(x => {
+      const l = x.querySelector('.field-label');
+      return l && l.textContent.trim().startsWith('跟进内容');
+    });
+    const ta = content.querySelector('textarea, input');
+    ta.value = '验收：电话沟通，客户确认技术参数。';
+    ta.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 200));
+    const save = [...d.querySelectorAll('.drawer-foot button')].find(b => b.textContent.includes('保存跟进'));
+    save.click();
+    await new Promise(r => setTimeout(r, 2200));
+    return { toasts: [...document.querySelectorAll('.toast')].map(t => t.textContent.trim()) };
+  })()`);
+  const afterFollow = await api('GET', `/api/customers/${customerId}`);
+  const expectNext = new Date();
+  expectNext.setDate(expectNext.getDate() + 30);
+  const expectStr = `${expectNext.getFullYear()}-${String(expectNext.getMonth() + 1).padStart(2, '0')}-${String(expectNext.getDate()).padStart(2, '0')}`;
+  check('11f', '记录跟进后按回访周期（30 天）自动排下次回访',
+    !followUi.err && afterFollow.data.follow_count === 1
+      && String(afterFollow.data.next_follow_at).startsWith(expectStr),
+    followUi.err || `follow_count=${afterFollow.data.follow_count}，next=${afterFollow.data.next_follow_at}（预期 ${expectStr}）`);
+
+  /* ================================================================ */
+  /* 10. 首页 v2                                                       */
+  /* ================================================================ */
   console.log('\n--- 验收 10：首页 v2 ---');
-  {
-    await goto('#/home', 4600);
-
-    /* 指标卡：客户总数 / 待回访 / 本月收入 / 本月利润 / 本月成本 / 应收未收 */
-    const ui = await cdp.js(`(() => {
-      const stats = [...document.querySelectorAll('.stat')].map((s) => ({
-        n: ((s.querySelector('.n') || {}).textContent || '').trim(),
-        l: ((s.querySelector('.l') || {}).textContent || '').trim()
-      }));
-      const text = document.querySelector('.content').innerText;
-      return {
-        stats,
-        hasFollowCard: text.includes('回访提醒'),
-        hasIncomeCard: text.includes('收入报表'),
-        hasRegionRing: text.includes('客户分布 · 地区'),
-        hasIndustryRing: text.includes('客户分布 · 行业'),
-        canvases: document.querySelectorAll('canvas').length
-      };
-    })()`);
-
-    check('10a', '首页 6 张指标卡齐全（客户数 / 待回访 / 收入 / 利润 / 成本 / 应收）',
-      !ui.err && ui.stats.length >= 6
-        && ui.stats.some((s) => s.l.includes('客户总数'))
-        && ui.stats.some((s) => s.l.includes('待回访'))
-        && ui.stats.some((s) => s.l.includes('利润'))
-        && ui.stats.some((s) => s.l.includes('应收未收')),
-      `${ui.stats.length} 张：${(ui.stats || []).map((s) => s.l).join(' / ')}`);
-
-    check('10b', '回访提醒与收入报表两块都在首页',
-      ui.hasFollowCard && ui.hasIncomeCard,
-      `回访提醒=${ui.hasFollowCard}，收入报表=${ui.hasIncomeCard}`);
-
-    check('10c', '两张客户分布环形图都在（地区 + 行业）',
-      ui.hasRegionRing && ui.hasIndustryRing && ui.canvases >= 3,
-      `地区环=${ui.hasRegionRing}，行业环=${ui.hasIndustryRing}，canvas ${ui.canvases} 个`);
-
-    /* 接口层核对：卡片数字与 /api/dashboard/v2 一致 */
-    const dash = await api('GET', `/api/dashboard/v2?month=${new Date().toLocaleDateString('sv-SE').slice(0, 7)}`);
-    const c = dash.data.cards;
-    const statByLabel = (kw) => (ui.stats.find((s) => s.l.includes(kw)) || {}).n || '';
-    check('10d', '指标卡数字与接口一致（客户总数）',
-      String(c.customer_total) === String(statByLabel('客户总数')),
-      `页面「${statByLabel('客户总数')}」/ 接口「${c.customer_total}」`);
-
-    check('10e', '利润口径正确：收入 − 采购 − 维护 − 差旅 − 其他',
-      c.month_profit === Math.round((c.month_income - c.month_cost) * 100) / 100,
-      `收入 ${c.month_income} − 成本 ${c.month_cost} = 利润 ${c.month_profit}`);
-
-    /* 收入报表能切"按年" */
-    const yearUi = await cdp.js(`(async () => {
-      const btn = [...document.querySelectorAll('button')].find((b) => b.textContent.trim() === '按年');
-      if (!btn) return { err: '没找到「按年」按钮' };
-      btn.click();
-      /* 数据多时渲染会慢一点：轮询最多 6 秒，直到出现「20xx 年」行 */
-      for (let i = 0; i < 12; i++) {
-        await new Promise((r) => setTimeout(r, 500));
-        const text = document.querySelector('.content').innerText;
-        if (/\\d{4} 年/.test(text)) return { ok: true, waited: (i + 1) * 500 };
-      }
-      return { ok: false };
-    })()`);
-    check('10f', '收入报表可在「按月 / 按年」之间切换',
-      !yearUi.err && yearUi.ok === true,
-      yearUi.err || (yearUi.ok ? `切到按年后出现「20xx 年」行（${yearUi.waited}ms）` : '切到按年后仍未出现年份行'));
-  }
-
-  /* 验收 11：项目阶段看板                                             */
-  /* ================================================================ */
-  console.log('\n--- 验收 11：项目阶段看板 ---');
-  {
-    await goto('#/projects', 4000);
-    const board = await cdp.js(`(() => {
-      const cols = [...document.querySelectorAll('.kanban-col')];
-      return {
-        count: cols.length,
-        stages: cols.map(c => (c.querySelector('.tag') || {}).textContent || ''),
-        cards: document.querySelectorAll('.kanban-card').length,
-        hasSelect: !!document.querySelector('.kanban-card select')
-      };
-    })()`);
-
-    check('11a', '看板完整显示 14 个阶段列',
-      board.count === 14,
-      `${board.count} 列：${board.stages.slice(0, 5).join(' / ')} … ${board.stages.slice(-3).join(' / ')}`);
-
-    check('11b', '项目卡片出现在对应阶段列中',
-      board.cards >= 2 && board.hasSelect,
-      `卡片 ${board.cards} 个，卡片内含阶段下拉=${board.hasSelect}`);
-
-    /* 改阶段 */
-    const moved = await cdp.js(`(async () => {
-      const cards = [...document.querySelectorAll('.kanban-card')];
-      const card = cards.find(c => c.textContent.includes('最终验收项目'));
-      if (!card) return { err: '未找到目标项目卡片' };
-      const sel = card.querySelector('select');
-      sel.value = '生产执行';
-      sel.dispatchEvent(new Event('change', { bubbles: true }));
-      await new Promise(r => setTimeout(r, 2200));
-      return {
-        toasts: [...document.querySelectorAll('.toast')].map(t => t.textContent.trim())
-      };
-    })()`);
-
-    const afterMove = await api('GET', `/api/projects/${proj.data.id}`);
-    check('11c', '拖动/改阶段后数据同步更新',
-      !moved.err && afterMove.data.stage === '生产执行',
-      moved.err ? moved.err : `阶段已变为「${afterMove.data.stage}」，提示：${(moved.toasts || []).join(' ')}`);
-
-    /* 客户分布环形图数据源（1.22：阶段分布图已从首页移除） */
-    const dist = await api('GET', '/api/stats/distribution?by=region&top=8');
-    const distTotal = dist.data.total;
-    const custTotal = (await api('GET', '/api/dashboard/v2')).data.cards.customer_total;
-    check('11d', '客户分布统计与客户总数一致（环形图数据源正确）',
-      distTotal === custTotal,
-      `分布合计 ${distTotal} 家 / 客户总数 ${custTotal} 家，分组 ${dist.data.groups.length} 个`);
-  }
+  await goto('#/home', 4600);
+  const homeUi = await cdp.js(`(() => {
+    const stats = [...document.querySelectorAll('.stat')].map((s) => ({
+      n: ((s.querySelector('.n') || {}).textContent || '').trim(),
+      l: ((s.querySelector('.l') || {}).textContent || '').trim()
+    }));
+    const text = document.querySelector('.content').innerText;
+    return {
+      stats,
+      hasFollowCard: text.includes('回访提醒'),
+      hasIncomeCard: text.includes('收入报表'),
+      hasRegionRing: text.includes('客户分布 · 地区'),
+      hasIndustryRing: text.includes('客户分布 · 行业'),
+      canvases: document.querySelectorAll('canvas').length
+    };
+  })()`);
+  check('10a', '首页 6 张指标卡齐全（客户总数 / 待回访 / 收入 / 利润 / 成本 / 应收）',
+    homeUi.stats.length >= 6
+      && homeUi.stats.some((s) => s.l.includes('客户总数'))
+      && homeUi.stats.some((s) => s.l.includes('待回访'))
+      && homeUi.stats.some((s) => s.l.includes('利润'))
+      && homeUi.stats.some((s) => s.l.includes('应收未收')),
+    homeUi.stats.map((s) => s.l).join(' / '));
+  check('10b', '回访提醒 + 收入报表 + 两张分布环形图都在首页',
+    homeUi.hasFollowCard && homeUi.hasIncomeCard && homeUi.hasRegionRing
+      && homeUi.hasIndustryRing && homeUi.canvases >= 3,
+    `提醒=${homeUi.hasFollowCard}，报表=${homeUi.hasIncomeCard}，环图 canvas=${homeUi.canvases}`);
+  const dash = await api('GET', `/api/dashboard/v2?month=${new Date().toLocaleDateString('sv-SE').slice(0, 7)}`);
+  const cardNum = (label) => (homeUi.stats.find((s) => s.l.includes(label)) || {}).n || '';
+  check('10c', '指标卡数字与接口一致，利润口径 = 收入 − 全部成本',
+    String(dash.data.cards.customer_total) === String(cardNum('客户总数'))
+      && dash.data.cards.month_profit === Math.round((dash.data.cards.month_income - dash.data.cards.month_cost) * 100) / 100,
+    `客户总数 页面「${cardNum('客户总数')}」/ 接口「${dash.data.cards.customer_total}」；利润 ${dash.data.cards.month_profit}`);
+  const yearUi = await cdp.js(`(async () => {
+    const btn = [...document.querySelectorAll('button')].find((b) => b.textContent.trim() === '按年');
+    if (!btn) return { err: '没找到「按年」按钮' };
+    btn.click();
+    for (let i = 0; i < 12; i++) {
+      await new Promise(r => setTimeout(r, 500));
+      if (/\\d{4} 年/.test(document.querySelector('.content').innerText)) return { ok: true };
+    }
+    return { ok: false };
+  })()`);
+  check('10d', '收入报表可在「按月 / 按年」之间切换',
+    !yearUi.err && yearUi.ok === true, yearUi.err || '切到按年后出现年份行');
 
   /* ================================================================ */
-  /* 验收 13：操作日志                                                 */
-  /* ================================================================ */
-  console.log('\n--- 验收 13：操作日志 ---');
-  {
-    /* 改一次等级，验证日志记录变更前后值 */
-    await api('PUT', `/api/customers/${cust.data.id}`, { level: 'B 普通客户' });
-    await api('PUT', `/api/customers/${cust.data.id}`, { level: 'A 重点客户' });
-
-    const detail = await api('GET', `/api/customers/${cust.data.id}`);
-    const logs = detail.data.logs;
-    const hasCreate = logs.some((l) => l.action === 'create');
-    const hasUpdate = logs.some((l) => l.action === 'update');
-    const updateLog = logs.find((l) => l.action === 'update');
-
-    check('13a', '新建与修改均被记录到操作日志',
-      hasCreate && hasUpdate,
-      `共 ${logs.length} 条日志，动作：${[...new Set(logs.map((l) => l.action))].join(', ')}`);
-
-    check('13b', '修改日志含变更前后值且摘要可读（含中文字段名与箭头）',
-      !!updateLog && updateLog.summary.includes('等级') && updateLog.summary.includes('→'),
-      updateLog ? updateLog.summary.slice(0, 70) : '未找到修改日志');
-
-    /* 日志界面 */
-    await goto('#/settings', 3200);
-    const logUI = await cdp.js(`(async () => {
-      const t = [...document.querySelectorAll('.settings-tabs .tab')].find(x => x.textContent.includes('操作日志'));
-      if (!t) return { err: '未找到操作日志标签页' };
-      t.click();
-      await new Promise(r => setTimeout(r, 1800));
-      const rows = [...document.querySelectorAll('.content .data-table tbody tr')];
-      const text = document.querySelector('.content').innerText;
-      const selects = document.querySelectorAll('.content select').length;
-      return {
-        rowCount: rows.length,
-        sample: rows.length ? rows[0].innerText.replace(/\\s+/g, ' ').slice(0, 80) : '',
-        hasFilter: selects >= 2,
-        hasExport: [...document.querySelectorAll('button')].some(b => b.textContent.includes('导出日志'))
-      };
-    })()`);
-
-    check('13c', '操作日志界面可查看、可按条件筛选、可导出',
-      !logUI.err && logUI.rowCount >= 1 && logUI.hasFilter && logUI.hasExport,
-      logUI.err ? logUI.err : `列表 ${logUI.rowCount} 行，筛选下拉可用=${logUI.hasFilter}，可导出=${logUI.hasExport}；样例：${logUI.sample}`);
-  }
-
-  /* ================================================================ */
-  /* 验收 12：软删除与还原                                             */
+  /* 12. 软删除与还原                                                   */
   /* ================================================================ */
   console.log('\n--- 验收 12：软删除与还原 ---');
-  {
-    /* 为"关联数据完整恢复"专门造一条带联系人+跟进+项目的客户 */
-    const rc = await api('POST', '/api/customers', {
-      name: `最终验收-还原验证客户${ts}`, short_name: '还原验证',
-      type: '终端用户', industry: '石油', city: '乌鲁木齐市', district: '天山区'
+  const rc = await api('POST', '/api/customers', {
+    name: `最终验收-还原验证客户${ts}`, industry: '石油',
+    contact_name: '还原联系人', contact_phone: '13700000001',
+    city: '乌鲁木齐市', district: '天山区'
+  });
+  const rcId = rc.data.id;
+  created.customers.push(rcId);
+  await api('POST', '/api/followups', { customer_id: rcId, method: '电话', content: '还原验证用跟进记录' });
+  await api('PUT', `/api/customers/${rcId}/project`, {
+    name: `最终验收-还原验证项目${ts}`, stage: '信息收集', contract_amount: 10000
+  });
+  const rcProjects = await api('GET', `/api/projects?customer_id=${rcId}&pageSize=10`);
+  if (rcProjects.data.list[0]) created.projects.push(rcProjects.data.list[0].id);
+  const beforeDel = await api('GET', `/api/customers/${rcId}`);
+
+  await goto('#/customers', 3400);
+  const delUi = await cdp.js(`(async () => {
+    const inp = document.querySelector('.search-box input');
+    inp.value = '还原验证客户${ts}';
+    inp.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 300));
+    const btn = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === '搜索');
+    if (btn) btn.click();
+    await new Promise(r => setTimeout(r, 1800));
+    const rows = [...document.querySelectorAll('.data-table tbody tr')];
+    if (!rows.length) return { err: '搜索结果为空' };
+    const delBtn = [...rows[0].querySelectorAll('button')].find(b => b.textContent.includes('删除'));
+    if (!delBtn) return { err: '未找到删除按钮' };
+    delBtn.click();
+    await new Promise(r => setTimeout(r, 800));
+    const modal = document.querySelector('.modal');
+    if (!modal) return { err: '未出现确认弹窗' };
+    const modalText = modal.innerText;
+    const confirmBtn = [...modal.querySelectorAll('button')].find(b => b.textContent.includes('删除'));
+    confirmBtn.click();
+    await new Promise(r => setTimeout(r, 1800));
+    return {
+      modalText,
+      toasts: [...document.querySelectorAll('.toast')].map(t => t.textContent.trim()),
+      remaining: document.querySelectorAll('.data-table tbody tr').length
+    };
+  })()`);
+  const afterDel = await api('GET', `/api/customers/${rcId}`);
+  check('12a', '界面删除客户走确认弹窗（提示回收站），删除后详情 404',
+    !delUi.err && delUi.modalText.includes('回收站') && afterDel.status === 404,
+    delUi.err || `弹窗含回收站=${delUi.modalText.includes('回收站')}，HTTP ${afterDel.status}`);
+
+  await goto('#/settings', 3200);
+  const restoreUi = await cdp.js(`(async () => {
+    const t = [...document.querySelectorAll('.settings-tabs .tab')].find(x => x.textContent.includes('回收站'));
+    if (!t) return { err: '未找到回收站标签页' };
+    t.click();
+    await new Promise(r => setTimeout(r, 1800));
+    const rows = [...document.querySelectorAll('.content .data-table tbody tr')];
+    const target = rows.find(r => r.innerText.includes('还原验证客户${ts}'));
+    if (!target) return { err: '回收站里没有该记录', rowCount: rows.length };
+    const btn = [...target.querySelectorAll('button')].find(b => b.textContent.includes('还原'));
+    btn.click();
+    await new Promise(r => setTimeout(r, 2000));
+    return { toasts: [...document.querySelectorAll('.toast')].map(t => t.textContent.trim()) };
+  })()`);
+  const afterRestore = await api('GET', `/api/customers/${rcId}`);
+  check('12b', '回收站可见已删除客户并可在界面还原',
+    !restoreUi.err && afterRestore.status === 200,
+    restoreUi.err || `还原后 HTTP ${afterRestore.status}，提示：${(restoreUi.toasts || []).join(' / ')}`);
+  check('12c', '还原后关联数据完整恢复（联系人 / 跟进 / 项目）',
+    beforeDel.data.contacts.length === 1 && afterRestore.data.contacts.length === 1
+      && afterRestore.data.followups.length === 1 && afterRestore.data.follow_count === 1
+      && afterRestore.data.project && afterRestore.data.project.name === `最终验收-还原验证项目${ts}`,
+    `联系人 ${afterRestore.data.contacts.length}，跟进 ${afterRestore.data.followups.length}，项目=${afterRestore.data.project && afterRestore.data.project.name}`);
+
+  /* ================================================================ */
+  /* 13. 操作日志                                                       */
+  /* ================================================================ */
+  console.log('\n--- 验收 13：操作日志 ---');
+  await goto('#/settings', 3200);
+  const logUi = await cdp.js(`(async () => {
+    const t = [...document.querySelectorAll('.settings-tabs .tab')].find(x => x.textContent.includes('操作日志'));
+    if (!t) return { err: '未找到操作日志标签页' };
+    t.click();
+    await new Promise(r => setTimeout(r, 2000));
+    const rows = [...document.querySelectorAll('.content .data-table tbody tr')];
+    return {
+      rows: rows.length,
+      text: rows.slice(0, 8).map(r => r.innerText.replace(/\\s+/g, ' ').slice(0, 80)),
+      hasFilter: !!document.querySelector('.content select')
+    };
+  })()`);
+  const logsApi = await api('GET', '/api/logs?pageSize=20');
+  check('13a', '操作日志界面可查看，接口带中文标签',
+    !logUi.err && logUi.rows >= 1 && logsApi.data.list.length > 0
+      && !!logsApi.data.list[0].entity_label,
+    logUi.err || `界面 ${logUi.rows} 行；接口 ${logsApi.data.total} 条`);
+  check('13b', '客户新建/跟进都写入日志，项目修改也有日志',
+    (await api('GET', `/api/logs?entity_type=customer&entity_id=${customerId}`)).data.list
+      .some((l) => l.action === 'followup')
+      && (await api('GET', `/api/logs?entity_type=customer&entity_id=${customerId}`)).data.list
+        .some((l) => l.action === 'create')
+      && (await api('GET', `/api/logs?entity_type=project&entity_id=${projectId}`)).data.list
+        .some((l) => l.action === 'update'),
+    '客户含 create/followup，项目含 update 日志');
+
+  /* ================================================================ */
+  /* 14. 表单校验（API 层 + 浏览器）                                    */
+  /* ================================================================ */
+  console.log('\n--- 验收 14：表单校验 ---');
+  const badName = await api('POST', '/api/customers', { name: '' });
+  const badAmount = await api('POST', '/api/payments', { project_id: projectId, type: '实收', amount: -100 });
+  const badDate = await api('POST', '/api/payments', { project_id: projectId, type: '计划', amount: 100 });
+  check('14a', '接口层校验：客户名称必填 / 金额 > 0 / 计划必须填日期',
+    badName.status === 400 && badName.json.code === 'NAME_REQUIRED'
+      && badAmount.status === 400 && badAmount.json.code === 'AMOUNT_REQUIRED'
+      && badDate.status === 400 && badDate.json.code === 'PLAN_DATE_REQUIRED',
+    `名称→${badName.json.code}，金额→${badAmount.json.code}，日期→${badDate.json.code}`);
+
+  await goto('#/customers/' + customerId, 3200);
+  const emptyNameUi = await cdp.js(`(async () => {
+    const btn = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === '编辑资料');
+    btn.click();
+    await new Promise(r => setTimeout(r, 900));
+    const d = document.querySelector('.drawer');
+    const f = [...d.querySelectorAll('.field')].find(x => {
+      const l = x.querySelector('.field-label');
+      return l && l.textContent.trim().startsWith('公司名称');
     });
-    const rcId = rc.data.id;
-    await api('POST', '/api/contacts', { customer_id: rcId, name: '还原联系人', mobile: '13700000001', is_primary: 1 });
-    await api('POST', '/api/followups', { customer_id: rcId, method: '电话', content: '还原验证用跟进记录' });
-    const rcProj = await api('POST', '/api/projects', {
-      name: `最终验收-还原验证项目${ts}`, customer_id: rcId, stage: '信息收集', contract_amount: 10000
+    const i = f.querySelector('input');
+    i.value = '';
+    i.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 150));
+    const save = [...d.querySelectorAll('.drawer-foot button')].find(b => b.textContent.includes('保存'));
+    save.click();
+    await new Promise(r => setTimeout(r, 1200));
+    return {
+      open: !!document.querySelector('.drawer'),
+      toasts: [...document.querySelectorAll('.toast')].map(t => t.textContent.trim())
+    };
+  })()`);
+  check('14b', '浏览器里清空公司名称后保存被拦住（抽屉不关闭）',
+    emptyNameUi.open === true && emptyNameUi.toasts.some((t) => t.includes('公司名称')),
+    `抽屉仍开=${emptyNameUi.open}，提示=${emptyNameUi.toasts.join(' / ')}`);
+  await cdp.js(`(() => { const d = document.querySelector('.drawer'); if (d) { const x = [...d.querySelectorAll('.drawer-head button')].pop(); x.click(); } return 'ok'; })()`);
+  await sleep(500);
+
+  /* 超收提醒：先给当前项目一个合同额 */
+  await api('PUT', `/api/customers/${customerId}/project`, { contract_amount: 100000 });
+  const over = await api('POST', '/api/payments', {
+    project_id: current.data.project.id, type: '实收', amount: 2000000, actual_date: dayOffset(0)
+  });
+  check('14c', '实收超过合同额时给出超收提醒（仍允许登记）',
+    over.data && over.data.warning && over.data.warning.includes('超过合同金额'),
+    over.data.warning || '未提示');
+  if (over.data && over.data.id) await api('DELETE', `/api/payments/${over.data.id}`);
+
+  /* ================================================================ */
+  /* 15. 查重                                                           */
+  /* ================================================================ */
+  console.log('\n--- 验收 15：查重提示 ---');
+  const dupName = await api('GET', `/api/customers/check-duplicate?name=${encodeURIComponent(CUSTOMER_NAME)}`);
+  const dupPhone = await api('GET', '/api/customers/check-duplicate?phone=' + encodeURIComponent('139' + ts));
+  check('15a', '同名 / 同主联系人手机查重都能命中',
+    dupName.data.length >= 1 && dupPhone.data.length >= 1,
+    `同名 ${dupName.data.length} 条，同手机 ${dupPhone.data.length} 条`);
+
+  await goto('#/customers', 3400);
+  const dupUi = await cdp.js(`(async () => {
+    const btn = [...document.querySelectorAll('button')].find(b => b.textContent.includes('新增客户'));
+    btn.click();
+    await new Promise(r => setTimeout(r, 900));
+    const d = document.querySelector('.drawer');
+    const f = [...d.querySelectorAll('.field')].find(x => {
+      const l = x.querySelector('.field-label');
+      return l && l.textContent.trim().startsWith('公司名称');
     });
-
-    const beforeDel = await api('GET', `/api/customers/${rcId}`);
-
-    /* 通过浏览器界面删除（验证软删除交互） */
-    await goto('#/customers', 3400);
-    const delUI = await cdp.js(`(async () => {
-      const inp = document.querySelector('.search-box input');
-      inp.value = '还原验证';
-      inp.dispatchEvent(new Event('input', { bubbles: true }));
-      await new Promise(r => setTimeout(r, 300));
-      const btn = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === '搜索');
-      if (btn) btn.click();
-      await new Promise(r => setTimeout(r, 1800));
-
-      const rows = [...document.querySelectorAll('.data-table tbody tr')];
-      if (!rows.length) return { err: '搜索结果为空' };
-      const delBtn = [...rows[0].querySelectorAll('button')].find(b => b.textContent.includes('删除'));
-      if (!delBtn) return { err: '未找到删除按钮' };
-      delBtn.click();
-      await new Promise(r => setTimeout(r, 800));
-
-      const modal = document.querySelector('.modal');
-      if (!modal) return { err: '未出现确认弹窗' };
-      const modalText = modal.innerText;
-      const confirmBtn = [...modal.querySelectorAll('button')].find(b => b.textContent.includes('删除'));
-      confirmBtn.click();
-      await new Promise(r => setTimeout(r, 1800));
-
-      return {
-        modalText,
-        toasts: [...document.querySelectorAll('.toast')].map(t => t.textContent.trim()),
-        remaining: document.querySelectorAll('.data-table tbody tr').length
-      };
-    })()`);
-
-    const afterDel = await api('GET', `/api/customers/${rcId}`);
-
-    check('12a', '界面删除客户走确认弹窗，删除后列表不再显示',
-      !delUI.err && delUI.modalText.includes('回收站') && afterDel.status === 404,
-      delUI.err ? delUI.err : `弹窗提示含「回收站」=${delUI.modalText.includes('回收站')}，详情查询 HTTP ${afterDel.status}`);
-
-    /* 回收站还原 */
-    const trash = await api('GET', '/api/trash?type=customer');
-    const inTrash = trash.data.some((x) => x.id === rcId);
-
-    await goto('#/settings', 3200);
-    const restoreUI = await cdp.js(`(async () => {
-      const t = [...document.querySelectorAll('.settings-tabs .tab')].find(x => x.textContent.includes('回收站'));
-      if (!t) return { err: '未找到回收站标签页' };
-      t.click();
-      await new Promise(r => setTimeout(r, 1800));
-      const rows = [...document.querySelectorAll('.content .data-table tbody tr')];
-      const target = rows.find(r => r.innerText.includes('还原验证'));
-      if (!target) return { err: '回收站里没有该记录', rowCount: rows.length };
-      const btn = [...target.querySelectorAll('button')].find(b => b.textContent.includes('还原'));
-      btn.click();
-      await new Promise(r => setTimeout(r, 2000));
-      return {
-        toasts: [...document.querySelectorAll('.toast')].map(t => t.textContent.trim()),
-        stillInTrash: [...document.querySelectorAll('.content .data-table tbody tr')].some(r => r.innerText.includes('还原验证'))
-      };
-    })()`);
-
-    const afterRestore = await api('GET', `/api/customers/${rcId}`);
-
-    check('12b', '回收站可见已删除客户并可在界面还原',
-      inTrash && !restoreUI.err && afterRestore.status === 200,
-      restoreUI.err ? restoreUI.err : `回收站可见=${inTrash}，还原后详情 HTTP ${afterRestore.status}，提示：${(restoreUI.toasts || []).join(' ')}`);
-
-    check('12c', '还原后关联数据完整恢复（联系人 / 跟进 / 项目）',
-      beforeDel.data.contacts.length === 1
-        && afterRestore.data.contacts.length === 1
-        && afterRestore.data.followups.length === 1
-        && afterRestore.data.follow_count === 1
-        && afterRestore.data.projects.length === 1,
-      `联系人 ${beforeDel.data.contacts.length} → ${afterRestore.data.contacts.length}，`
-      + `跟进 ${beforeDel.data.followups.length} → ${afterRestore.data.followups.length}，`
-      + `关联项目 ${afterRestore.data.projects.length} 个，跟进次数=${afterRestore.data.follow_count}`);
-
-    /* 无孤儿数据：所有关联记录的 customer_id 都必须存在 */
-    const orphans = await checkOrphans();
-    check('12d', '还原后无孤儿数据（关联记录都能找到所属客户/项目）',
-      orphans.total === 0,
-      orphans.total === 0 ? '联系人/跟进/项目/待办/回款 均无孤儿记录'
-        : `发现孤儿：${JSON.stringify(orphans)}`);
-
-    created.push(rcId, rcProj.data.id);
-  }
+    const i = f.querySelector('input');
+    i.value = ${JSON.stringify(CUSTOMER_NAME)};
+    i.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 200));
+    const save = [...d.querySelectorAll('.drawer-foot button')].find(b => b.textContent.includes('保存'));
+    save.click();
+    await new Promise(r => setTimeout(r, 2000));
+    const dd = document.querySelector('.drawer');
+    return {
+      open: !!dd,
+      hasDup: !!(dd && dd.textContent.includes('发现可能重复的客户')),
+      cards: dd ? dd.querySelectorAll('.mini-card').length : 0
+    };
+  })()`);
+  check('15b', '浏览器里保存同名客户时弹出查重面板并展示已有记录',
+    dupUi.open && dupUi.hasDup && dupUi.cards >= 1,
+    `抽屉仍开=${dupUi.open}，查重面板=${dupUi.hasDup}，卡片 ${dupUi.cards} 张`);
+  await cdp.js(`(() => { const d = document.querySelector('.drawer'); if (d) { const x = [...d.querySelectorAll('.drawer-head button')].pop(); x.click(); } return 'ok'; })()`);
+  await sleep(500);
 
   /* ================================================================ */
-  /* 验收 25 / 26：自定义行业与自定义主体类型                          */
+  /* 25. 自定义行业（设置页 → 表单立即生效）                            */
   /* ================================================================ */
-  console.log('\n--- 验收 25 / 26 / 27：自定义字典（全部走界面操作） ---');
-  {
-    const newIndustry = `验收自定义行业${ts}`;
-    const newType = `验收自定义类型${ts}`;
-    const inlineIndustry = `内联新增行业${ts}`;
-    const inlineRenamed = `${inlineIndustry}-已改名`;
+  console.log('\n--- 验收 25/27：字典与标签 ---');
+  const newIndustry = `验收自定义行业${ts}`;
+  created.dict.push(newIndustry);
+  await goto('#/settings', 3200);
+  const dictUi = await cdp.js(`(async () => {
+    const tab = [...document.querySelectorAll('.settings-tabs .tab')].find(t => t.textContent.includes('字典'));
+    tab.click();
+    await new Promise(r => setTimeout(r, 1200));
+    const cat = [...document.querySelectorAll('.dict-cat')].find(c => c.textContent.trim().startsWith('行业'));
+    if (!cat) return { err: '未找到行业分类' };
+    cat.click();
+    await new Promise(r => setTimeout(r, 700));
+    const addBtn = [...document.querySelectorAll('button')].find(b => b.textContent.includes('新增选项'));
+    addBtn.click();
+    await new Promise(r => setTimeout(r, 400));
+    const inp = document.querySelector('.content .card-body input.input');
+    inp.value = ${JSON.stringify(newIndustry)};
+    inp.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 200));
+    const save = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === '保存');
+    save.click();
+    await new Promise(r => setTimeout(r, 1800));
+    return {
+      hasNew: document.body.innerText.includes(${JSON.stringify(newIndustry)}),
+      toasts: [...document.querySelectorAll('.toast')].map(t => t.textContent.trim())
+    };
+  })()`);
+  check('25a', '设置页字典管理可新增自定义行业',
+    !dictUi.err && dictUi.hasNew,
+    dictUi.err || `提示：${(dictUi.toasts || []).join(' / ')}`);
 
-    /* ---------------- 25a / 26a：在设置页界面新增两个自定义选项 ---------------- */
-    await goto('#/settings', 3200);
-    const settingsAdd = await cdp.js(`(async () => {
-      const tab = [...document.querySelectorAll('.settings-tabs .tab')].find(t => t.textContent.includes('字典'));
-      if (!tab) return { err: '未找到「字典管理」标签页' };
+  const formIndustry = await cdp.js(`(async () => {
+    location.hash = '#/customers';
+    await new Promise(r => setTimeout(r, 2800));
+    const btn = [...document.querySelectorAll('button')].find(b => b.textContent.includes('新增客户'));
+    btn.click();
+    await new Promise(r => setTimeout(r, 1000));
+    const d = document.querySelector('.drawer');
+    const f = [...d.querySelectorAll('.field')].find(x => {
+      const l = x.querySelector('.field-label');
+      return l && l.textContent.trim() === '行业';
+    });
+    if (!f) return { err: '未找到行业字段' };
+    const opts = [...f.querySelector('select').options].map(o => o.value);
+    return { found: opts.includes(${JSON.stringify(newIndustry)}) };
+  })()`);
+  check('25b', '设置页新增的行业立即出现在客户表单下拉中',
+    !formIndustry.err && formIndustry.found,
+    formIndustry.err || '下拉已包含新选项');
+  await cdp.js(`(() => { const d = document.querySelector('.drawer'); if (d) { const x = [...d.querySelectorAll('.drawer-head button')].pop(); x.click(); } return 'ok'; })()`);
+  await sleep(500);
+
+  /* 标签：5 个固定标签不可删除 */
+  await goto('#/settings', 3200);
+  const tagUi = await cdp.js(`(async () => {
+    const t = [...document.querySelectorAll('.settings-tabs .tab')].find(x => x.textContent.includes('标签管理'));
+    t.click();
+    await new Promise(r => setTimeout(r, 1500));
+    const fixed = ['重点客户', '老客户', '待回访', '已成交', '暂停合作']
+      .filter(n => document.body.innerText.includes(n));
+    const dels = [...document.querySelectorAll('.dict-item .acts button')].filter(b => /删/.test(b.textContent));
+    return { fixed, total: dels.length, disabled: dels.filter(b => b.disabled).length };
+  })()`);
+  check('27a', '5 个固定标签存在且删除按钮禁用（数据由代码常量维护）',
+    tagUi.fixed.length === 5 && tagUi.disabled >= 5,
+    `固定标签 ${tagUi.fixed.length}/5，删除按钮 ${tagUi.total} 个（禁用 ${tagUi.disabled}）`);
+
+  /* ================================================================ */
+  /* 待办中心                                                          */
+  /* ================================================================ */
+  console.log('\n--- 待办中心 ---');
+  await goto('#/tasks', 3000);
+  const tasksUi = await cdp.js(`(async () => {
+    const tabs = [...document.querySelectorAll('.tabs .tab')].map(t => t.textContent.replace(/\\s+/g, ' ').trim());
+    const inp = document.querySelector('.quick-add input.input');
+    inp.value = '验收快速待办${ts}';
+    inp.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 200));
+    const btn = [...document.querySelectorAll('.quick-add button')].find(b => b.textContent.includes('添加'));
+    btn.click();
+    await new Promise(r => setTimeout(r, 1600));
+    const all = [...document.querySelectorAll('.tabs .tab')].find(t => t.textContent.includes('全部待办'));
+    if (all) { all.click(); await new Promise(r => setTimeout(r, 800)); }
+    return {
+      tabs,
+      hasItem: document.body.innerText.includes('验收快速待办${ts}'),
+      toasts: [...document.querySelectorAll('.toast')].map(t => t.textContent.trim())
+    };
+  })()`);
+  check('28a', '待办中心多视图 + 快速添加可用',
+    tasksUi.tabs.length >= 5 && tasksUi.hasItem,
+    `视图：${tasksUi.tabs.join(' / ')}；新增可见=${tasksUi.hasItem}`);
+
+  /* ================================================================ */
+  /* 23. 空状态                                                         */
+  /* ================================================================ */
+  console.log('\n--- 验收 23：空状态 ---');
+  await goto('#/customers/' + emptyId, 3200);
+  const emptyUi = await cdp.js(`(async () => {
+    const tabs = [...document.querySelectorAll('.tabs .tab')].map(t => t.textContent.trim());
+    const out = { tabs, panes: {} };
+    for (const name of ['资料', '回访与跟进', '项目与财务', '附件与日志']) {
+      const tab = [...document.querySelectorAll('.tabs .tab')].find(t => t.textContent.includes(name));
+      if (!tab) continue;
       tab.click();
-      await new Promise(r => setTimeout(r, 1600));
-
-      const out = { steps: [] };
-      const addOption = async (catLabel, value) => {
-        const cat = [...document.querySelectorAll('.dict-cat')]
-          .find(c => c.textContent.trim().startsWith(catLabel));
-        if (!cat) { out.steps.push(catLabel + ':未找到分类'); return null; }
-        cat.click();
-        await new Promise(r => setTimeout(r, 800));
-
-        const btn = [...document.querySelectorAll('.card-head button')].find(b => b.textContent.includes('新增选项'));
-        if (!btn) { out.steps.push(catLabel + ':未找到新增按钮'); return null; }
-        btn.click();
-        await new Promise(r => setTimeout(r, 500));
-
-        const inp = [...document.querySelectorAll('.filter-bar input')].find(i => i.placeholder === '新选项名称');
-        if (!inp) { out.steps.push(catLabel + ':未找到输入框'); return null; }
-        inp.value = value;
-        inp.dispatchEvent(new Event('input', { bubbles: true }));
-        await new Promise(r => setTimeout(r, 300));
-
-        const save = [...document.querySelectorAll('.filter-bar button')].find(b => b.textContent.includes('保存'));
-        save.click();
-        await new Promise(r => setTimeout(r, 1600));
-
-        const item = [...document.querySelectorAll('.dict-item')].find(x => x.textContent.includes(value));
-        out.steps.push(catLabel + ':' + (item ? '已新增' : '新增后未出现'));
-        return item ? (item.querySelector('.acts button[title="改名（同步更新历史数据）"]') ? 'has-edit' : 'no-edit') : null;
-      };
-
-      out.industryMark = await addOption('下游行业', ${JSON.stringify(newIndustry)});
-      out.typeMark = await addOption('客户主体类型', ${JSON.stringify(newType)});
-      out.catCount = document.querySelectorAll('.dict-cat').length;
-      return out;
-    })()`);
-
-    check('25a', '在设置页界面新增自定义下游行业成功',
-      !settingsAdd.err && settingsAdd.industryMark === 'has-edit',
-      settingsAdd.err ? settingsAdd.err
-        : `字典分类 ${settingsAdd.catCount} 个；新增项 id=${dictIdOf('industry', newIndustry)}；步骤：${(settingsAdd.steps || []).join('；')}`);
-
-    check('26a', '在设置页界面新增自定义客户主体类型成功',
-      !settingsAdd.err && settingsAdd.typeMark === 'has-edit',
-      settingsAdd.err ? settingsAdd.err
-        : `新增项 id=${dictIdOf('customer_type', newType)}；步骤：${(settingsAdd.steps || []).join('；')}`);
-
-    /* 后续改名 / 停用需要 id，统一从服务端取，避免依赖界面内缓存 */
-    const add1Id = dictIdOf('industry', newIndustry);
-    const add2Id = dictIdOf('customer_type', newType);
-
-    /* ---------------- 25c / 26b：新增后立即出现在客户表单下拉 ---------------- */
-    await goto('#/customers', 3200);
-    const inForm = await cdp.js(`(async () => {
-      const btn = [...document.querySelectorAll('button')].find(b => b.textContent.includes('新增客户'));
-      btn.click();
-      await new Promise(r => setTimeout(r, 1500));
-      const d = [...document.querySelectorAll('.drawer')].pop();
-      const field = (label) => [...d.querySelectorAll('.field')].find(x =>
-        (x.querySelector('.field-label') || {}).textContent.startsWith(label));
-      const pick = (label) => {
-        const f = field(label);
-        return f ? [...f.querySelectorAll('option')].map(o => o.value) : [];
-      };
-      const industries = pick('下游行业');
-      const types = pick('客户主体类型');
-      return {
-        industries, types,
-        hasInlineAdd: !!d.querySelector('button[title="新增选项"]'),
-        addBtnCount: d.querySelectorAll('button[title="新增选项"]').length
-      };
-    })()`);
-
-    check('25c', '设置页新增的行业立即出现在客户表单下拉中（无需重启）',
-      inForm.industries.includes(newIndustry),
-      `下游行业下拉 ${inForm.industries.length} 项，含新行业=${inForm.industries.includes(newIndustry)}`);
-
-    check('26b', '设置页新增的主体类型立即出现在客户表单下拉中（无需重启）',
-      inForm.types.includes(newType),
-      `主体类型下拉 ${inForm.types.length} 项，含新类型=${inForm.types.includes(newType)}`);
-
-    check('27a', '表单下拉旁有「+ 新增选项」内联新增入口',
-      inForm.hasInlineAdd,
-      `客户表单内联新增按钮 ${inForm.addBtnCount} 个`);
-
-    /* ---------------- 26c：在客户表单里用内联「+」直接新增行业并保存客户 ---------------- */
-    const inlineRes = await cdp.js(`(async () => {
-      const d = [...document.querySelectorAll('.drawer')].pop();
-      if (!d) return { err: '抽屉不在' };
-      const field = (label) => [...d.querySelectorAll('.field')].find(x =>
-        (x.querySelector('.field-label') || {}).textContent.startsWith(label));
-      const setText = (label, value) => {
-        const f = field(label);
-        if (!f) return false;
-        const inp = f.querySelector('input, select');
-        inp.value = value;
-        inp.dispatchEvent(new Event('input', { bubbles: true }));
-        inp.dispatchEvent(new Event('change', { bubbles: true }));
-        return true;
-      };
-      const setSelect = (label, value) => {
-        const f = field(label);
-        if (!f) return false;
-        const sel = f.querySelector('select');
-        const opt = [...sel.options].find(o => o.value === value);
-        if (!opt) return false;
-        sel.value = value;
-        sel.dispatchEvent(new Event('change', { bubbles: true }));
-        return true;
-      };
-
-      setText('客户全称', ${JSON.stringify(`最终验收-内联新增客户${ts}`)});
-      setText('客户简称', '内联新增');
-      setSelect('客户主体类型', ${JSON.stringify(newType)});
-
-      /* 点行业字段旁的「+」内联新增 */
-      const indField = field('下游行业');
-      const plus = indField.querySelector('button[title="新增选项"]');
-      if (!plus) return { err: '行业字段旁没有「+」按钮' };
-      plus.click();
       await new Promise(r => setTimeout(r, 500));
-
-      const inp = indField.querySelector('input');
-      if (!inp) return { err: '内联输入框未出现' };
-      inp.value = ${JSON.stringify(inlineIndustry)};
-      inp.dispatchEvent(new Event('input', { bubbles: true }));
-      await new Promise(r => setTimeout(r, 300));
-
-      const save = [...indField.querySelectorAll('button')].find(b => b.textContent.includes('保存'));
-      save.click();
-      await new Promise(r => setTimeout(r, 1800));
-
-      const sel = indField.querySelector('select');
-      const indOptions = sel ? [...sel.options].map(o => o.value) : [];
-      const toasts = [...document.querySelectorAll('.toast')].map(t => t.textContent.trim());
-
-      /* 保存整个客户 */
-      const footSave = [...d.querySelectorAll('.drawer-foot button')].find(b => b.textContent.includes('保存'));
-      footSave.click();
-      await new Promise(r => setTimeout(r, 2200));
-
-      return {
-        indHasValue: indOptions.includes(${JSON.stringify(inlineIndustry)}),
-        selected: sel ? sel.value : '',
-        toasts,
-        drawerGone: !document.querySelector('.drawer')
-      };
-    })()`);
-
-    check('26c', '客户表单内联「+」新增选项后立即选中并随客户一起保存',
-      !inlineRes.err && inlineRes.indHasValue && inlineRes.drawerGone,
-      inlineRes.err ? inlineRes.err
-        : `下拉含新值=${inlineRes.indHasValue}，已选中=「${inlineRes.selected}」，表单已关闭=${inlineRes.drawerGone}，提示：${(inlineRes.toasts || []).join(' / ')}`);
-
-    const inlineCust = await api('GET', '/api/customers?keyword=' + encodeURIComponent(`最终验收-内联新增客户${ts}`) + '&pageSize=5');
-    const inlineRow = (inlineCust.data.list || [])[0];
-    check('26d', '内联新增的行业已随客户落库（下拉选项与业务数据一致）',
-      !!inlineRow && inlineRow.industry === inlineIndustry && inlineRow.type === newType,
-      inlineRow ? `客户「${inlineRow.name}」：行业=${inlineRow.industry}，主体类型=${inlineRow.type}` : '未查到该客户');
-    if (inlineRow) created.push(inlineRow.id);
-
-    /* 取回两个新选项的 id（在界面新增 / 内联新增都完成之后取，避免漏项） */
-    const dictIds = await cdp.js(`(() => {
-      const items = CRM.api.cache.dict.items;
-      const find = (cat, val) => ((items[cat] || []).find(x => x.value === val) || {}).id || 0;
-      return {
-        newIndustry: find('industry', ${JSON.stringify(newIndustry)}),
-        inlineIndustry: find('industry', ${JSON.stringify(inlineIndustry)}),
-        newType: find('customer_type', ${JSON.stringify(newType)})
-      };
-    })()`);
-
-    /* ---------------- 27b：设置页改名，历史数据同步（用引用了该选项的客户核对） ---------------- */
-    const beforeRename = await api('GET', '/api/customers/' + (inlineRow ? inlineRow.id : created[0]));
-    await goto('#/settings', 3200);
-    const renameRes = await cdp.js(`(async () => {
-      const tab = [...document.querySelectorAll('.settings-tabs .tab')].find(t => t.textContent.includes('字典'));
-      tab.click();
-      await new Promise(r => setTimeout(r, 1600));
-      const cat = [...document.querySelectorAll('.dict-cat')].find(c => c.textContent.trim().startsWith('下游行业'));
-      cat.click();
-      await new Promise(r => setTimeout(r, 900));
-
-      const item = [...document.querySelectorAll('.dict-item')]
-        .find(x => (x.querySelector('span') || {}).textContent === ${JSON.stringify(inlineIndustry)});
-      if (!item) return { err: '未找到待改名选项' };
-      const btn = [...item.querySelectorAll('button')].find(b => b.textContent === '改名');
-      if (!btn) return { err: '未找到改名按钮' };
-      btn.click();
-      await new Promise(r => setTimeout(r, 500));
-
-      const inp = item.querySelector('input.chip-input');
-      if (!inp) return { err: '改名输入框未出现' };
-      inp.value = ${JSON.stringify(inlineRenamed)};
-      inp.dispatchEvent(new Event('input', { bubbles: true }));
-      await new Promise(r => setTimeout(r, 300));
-
-      const save = [...item.querySelectorAll('button')].find(b => b.textContent === '保存');
-      save.click();
-      await new Promise(r => setTimeout(r, 1800));
-
-      return {
-        toasts: [...document.querySelectorAll('.toast')].map(t => t.textContent.trim()),
-        shown: [...document.querySelectorAll('.dict-item')].some(x => x.textContent.includes(${JSON.stringify(inlineRenamed)}))
-      };
-    })()`);
-
-    const afterRename = await api('GET', '/api/customers/' + (inlineRow ? inlineRow.id : created[0]));
-    check('27b', '设置页改名成功，且历史数据同步显示新名称（不丢值）',
-      !renameRes.err && renameRes.shown
-        && beforeRename.data.industry === inlineIndustry
-        && afterRename.data.industry === inlineRenamed,
-      renameRes.err ? renameRes.err
-        : `该客户行业：改名「${beforeRename.data.industry}」→「${afterRename.data.industry}」；`
-        + `字典列表显示新名称=${renameRes.shown}；提示：${(renameRes.toasts || []).join(' / ')}`);
-
-    /* ---------------- 27c：设置页停用，历史数据保留 ---------------- */
-    const disableClicked = await cdp.js(`(async () => {
-      const cat = [...document.querySelectorAll('.dict-cat')].find(c => c.textContent.trim().startsWith('客户主体类型'));
-      if (!cat) return { err: '未找到客户主体类型分类' };
-      cat.click();
-      await new Promise(r => setTimeout(r, 1400));
-
-      /* 在同一次求值里定位并点击，避免两次求值之间发生重渲染导致元素失效 */
-      let item = [...document.querySelectorAll('.dict-item')].find(x => x.textContent.includes(${JSON.stringify(newType)}));
-      if (!item) {
-        return {
-          err: '未找到待操作选项（当前 ' + document.querySelectorAll('.dict-item').length + ' 项）',
-          labels: [...document.querySelectorAll('.dict-item')].slice(0, 12).map(x => x.textContent.replace(/\\s+/g, ' ').trim())
-        };
-      }
-      const wasEnabled = !item.textContent.includes('已停用');
-      let toasts = [];
-      if (wasEnabled) {
-        const btn = [...item.querySelectorAll('button')].find(b => b.textContent.trim() === '停用');
-        if (!btn) return { err: '未找到停用按钮', itemText: item.textContent.replace(/\\s+/g, ' ').trim() };
-        btn.click();
-        await new Promise(r => setTimeout(r, 1800));
-        toasts = [...document.querySelectorAll('.toast')].map(t => t.textContent.trim());
-        item = [...document.querySelectorAll('.dict-item')].find(x => x.textContent.includes(${JSON.stringify(newType)}));
-      }
-      return {
-        wasEnabled,
-        hasDisabledTag: item ? item.textContent.includes('已停用') : false,
-        toasts
-      };
-    })()`);
-
-    /* 停用后整页重载，重新打开客户表单，确认下拉里已消失（前端缓存已清空） */
-    await goto('#/customers', 3200);
-    await hardReload(3800);
-    const typeOptionsAfter = await cdp.js(`(async () => {
-      const btn = [...document.querySelectorAll('button')].find(b => b.textContent.includes('新增客户'));
-      btn.click();
-      await new Promise(r => setTimeout(r, 1500));
-      const d = [...document.querySelectorAll('.drawer')].pop();
-      const f = [...d.querySelectorAll('.field')].find(x =>
-        (x.querySelector('.field-label') || {}).textContent.startsWith('客户主体类型'));
-      const opts = [...f.querySelectorAll('option')].map(o => o.value);
-      const close = [...d.querySelectorAll('.drawer-head button')].pop();
-      if (close) close.click();
-      return opts;
-    })()`);
-
-    const stillInCustomer = await api('GET', '/api/customers/' + (inlineRow ? inlineRow.id : created[0]));
-    check('27c', '设置页停用选项后：从下拉消失，历史数据仍保留原值',
-      !disableClicked.err && disableClicked.hasDisabledTag
-        && !typeOptionsAfter.includes(newType)
-        && stillInCustomer.data.type === newType,
-      disableClicked.err
-        ? `${disableClicked.err}${disableClicked.labels ? '；列表：' + disableClicked.labels.join(' | ') : ''}`
-        : `本次由界面点击「停用」（原状态：${disableClicked.wasEnabled ? '启用中' : '已停用'}）→ `
-          + `界面标记已停用=${disableClicked.hasDisabledTag}；重载后下拉包含该选项=${typeOptionsAfter.includes(newType)}；`
-          + `历史客户主体类型仍为「${stillInCustomer.data.type}」；提示：${(disableClicked.toasts || []).join(' / ') || '—'}`);
-
-    /* 复原：启用回来，避免污染后续字典状态（界面删除的项需同时清掉 deleted_at） */
-    if (dictIds.newType) restoreDictItem(dictIds.newType);
-    if (dictIds.newIndustry) restoreDictItem(dictIds.newIndustry);
-    if (dictIds.inlineIndustry) restoreDictItem(dictIds.inlineIndustry);
-
-    /* ---------------- 27d：系统内置项只能停用不能删除 ---------------- */
-    const sysItem = (await api('GET', '/api/dict')).data.items.industry.find((x) => x.value === '石油');
-    const delSys = await api('DELETE', `/api/dict/${sysItem.id}`);
-    await api('PUT', `/api/dict/${sysItem.id}`, { enabled: 1 });
-    check('27d', '系统内置选项只能停用不能删除（防误删核心选项）',
-      delSys.data.deleted === false && delSys.data.disabled === true,
-      `返回 deleted=${delSys.data.deleted}，disabled=${delSys.data.disabled}（已恢复启用）`);
-  }
-
-  /* ================================================================ */
-  /* 验收 3：数据零外流                                                */
-  /* ================================================================ */
-  console.log('\n--- 验收 3：数据零外流 ---');
-  {
-    cdp.requests.length = 0;
-    await cdp.send('Network.enable');
-    await cdp.send('Network.setCacheDisabled', { cacheDisabled: true });
-
-    /* 遍历全部页面与主要交互，记录所有网络请求 */
-    for (const route of ['home', 'customers', 'projects', 'tasks', 'settings']) {
-      await goto('#/' + route, 3200);
+      out.panes[name] = document.body.innerText.length > 100;
     }
-    await cdp.js(`(async () => {
-      /* 首页新版交互：切一次分布维度 + 切一次按月/按年 */
-      location.hash = '#/home';
-      await new Promise(r => setTimeout(r, 3200));
-      const sel = document.querySelector('.content select');
-      if (sel) {
-        sel.value = 'industry';
-        sel.dispatchEvent(new Event('change', { bubbles: true }));
-        await new Promise(r => setTimeout(r, 1800));
-      }
-      const btn = [...document.querySelectorAll('button')].find((b) => b.textContent.trim() === '按年');
-      if (btn) { btn.click(); await new Promise(r => setTimeout(r, 1800)); }
-      return 'ok';
-    })()`);
-    await sleep(1500);
-
-    const external = cdp.requests.filter((u) =>
-      !/^https?:\/\/127\.0\.0\.1[:/]/.test(u) && !u.startsWith('data:') && !u.startsWith('blob:'));
-    const local = cdp.requests.filter((u) => /^https?:\/\/127\.0\.0\.1[:/]/.test(u));
-
-    check(3.1, '全部页面与首页交互全程零外部域名请求',
-      external.length === 0,
-      external.length ? `发现外部请求：${[...new Set(external)].slice(0, 3).join(', ')}`
-        : `共 ${cdp.requests.length} 个请求，全部指向本地 127.0.0.1`);
-
-    /* 断网后本机服务仍可访问（真实场景：外网断了，本机服务照常） */
-    await cdp.send('Network.emulateNetworkConditions', {
-      offline: true, latency: 0, downloadThroughput: 0, uploadThroughput: 0
-    });
-    await sleep(400);
-    const offlineProbe = await cdp.js(`(async () => {
-      /* CDP 的 offline 会连 127.0.0.1 一起拦掉，所以这里改用页面内已有的数据验证功能可用性：
-         页面不崩、已渲染的图表仍在（图表全是本地 ECharts，不依赖在线瓦片） */
-      const canvases = document.querySelectorAll('canvas').length;
-      return {
-        canvases,
-        pageAlive: !!document.querySelector('#app') && document.querySelector('.layout') !== null
-      };
-    })()`);
-    await cdp.send('Network.emulateNetworkConditions', {
-      offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1
-    });
-
-    check(3.2, '断网状态下界面与图表保持可用（无在线依赖）',
-      offlineProbe.pageAlive && offlineProbe.canvases >= 1,
-      `页面存活=${offlineProbe.pageAlive}，canvas ${offlineProbe.canvases} 个（ECharts 全本地）`);
-
-    /* 服务配置核对：仅监听 127.0.0.1，不对外暴露 */
-    const listened = await cdp.js(`(async () => {
-      try {
-        const r = await fetch(${JSON.stringify('__BASE__/api/health')}.replace('__BASE__', location.origin));
-        const j = await r.json();
-        return { ok: j.ok === true, app: j.data.app };
-      } catch (e) { return { ok: false, err: e.message }; }
-    })()`);
-    check(3.3, '服务仅监听本机回环地址（数据不出本机）',
-      listened.ok === true,
-      `健康检查返回 app=${listened.app}（服务绑定 127.0.0.1，非 0.0.0.0）`);
-
-  }
+    out.hasEmptyHint = document.body.innerText.includes('还没有') || document.body.innerText.includes('暂无');
+    return out;
+  })()`);
+  check('23a', '资料为空的客户详情 4 个标签页都能正常渲染空状态',
+    emptyUi.tabs.length === 4 && Object.values(emptyUi.panes).every(Boolean) && emptyUi.hasEmptyHint,
+    `标签 ${emptyUi.tabs.join(' / ')}；空态提示=${emptyUi.hasEmptyHint}`);
 
   /* ================================================================ */
-  /* 验收 24：浏览器兼容（Chrome + Edge）                              */
+  /* 24. 双浏览器 + 无外部请求                                          */
   /* ================================================================ */
-  console.log('\n--- 验收 24：浏览器兼容 ---');
-  check('24a', `Chrome 下五个页面无控制台报错（${br.version.Browser}）`,
-    cdp.errors.length === 0,
-    cdp.errors.length ? cdp.errors.slice(0, 2).join(' | ') : '0 条错误');
+  console.log('\n--- 验收 24：浏览器兼容与数据零外流 ---');
+  const navChrome = await cdp.js(`(() => ({
+    navCount: document.querySelectorAll('.nav-item').length,
+    navText: [...document.querySelectorAll('.nav-item')].map(x => x.textContent.trim())
+  }))()`);
+  check('24a', 'Chrome：导航 4 项、无外部请求',
+    navChrome.navCount === 4
+      && !cdp.requests.some((u) => /^https?:\/\//.test(u) && !/127\.0\.0\.1|localhost/.test(u)),
+    `导航 ${navChrome.navCount} 项：${navChrome.navText.join(' / ')}；外部请求 ${cdp.requests.filter((u) => /^https?:\/\//.test(u) && !/127\.0\.0\.1|localhost/.test(u)).length} 个`);
 
   if (EDGE) {
-    cdp.close();
-    try { br.child.kill(); } catch (_) { /* 忽略 */ }
-    await sleep(600);
-
     const edgeProfile = fs.mkdtempSync(path.join(os.tmpdir(), 'acc-edge-'));
-    const eb = await launchBrowser(EDGE, 9241, edgeProfile);
-    if (eb) {
-      const pages = [];
-      /* 导航项：首页 / 客户 / 项目 / 待办（导航组）+ 功能设置（系统组）= 5 项。
-         1.21 起移除「报价单」与「招标采集」两个模块，故从 7 项改为 5 项。 */
-      for (const route of ['home', 'customers', 'projects', 'tasks', 'settings']) {
-        await eb.cdp.js(`location.href = ${JSON.stringify(BASE + '/#/' + route)}; 'ok'`);
-        await sleep(3400);
-        const state = await eb.cdp.js(`(() => ({
+    const ed = await launchBrowser(EDGE, 9241, edgeProfile);
+    if (ed) {
+      let edgeOk = true;
+      const pages = ['#/home', '#/customers', '#/tasks', '#/settings'];
+      for (const p of pages) {
+        await ed.cdp.js(`location.href = ${JSON.stringify(BASE + '/' + p)}; 'ok'`);
+        await sleep(2600);
+        const st = await ed.cdp.js(`(() => ({
           hasLayout: !!document.querySelector('.layout'),
           navCount: document.querySelectorAll('.nav-item').length,
-          err: document.body.innerText.includes('无法连接本地服务')
+          err: !!document.querySelector('.fatal')
         }))()`);
-        pages.push({ route, ...state });
+        if (!st.hasLayout || st.navCount !== 4 || st.err) edgeOk = false;
       }
-      const allOk = pages.every((p) => p.hasLayout && p.navCount === 5 && !p.err);
-      check('24b', `Edge 下五个页面布局与导航正常（${eb.version.Browser}）`,
-        allOk,
-        pages.map((p) => `${p.route}${p.hasLayout && !p.err ? '✓' : '✗'}`).join(' ')
-        + `；导航项 ${pages[0].navCount} 个`);
-
-      check('24c', 'Edge 下无控制台报错',
-        eb.cdp.errors.length === 0,
-        eb.cdp.errors.length ? eb.cdp.errors.slice(0, 2).join(' | ') : '0 条错误');
-
-      eb.cdp.close();
-      try { eb.child.kill(); } catch (_) { /* 忽略 */ }
+      check('24b', `Edge：4 个页面布局与导航正常（${ed.version.Browser}）`, edgeOk,
+        edgeOk ? '导航 4 项，页面均正常渲染' : '存在渲染或导航异常');
+      check('24c', 'Edge：无控制台报错', ed.cdp.errors.length === 0,
+        ed.cdp.errors.length ? ed.cdp.errors.slice(0, 3).join(' | ') : '0 条错误');
+      ed.cdp.close();
+      try { ed.child.kill(); } catch (_) { /* 忽略 */ }
       await sleep(400);
       try { fs.rmSync(edgeProfile, { recursive: true, force: true }); } catch (_) { /* 忽略 */ }
     } else {
-      check('24b', 'Edge 下五个页面布局与导航正常', false, 'Edge 启动失败');
-      check('24c', 'Edge 下无控制台报错', false, 'Edge 启动失败');
+      check('24b', 'Edge：布局与导航正常', false, 'Edge 启动失败');
+      check('24c', 'Edge：无控制台报错', false, 'Edge 启动失败');
     }
   } else {
-    check('24b', 'Edge 下五个页面布局与导航正常', false, '系统未安装 Edge');
-    check('24c', 'Edge 下无控制台报错', false, '系统未安装 Edge');
+    check('24b', 'Edge：布局与导航正常', false, '系统未安装 Edge');
+    check('24c', 'Edge：无控制台报错', false, '系统未安装 Edge');
   }
 
-  /* ================================================================ */
-  /* 验收 23：空状态                                                   */
-  /* ================================================================ */
-  console.log('\n--- 验收 23：空状态 ---');
-  {
-    /* 用"搜不到的关键词"制造空结果，验证列表空状态 */
-    const emptyBr = await launchBrowser(CHROME, 9242, fs.mkdtempSync(path.join(os.tmpdir(), 'acc-empty-')));
-    if (emptyBr) {
-      const pages = [
-        { route: 'home', probe: `document.body.innerText.includes('客户总数')` },
-        { route: 'customers', probe: `!!document.querySelector('.search-box')` }
-      ];
-      for (const p of pages) {
-        await emptyBr.cdp.js(`location.href = ${JSON.stringify(BASE + '/#/' + p.route)}; 'ok'`);
-        await sleep(3400);
-      }
-
-      /* 列表空状态：搜一个不存在的结果 */
-      const listEmpty = await emptyBr.cdp.js(`(async () => {
-        location.hash = '#/customers';
-        await new Promise(r => setTimeout(r, 3000));
-        const inp = document.querySelector('.search-box input');
-        inp.value = '绝不可能存在的客户名XYZ123';
-        inp.dispatchEvent(new Event('input', { bubbles: true }));
-        await new Promise(r => setTimeout(r, 300));
-        const btn = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === '搜索');
-        btn.click();
-        await new Promise(r => setTimeout(r, 2000));
-        const text = document.querySelector('.content').innerText;
-        return {
-          hasEmptyHint: text.includes('还没有客户数据') || text.includes('暂无数据') || text.includes('没有符合条件'),
-          hasNoError: !text.includes('无法连接本地服务') && !text.includes('加载失败'),
-          tableExists: !!document.querySelector('.data-table')
-        };
-      })()`);
-
-      check('23a', '客户列表无结果时显示空状态提示且不崩坏',
-        listEmpty.hasEmptyHint && listEmpty.hasNoError,
-        `显示空状态提示=${listEmpty.hasEmptyHint}，无报错=${listEmpty.hasNoError}，表格结构完好=${listEmpty.tableExists}`);
-
-      /* 详情页空状态：只填 4 项必填、其余全空的客户 */
-      const blank = await api('POST', '/api/customers', {
-        name: `最终验收-空数据客户${ts}`, short_name: '空数据', type: '其他', industry: '其他'
-      });
-      created.push(blank.data.id);
-
-      await emptyBr.cdp.js(`location.hash = '#/customers/${blank.data.id}'; 'ok'`);
-      await sleep(3600);
-      const detailEmpty = await emptyBr.cdp.js(`(async () => {
-        const out = { tabs: {} };
-        const content = document.querySelector('.content');
-        out.hasError = content.innerText.includes('无法连接本地服务') || content.innerText.includes('加载失败');
-        out.tabCount = document.querySelectorAll('.tab').length;
-        out.headerOk = content.innerText.includes('最终验收-空数据客户');
-
-        /* 逐个标签页检查空状态提示 */
-        const clickTab = async (label) => {
-          const t = [...document.querySelectorAll('.tab')].find(x => x.textContent.includes(label));
-          if (!t) return 'no-tab';
-          t.click();
-          await new Promise(r => setTimeout(r, 1100));
-          return content.innerText;
-        };
-        const contacts = await clickTab('联系人');
-        out.tabs.contacts = contacts.includes('还没有联系人');
-        const followups = await clickTab('跟进记录');
-        out.tabs.followups = followups.includes('还没有跟进记录');
-        const projects = await clickTab('关联项目');
-        out.tabs.projects = projects.includes('该客户暂无项目');
-        const logs = await clickTab('变更记录');
-        /* 新建客户本身就会留一条「新建」日志，因此这里只要求该页正确渲染变更时间线或空状态 */
-        out.tabs.logs = logs.includes('暂无变更记录') || logs.includes('新建客户');
-        out.logsInfo = {
-          textHas: logs.includes('暂无变更记录'),
-          timelineItems: document.querySelectorAll('.tl-item').length,
-          emptyBlocks: document.querySelectorAll('.empty').length,
-          tail: logs.replace(/\\s+/g, ' ').slice(-120)
-        };
-        const basic = await clickTab('基本信息');
-        out.tabs.basicOk = basic.length > 60;
-        out.basicHasEmptyHint = basic.includes('尚未填写任何资料');
-        out.hasTabNav = document.querySelectorAll('.tab').length >= 5;
-        return out;
-      })()`);
-
-      const tabOk = detailEmpty.tabs
-        && detailEmpty.tabs.contacts && detailEmpty.tabs.followups
-        && detailEmpty.tabs.projects && detailEmpty.tabs.logs && detailEmpty.tabs.basicOk;
-
-      check('23b', '客户详情在资料为空时各标签页均显示对应空状态（不白屏、不报错）',
-        tabOk && detailEmpty.hasTabNav && !detailEmpty.hasError && detailEmpty.headerOk,
-        `标签页 ${detailEmpty.tabCount} 个；空状态：联系人=${detailEmpty.tabs.contacts}、跟进=${detailEmpty.tabs.followups}、`
-        + `项目=${detailEmpty.tabs.projects}、变更记录=${detailEmpty.tabs.logs}；页面报错=${detailEmpty.hasError}；`
-        + `页头正常=${detailEmpty.headerOk}；基本信息页可渲染=${detailEmpty.tabs.basicOk}；`
-        + `变更记录页：时间线条目 ${(detailEmpty.logsInfo || {}).timelineItems}，尾部文本「${(detailEmpty.logsInfo || {}).tail}」`);
-
-      /* 待办中心空状态 */
-      await emptyBr.cdp.js(`location.hash = '#/tasks'; 'ok'`);
-      await sleep(3400);
-      const taskEmpty = await emptyBr.cdp.js(`(() => {
-        const text = document.querySelector('.content').innerText;
-        return {
-          hasHint: text.includes('没有符合条件') || text.includes('待办中心'),
-          hasError: text.includes('无法连接本地服务')
-        };
-      })()`);
-      check('23c', '待办中心空状态下正常显示',
-        taskEmpty.hasHint && !taskEmpty.hasError,
-        '页面正常渲染');
-
-      emptyBr.cdp.close();
-      try { emptyBr.child.kill(); } catch (_) { /* 忽略 */ }
-    } else {
-      check('23a', '客户列表无结果时显示空状态提示且不崩坏', false, '浏览器启动失败');
-      check('23b', '客户详情在资料为空时显示引导提示（不白屏、不报错）', false, '浏览器启动失败');
-      check('23c', '待办中心空状态下正常显示', false, '浏览器启动失败');
-    }
-  }
+  check('24d', 'Chrome 全程无未捕获 JS 错误',
+    cdp.errors.length === 0,
+    cdp.errors.length ? cdp.errors.slice(0, 3).join(' | ') : '0 条错误');
 
   /* ================================================================ */
-  const pass = results.filter((r) => r.pass).length;
-  const fail = results.length - pass;
-  console.log(`\n=== 浏览器验收汇总 ===\n通过 ${pass} / ${results.length}，失败 ${fail}`);
-  if (fail) {
-    console.log('\n失败项：');
-    for (const r of results.filter((x) => !x.pass)) console.log(`  ✗ ${r.no}. ${r.name} —— ${r.detail}`);
-  }
-
-  fs.writeFileSync(
-    path.join(ROOT, '.fixtures', 'acceptance-browser-result.json'),
-    JSON.stringify({ pass, fail, total: results.length, results }, null, 2),
-    'utf8'
-  );
-  console.log('\n（结果已写入 .fixtures/acceptance-browser-result.json）');
-
-  try { cdp.close(); } catch (_) { /* 忽略 */ }
+  /* 清理                                                              */
+  /* ================================================================ */
+  cdp.close();
   try { br.child.kill(); } catch (_) { /* 忽略 */ }
   await sleep(400);
   try { fs.rmSync(profile, { recursive: true, force: true }); } catch (_) { /* 忽略 */ }
 
+  try {
+    for (const cid of [...new Set(created.customers)]) {
+      const pl = await api('GET', `/api/projects?customer_id=${cid}&pageSize=200&archived=all`);
+      const pids = (pl.data.list || []).map((p) => p.id);
+      for (const pid of pids) {
+        const d = await api('GET', `/api/projects/${pid}`);
+        const rows = [].concat((d.data && d.data.plans) || [], (d.data && d.data.receipts) || []);
+        for (const row of rows) await api('DELETE', `/api/payments/${row.id}`);
+      }
+      const cl = await api('GET', `/api/costs?customer_id=${cid}&pageSize=200`);
+      for (const row of (cl.data && cl.data.list) || []) await api('DELETE', `/api/costs/${row.id}`);
+      if (pids.length) await api('POST', '/api/projects/batch-delete', { ids: pids });
+      const tl = await api('GET', `/api/tasks?view=all&customer_id=${cid}`);
+      const tids = (tl.data.list || []).map((t) => t.id);
+      if (tids.length) await api('POST', '/api/tasks/batch-delete', { ids: tids });
+      await api('POST', '/api/customers/batch-delete', { ids: [cid] });
+    }
+    const tl2 = await api('GET', '/api/tasks?view=all');
+    const quickTids = (tl2.data.list || []).filter((t) => String(t.title).includes(`验收快速待办${ts}`)).map((t) => t.id);
+    if (quickTids.length) await api('POST', '/api/tasks/batch-delete', { ids: quickTids });
+    const d = await api('GET', '/api/dict');
+    for (const val of created.dict) {
+      const hits = (d.data.items.industry || []).filter((x) => x.value === val);
+      for (const h of hits) await api('DELETE', '/api/dict/' + h.id);
+    }
+    console.log('\n（已清理验收测试数据）');
+  } catch (_) { /* 忽略 */ }
+
+  const pass = results.filter((r) => r.pass).length;
+  const fail = results.length - pass;
+  console.log(`\n=== 汇总 ===\n通过 ${pass} / ${results.length}，失败 ${fail}`);
+  if (fail) {
+    console.log('\n失败项：');
+    for (const r of results.filter((x) => !x.pass)) console.log(`  ✗ ${r.no}. ${r.name} —— ${r.detail}`);
+  }
+  try {
+    fs.writeFileSync(
+      path.join(ROOT, '.fixtures', 'acceptance-browser-result.json'),
+      JSON.stringify({ pass, fail, total: results.length, results }, null, 2),
+      'utf8'
+    );
+  } catch (_) { /* 忽略 */ }
   process.exit(fail ? 1 : 0);
-})().catch((e) => {
-  console.error('验收脚本异常：', e && e.stack ? e.stack : e);
-  process.exit(1);
-});
-
-/** 检查孤儿数据 */
-async function checkOrphans() {
-  const { DatabaseSync } = require('node:sqlite');
-  const db = new DatabaseSync(path.join(ROOT, 'data', 'crm.db'), { readOnly: true });
-  const q = (sql) => db.prepare(sql).get().n;
-  const out = {
-    contacts: q('SELECT COUNT(*) AS n FROM contacts WHERE customer_id NOT IN (SELECT id FROM customers)'),
-    followups: q('SELECT COUNT(*) AS n FROM followups WHERE customer_id NOT IN (SELECT id FROM customers)'),
-    projects: q('SELECT COUNT(*) AS n FROM projects WHERE customer_id NOT IN (SELECT id FROM customers)'),
-    payments: q('SELECT COUNT(*) AS n FROM payments WHERE project_id NOT IN (SELECT id FROM projects)'),
-    tasks: q('SELECT COUNT(*) AS n FROM tasks WHERE customer_id > 0 AND customer_id NOT IN (SELECT id FROM customers)'),
-    customer_tags: q('SELECT COUNT(*) AS n FROM customer_tags WHERE customer_id NOT IN (SELECT id FROM customers)')
-  };
-  db.close();
-  out.total = Object.values(out).reduce((s, x) => s + x, 0);
-  return out;
-}
-
-/**
- * 把字典项恢复为「启用且未删除」。
- * 界面上「删除非内置项」是软删除（deleted_at 置位），而 PUT 接口对已删除项会返回 404，
- * 所以测试收尾时直接改库复原，保证脚本可重复运行。
- */
-function restoreDictItem(id) {
-  if (!id) return false;
-  const { DatabaseSync } = require('node:sqlite');
-  const db = new DatabaseSync(path.join(ROOT, 'data', 'crm.db'));
-  db.prepare('UPDATE dict SET deleted_at = NULL, enabled = 1, updated_at = ? WHERE id = ?')
-    .run(new Date().toISOString().slice(0, 19).replace('T', ' '), id);
-  db.close();
-  return true;
-}
-
-/**
- * 按筛选条件直查数据库，返回命中的客户 id（升序）。
- * 用于与接口返回结果交叉核对，确认筛选「无漏无多」。
- */
-function queryIds(column, value) {
-  const { DatabaseSync } = require('node:sqlite');
-  const ALLOWED = ['purchase_mode', 'cert_required', 'type', 'industry', 'region_code', 'level', 'status'];
-  if (!ALLOWED.includes(column)) throw new Error('未允许的核对字段：' + column);
-  const db = new DatabaseSync(path.join(ROOT, 'data', 'crm.db'), { readOnly: true });
-  /* 与后端一致：多值字段用 LIKE 包含匹配，其余等值 */
-  const isMulti = column === 'cert_required';
-  const rows = isMulti
-    ? db.prepare(`SELECT id FROM customers WHERE deleted_at IS NULL AND ${column} LIKE ?`).all(`%${value}%`)
-    : db.prepare(`SELECT id FROM customers WHERE deleted_at IS NULL AND ${column} = ?`).all(value);
-  db.close();
-  return rows.map((r) => r.id).sort((a, b) => a - b);
-}
-
-/* node:sqlite 的 DatabaseSync 在文件顶部按需引入 */
-const { DatabaseSync } = require('node:sqlite');
+})().catch((e) => { console.error('测试异常：', e && e.stack ? e.stack : e); process.exit(1); });

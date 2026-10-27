@@ -1,15 +1,17 @@
 /**
- * 阶段三 浏览器交互测试（Chrome DevTools Protocol）
+ * 阶段三 浏览器交互测试（1.23 一客户一项目）
  *
- * 覆盖纯渲染测试测不到的部分：
- *   1. 看板 14 列渲染
- *   2. 在页面上真实新建客户与项目（填表单 → 点保存）
- *   3. 看板卡片改阶段（下拉选择 → 数据落库）
- *   4. 登记实收 → 验证页面上的欠款/回款率**当场变化**
- *   5. 待办中心四视图切换
- *   6. 全程收集 JS 错误
+ * 驱动真实浏览器走一遍客户详情里的「项目与财务」：
+ *   - 打开项目档案抽屉并保存（项目名称 / 阶段 / 合同额 / 投标信息）
+ *   - 新增回款计划 → 登记实收 → 项目卡与财务汇总当场更新
+ *   - 登记成本 → 成本台账出现该笔
+ *   - 当前项目「转为历史」→ 项目区变空、历史项目折叠区可查
+ *   - 归档后再建新当前项目
+ *   - 待办中心快速添加
+ *   - 全程无未捕获 JS 错误
  *
  * 用法：node tools/test-phase3-ui-interaction.js
+ * 前置：服务运行中；Chrome 已安装
  */
 
 'use strict';
@@ -28,11 +30,17 @@ const CHROME_CANDIDATES = [
 
 const BASE = process.env.CRM_TEST_BASE || 'http://127.0.0.1:8899';
 const PORT = 9224;
+const TS = Date.now().toString().slice(-6);
 
 const results = [];
 function check(name, pass, detail) {
   results.push({ name, pass: !!pass, detail: detail || '' });
   console.log(`[${pass ? '✓ 通过' : '✗ 失败'}] ${name}${detail ? '  —— ' + detail : ''}`);
+}
+
+function findBrowser() {
+  for (const p of CHROME_CANDIDATES) if (fs.existsSync(p)) return p;
+  throw new Error('未找到 Chrome / Edge');
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -44,6 +52,7 @@ class CDP {
     this.pending = new Map();
     this.errors = [];
   }
+
   async connect() {
     this.ws = new globalThis.WebSocket(this.wsUrl);
     await new Promise((resolve, reject) => {
@@ -66,42 +75,50 @@ class CDP {
       }
     });
   }
+
   send(method, params) {
     const id = ++this.id;
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
       this.ws.send(JSON.stringify({ id, method, params: params || {} }));
       setTimeout(() => {
-        if (this.pending.has(id)) { this.pending.delete(id); reject(new Error(method + ' 超时')); }
-      }, 20000);
+        if (this.pending.has(id)) {
+          this.pending.delete(id);
+          reject(new Error(`${method} 超时`));
+        }
+      }, 15000);
     });
   }
+
   async evalJs(expression) {
-    const r = await this.send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
+    const r = await this.send('Runtime.evaluate', {
+      expression, returnByValue: true, awaitPromise: true
+    });
     if (r.exceptionDetails) {
       throw new Error('页面脚本异常：' + (r.exceptionDetails.exception
         ? r.exceptionDetails.exception.description : r.exceptionDetails.text));
     }
     return r.result.value;
   }
+
   close() { try { this.ws.close(); } catch (_) { /* 忽略 */ } }
 }
 
-function findBrowser() {
-  for (const p of CHROME_CANDIDATES) if (fs.existsSync(p)) return p;
-  throw new Error('未找到 Chrome / Edge');
-}
-
 (async () => {
-  console.log('=== 阶段三 浏览器交互测试 ===\n');
+  console.log('=== 阶段三 浏览器交互测试（项目档案 / 回款 / 成本 / 待办）===\n');
 
-  /* 准备：一个干净的客户 */
-  const ts = Date.now().toString().slice(-6);
+  if (typeof globalThis.WebSocket !== 'function') {
+    console.log('当前 Node 无内置 WebSocket，跳过交互测试。');
+    process.exit(0);
+  }
+
+  /* 准备测试客户（1.23 字段模型） */
   const custRes = await fetch(BASE + '/api/customers', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      name: `阶段三交互测试客户${ts}`, short_name: `交互测试${ts}`,
-      type: '终端用户', industry: '石油'
+      name: `阶段三交互测试客户${TS}`, short_name: `交互测试${TS}`,
+      industry: '石油', source: '展会',
+      contact_name: '交互联系人', contact_position: '采购经理', contact_phone: '13900007777'
     })
   });
   const customerId = (await custRes.json()).data.id;
@@ -141,278 +158,376 @@ function findBrowser() {
     await sleep(wait || 2800);
   }
 
-  /* ---------- 1. 看板渲染（先造一条数据，否则页面显示的是空状态而非看板） ---------- */
-  const seedRes = await fetch(BASE + '/api/projects', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      name: `阶段三交互测试项目${ts}`, customer_id: customerId,
-      stage: '信息收集', contract_amount: 500000, end_user: '交互测试装置'
-    })
-  });
-  const seedProject = (await seedRes.json()).data;
-  console.log(`准备测试项目 id=${seedProject.id}\n`);
+  await goto('#/customers/' + customerId, 3000);
 
-  await goto('#/projects');
-  const board = await cdp.evalJs(`(() => {
-    const cols = [...document.querySelectorAll('.kanban-col')];
+  /* ---------- 1. 切到「项目与财务」 ---------- */
+  const pane = await cdp.evalJs(`(async () => {
+    const t = [...document.querySelectorAll('.tabs .tab')].find(x => x.textContent.includes('项目与财务'));
+    if (!t) return { ok: false, why: '未找到项目与财务标签' };
+    t.click();
+    await new Promise(r => setTimeout(r, 500));
+    const titles = [...document.querySelectorAll('.card-title')].map(x => x.textContent.trim());
     return {
-      colCount: cols.length,
-      stages: cols.map(c => (c.querySelector('.tag') || {}).textContent || '').filter(Boolean),
-      hasSummary: document.querySelectorAll('.stat').length,
-      hasNewBtn: [...document.querySelectorAll('button')].some(b => b.textContent.includes('新增项目')),
-      hasCard: document.querySelectorAll('.kanban-card').length
+      ok: true, titles,
+      hasEmpty: document.body.innerText.includes('还没有项目档案'),
+      hasBuildBtn: [...document.querySelectorAll('button')].some(b => b.textContent.includes('建立项目档案'))
     };
   })()`);
-  check('项目页看板渲染出 14 个阶段列',
-    board.colCount === 14,
-    `列数=${board.colCount}，卡片 ${board.hasCard} 个：${board.stages.slice(0, 5).join(' / ')}…`);
-  check('项目页显示金额汇总卡片与新增按钮',
-    board.hasSummary >= 4 && board.hasNewBtn,
-    `汇总卡片 ${board.hasSummary} 个，新增按钮=${board.hasNewBtn}`);
+  check('客户详情「项目与财务」初始为空档案状态',
+    pane.ok && pane.hasEmpty && pane.hasBuildBtn
+      && pane.titles.some((x) => x.includes('当前项目档案'))
+      && pane.titles.some((x) => x.includes('回款计划'))
+      && pane.titles.some((x) => x.includes('成本台账')),
+    `卡片：${(pane.titles || []).slice(0, 6).join(' / ')}`);
 
-  /* ---------- 2. 打开新增项目抽屉并填写保存（用另一个名字，避免与种子项目混淆） ---------- */
-  const newProjName = `阶段三交互新建项目${ts}`;
-  const created = await cdp.evalJs(`(async () => {
-    const btn = [...document.querySelectorAll('button')].find(b => b.textContent.includes('新增项目'));
-    if (!btn) return { ok: false, why: '未找到新增项目按钮' };
+  /* ---------- 2. 建立项目档案 ---------- */
+  const projectName = `阶段三交互项目${TS}`;
+  const projectSaved = await cdp.evalJs(`(async () => {
+    const btn = [...document.querySelectorAll('button')].find(b => b.textContent.includes('建立项目档案'));
+    if (!btn) return { ok: false, why: '未找到建立项目档案按钮' };
     btn.click();
     await new Promise(r => setTimeout(r, 900));
-
     const d = document.querySelector('.drawer');
     if (!d) return { ok: false, why: '抽屉未打开' };
-
-    const setInput = (labelText, value) => {
-      const f = [...d.querySelectorAll('.field')].find(x => {
-        const l = x.querySelector('.field-label');
-        return l && l.textContent.includes(labelText);
-      });
+    const field = (label) => [...d.querySelectorAll('.field')].find(x => {
+      const l = x.querySelector('.field-label');
+      return l && l.textContent.trim().startsWith(label);
+    });
+    const setText = (label, value) => {
+      const f = field(label);
       if (!f) return false;
-      const inp = f.querySelector('input, textarea, select');
-      if (!inp) return false;
-      if (inp.tagName === 'SELECT') {
-        const opt = [...inp.options].find(o => o.textContent.includes(${JSON.stringify('交互测试' + ts)}));
-        if (!opt) return false;
-        inp.value = opt.value;
-      } else {
-        inp.value = value;
-      }
-      inp.dispatchEvent(new Event('input', { bubbles: true }));
-      inp.dispatchEvent(new Event('change', { bubbles: true }));
+      const i = f.querySelector('input, textarea');
+      if (!i) return false;
+      i.value = value;
+      i.dispatchEvent(new Event('input', { bubbles: true }));
       return true;
     };
-
-    const r1 = setInput('项目名称', ${JSON.stringify(newProjName)});
-    const r2 = setInput('所属客户', '');
-    const r3 = setInput('合同金额', '500000');
-    const labelCount = d.querySelectorAll('.field-label').length;
-
-    await new Promise(r => setTimeout(r, 300));
-
-    const saveBtn = [...d.querySelectorAll('.drawer-foot button')].find(b => b.textContent.includes('保存'));
-    if (!saveBtn) return { ok: false, why: '未找到保存按钮', r1, r2, r3 };
-    saveBtn.click();
+    const setSelect = (label, value) => {
+      const f = field(label);
+      if (!f) return false;
+      const s = f.querySelector('select');
+      if (!s) return false;
+      s.value = value;
+      s.dispatchEvent(new Event('change', { bubbles: true }));
+      return true;
+    };
+    const filled = {
+      name: setText('项目名称', ${JSON.stringify(projectName)}),
+      amount: setText('合同额', '500000'),
+      stage: setSelect('项目阶段', '投标/议价'),
+      bid: setText('投标日期', '2026-09-20'),
+      result: setSelect('投标结果', '已中标'),
+      delivery: setText('交货期', '2026-12-31')
+    };
+    await new Promise(r => setTimeout(r, 250));
+    const save = [...d.querySelectorAll('.drawer-foot button')].find(b => b.textContent.includes('保存'));
+    if (!save) return { ok: false, why: '未找到保存按钮' };
+    save.click();
     await new Promise(r => setTimeout(r, 1800));
-
-    const toasts = [...document.querySelectorAll('.toast')].map(t => t.textContent.trim());
-    return { ok: true, r1, r2, r3, labelCount, toasts, drawerClosed: !document.querySelector('.drawer') };
+    return {
+      ok: true, filled,
+      toasts: [...document.querySelectorAll('.toast')].map(t => t.textContent.trim()),
+      drawerClosed: !document.querySelector('.drawer')
+    };
   })()`);
+  check('项目档案抽屉填写并保存成功',
+    projectSaved.ok && Object.values(projectSaved.filled).every(Boolean)
+      && projectSaved.toasts.some((t) => t.includes('项目档案'))
+      && projectSaved.drawerClosed,
+    projectSaved.ok ? `提示：${(projectSaved.toasts || []).join(' / ')}` : `失败：${projectSaved.why}`);
 
-  check('新增项目抽屉可填写并保存成功',
-    created.ok && created.r1 && created.r2 && created.toasts.some((t) => t.includes('已创建')),
-    created.ok
-      ? `字段填写=${created.r1 && created.r2}，抽屉字段数=${created.labelCount}，提示：${created.toasts.join(' / ')}`
-      : `失败：${created.why}`);
-
-  /* 从接口确认新项目已落库 */
-  const projList = await (await fetch(BASE + '/api/projects?pageSize=5&q=' + encodeURIComponent(newProjName))).json();
-  const newProject = (projList.data.list || [])[0];
-  check('项目已写入数据库（含合同金额）',
-    !!newProject && newProject.contract_amount === 500000,
-    newProject ? `id=${newProject.id}，金额=${newProject.contract_amount}，欠款=${newProject.debt_amount}` : '未找到项目');
-
-  /* 后续统一使用种子项目，避免同名混淆 */
-  const project = seedProject;
-
-  /* ---------- 3. 看板改阶段（针对种子项目，名称唯一可精确定位） ---------- */
-  if (project) {
-    await goto('#/projects', 3200);
-    const moved = await cdp.evalJs(`(async () => {
-      const cards = [...document.querySelectorAll('.kanban-card')];
-      const card = cards.find(c => c.textContent.includes(${JSON.stringify('阶段三交互测试项目' + ts)}));
-      if (!card) return { ok: false, why: '看板上未找到该项目卡片' };
-      const sel = card.querySelector('select');
-      if (!sel) return { ok: false, why: '卡片上无阶段下拉' };
-      sel.value = '已中标/已签约';
-      sel.dispatchEvent(new Event('change', { bubbles: true }));
-      await new Promise(r => setTimeout(r, 1800));
-      const toasts = [...document.querySelectorAll('.toast')].map(t => t.textContent.trim());
-      return { ok: true, toasts };
-    })()`);
-
-    const afterMove = await (await fetch(BASE + `/api/projects/${project.id}`)).json();
-    check('看板上改阶段真实生效并落库',
-      moved.ok && afterMove.data.stage === '已中标/已签约',
-      moved.ok
-        ? `阶段 → ${afterMove.data.stage}，签约日期自动补为 ${afterMove.data.signed_at}，提示：${(moved.toasts || []).join(' / ')}`
-        : `失败：${moved.why}`);
-  }
-
-  /* ---------- 4. 项目详情：登记实收，验证欠款当场变化 ---------- */
-  if (project) {
-    await goto('#/projects/' + project.id, 3000);
-    const detailBefore = await cdp.evalJs(`(() => {
-      const stats = [...document.querySelectorAll('.stat')].map(s => ({
-        n: (s.querySelector('.n') || {}).textContent.trim(),
-        l: (s.querySelector('.l') || {}).textContent.trim()
-      }));
-      const tabs = [...document.querySelectorAll('.tab')].map(t => t.textContent.trim());
-      const debt = stats.find(s => s.l.includes('欠款'));
-      const rate = stats.find(s => s.l.includes('回款率'));
-      return { stats, tabs, debt: debt && debt.n, rate: rate && rate.n };
-    })()`);
-    check('项目详情页渲染标签页与金额汇总',
-      detailBefore.tabs.length >= 5 && !!detailBefore.debt,
-      `标签页（${detailBefore.tabs.length} 个）：${detailBefore.tabs.join(' / ')}；欠款=${detailBefore.debt}，回款率=${detailBefore.rate}`);
-
-    const pay = await cdp.evalJs(`(async () => {
-      const btn = [...document.querySelectorAll('button')].find(b => b.textContent.includes('登记实收'));
-      if (!btn) return { ok: false, why: '未找到登记实收按钮' };
-      btn.click();
-      await new Promise(r => setTimeout(r, 800));
-      const d = document.querySelector('.drawer');
-      if (!d) return { ok: false, why: '回款抽屉未打开' };
-
-      const amtField = [...d.querySelectorAll('.field')].find(x =>
-        x.querySelector('.field-label') && x.querySelector('.field-label').textContent.includes('金额'));
-      if (!amtField) return { ok: false, why: '未找到金额字段' };
-      const inp = amtField.querySelector('input');
-      inp.value = '200000';
-      inp.dispatchEvent(new Event('input', { bubbles: true }));
-      await new Promise(r => setTimeout(r, 200));
-
-      const saveBtn = [...d.querySelectorAll('.drawer-foot button')].find(b => b.textContent.includes('保存'));
-      saveBtn.click();
-      await new Promise(r => setTimeout(r, 2000));
-
-      const stats = [...document.querySelectorAll('.stat')].map(s => ({
-        n: (s.querySelector('.n') || {}).textContent.trim(),
-        l: (s.querySelector('.l') || {}).textContent.trim()
-      }));
-      const debt = stats.find(s => s.l.includes('欠款'));
-      const rate = stats.find(s => s.l.includes('回款率'));
-      const recv = stats.find(s => s.l.includes('已回款'));
-      return {
-        ok: true,
-        toasts: [...document.querySelectorAll('.toast')].map(t => t.textContent.trim()),
-        debt: debt && debt.n, rate: rate && rate.n, received: recv && recv.n,
-        drawerClosed: !document.querySelector('.drawer')
-      };
-    })()`);
-
-    const afterPay = await (await fetch(BASE + `/api/projects/${project.id}`)).json();
-    check('在页面上登记实收后，欠款与回款率当场自动重算',
-      pay.ok && afterPay.data.received_amount === 200000
-        && afterPay.data.debt_amount === 300000 && afterPay.data.payment_rate === 40,
-      pay.ok
-        ? `页面显示：已回款 ${pay.received}，欠款 ${pay.debt}，回款率 ${pay.rate}；接口核对：已收 ${afterPay.data.received_amount}，欠款 ${afterPay.data.debt_amount}，回款率 ${afterPay.data.payment_rate}%`
-        : `失败：${pay.why}`);
-  }
-
-  /* ---------- 5. 回款计划与实收流水标签页（重新加载页面，拿到最新数据） ---------- */
-  if (project) {
-    await goto('#/projects/' + project.id, 3200);
-    const tabs = await cdp.evalJs(`(async () => {
-      const out = {};
-      /* 只统计当前可见的标签页内容：
-         各标签页用 v-show 隐藏，元素仍在 DOM 中，不限定范围会把隐藏页也算进来 */
-      const visibleRoot = () => {
-        const divs = [...document.querySelectorAll('.content > div > div')];
-        return divs.filter(d => d.style.display !== 'none' && d.querySelector('.card, .timeline, .data-table'))
-          .pop() || document;
-      };
-      for (const name of ['实收流水', '回款计划', '变更记录']) {
-        const tab = [...document.querySelectorAll('.tab')].find(t => t.textContent.includes(name));
-        if (!tab) { out[name] = -1; continue; }
-        tab.click();
-        await new Promise(r => setTimeout(r, 600));
-        const root = visibleRoot();
-        const rows = root.querySelectorAll('.data-table tbody tr').length;
-        const logs = root.querySelectorAll('.timeline .tl-item').length;
-        out[name] = rows || logs;
-      }
-      return out;
-    })()`);
-    check('回款计划 / 实收流水 / 变更记录标签页均有内容',
-      (tabs['实收流水'] || 0) >= 1 && (tabs['回款计划'] || 0) >= 1 && (tabs['变更记录'] || 0) >= 2,
-      `实收流水 ${tabs['实收流水']} 行，回款计划 ${tabs['回款计划']} 行，变更记录 ${tabs['变更记录']} 条（含新建/改阶段/登记实收）`);
-  }
-
-  /* ---------- 6. 待办中心 ---------- */
-  await goto('#/tasks', 3000);
-  const taskViews = await cdp.evalJs(`(async () => {
-    const out = { views: [], counts: {} };
-    const tabs = [...document.querySelectorAll('.tab')];
-    out.views = tabs.map(t => t.textContent.replace(/\\s+/g, ' ').trim());
-    for (const v of ['本周', '逾期', '已完成', '全部待办']) {
-      const tab = [...document.querySelectorAll('.tab')].find(t => t.textContent.includes(v));
-      if (!tab) continue;
-      tab.click();
-      await new Promise(r => setTimeout(r, 600));
-      out.counts[v] = document.querySelectorAll('.task-item').length;
-    }
-    return out;
+  const projectCard = await cdp.evalJs(`(() => {
+    const kv = {};
+    document.querySelectorAll('.kv .k').forEach(k => {
+      const v = k.nextElementSibling;
+      if (v) kv[k.textContent.trim()] = v.textContent.trim().slice(0, 60);
+    });
+    const stats = [...document.querySelectorAll('.stat')].map(s => ({
+      n: (s.querySelector('.n') || {}).textContent.trim(),
+      l: (s.querySelector('.l') || {}).textContent.trim()
+    }));
+    return { kv, stats };
   })()`);
-  check('待办中心渲染 6 个视图且可切换',
-    taskViews.views.length >= 6,
-    `视图：${taskViews.views.join(' / ')}；切换后条数=${JSON.stringify(taskViews.counts)}`);
+  check('项目档案保存后详情回显名称 / 阶段 / 合同额 / 投标结果',
+    projectCard.kv['项目名称'] === projectName
+      && projectCard.kv['项目阶段'] === '投标/议价'
+      && String(projectCard.kv['合同额']).includes('500,000')
+      && projectCard.kv['投标结果'] === '已中标',
+    JSON.stringify(projectCard.kv));
 
-  const quickAdd = await cdp.evalJs(`(async () => {
-    const inp = document.querySelector('.quick-add input.input');
-    if (!inp) return { ok: false, why: '未找到快速添加输入框' };
-    inp.value = ${JSON.stringify('阶段三交互测试待办' + ts)};
-    inp.dispatchEvent(new Event('input', { bubbles: true }));
-    await new Promise(r => setTimeout(r, 200));
-    const btn = [...document.querySelectorAll('.quick-add button')].find(b => b.textContent.includes('添加'));
-    if (!btn) return { ok: false, why: '未找到添加按钮' };
+  /* ---------- 3. 新增回款计划 ---------- */
+  const planSaved = await cdp.evalJs(`(async () => {
+    const btn = [...document.querySelectorAll('button')].find(b => b.textContent.includes('新增计划'));
+    if (!btn) return { ok: false, why: '未找到新增计划按钮' };
     btn.click();
-    await new Promise(r => setTimeout(r, 1600));
+    await new Promise(r => setTimeout(r, 800));
+    const d = document.querySelector('.drawer');
+    if (!d) return { ok: false, why: '回款抽屉未打开' };
+    const amt = [...d.querySelectorAll('.field')].find(x => {
+      const l = x.querySelector('.field-label');
+      return l && l.textContent.trim().startsWith('金额');
+    });
+    if (!amt) return { ok: false, why: '未找到金额字段' };
+    const i = amt.querySelector('input');
+    i.value = '200000';
+    i.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 200));
+    const save = [...d.querySelectorAll('.drawer-foot button')].find(b => b.textContent.includes('保存'));
+    if (!save) return { ok: false, why: '未找到保存按钮' };
+    save.click();
+    await new Promise(r => setTimeout(r, 2000));
     return {
       ok: true,
       toasts: [...document.querySelectorAll('.toast')].map(t => t.textContent.trim()),
-      hasItem: document.body.innerText.includes(${JSON.stringify('阶段三交互测试待办' + ts)})
+      rows: [...document.querySelectorAll('.data-table tbody tr')].length
     };
   })()`);
-  check('待办中心快速添加可用（回车/点添加即保存）',
-    quickAdd.ok && quickAdd.hasItem,
-    quickAdd.ok ? `提示：${quickAdd.toasts.join(' / ')}，列表已出现该条=${quickAdd.hasItem}` : `失败：${quickAdd.why}`);
+  const afterPlanApi = await (await fetch(BASE + `/api/projects?customer_id=${customerId}&pageSize=10`)).json();
+  const projectId = afterPlanApi.data.list[0] && afterPlanApi.data.list[0].id;
+  const projectDetail = projectId ? await (await fetch(BASE + `/api/projects/${projectId}`)).json() : null;
+  check('页面上新增回款计划（并自动生成待办）',
+    planSaved.ok && planSaved.toasts.some((t) => t.includes('回款计划已保存'))
+      && projectDetail && projectDetail.data.plans.length === 1
+      && projectDetail.data.plans[0].amount === 200000,
+    planSaved.ok
+      ? `提示：${(planSaved.toasts || []).join(' / ')}；接口回款计划 ${projectDetail && projectDetail.data.plans.length} 条`
+      : `失败：${planSaved.why}`);
 
-  /* ---------- 7. 无 JS 错误 ---------- */
+  /* ---------- 4. 登记实收 ---------- */
+  const receiptSaved = await cdp.evalJs(`(async () => {
+    const btn = [...document.querySelectorAll('button')].find(b => b.textContent.includes('登记实收'));
+    if (!btn) return { ok: false, why: '未找到登记实收按钮' };
+    btn.click();
+    await new Promise(r => setTimeout(r, 800));
+    const d = document.querySelector('.drawer');
+    if (!d) return { ok: false, why: '回款抽屉未打开' };
+    const amt = [...d.querySelectorAll('.field')].find(x => {
+      const l = x.querySelector('.field-label');
+      return l && l.textContent.trim().startsWith('金额');
+    });
+    if (!amt) return { ok: false, why: '未找到金额字段' };
+    const i = amt.querySelector('input');
+    i.value = '200000';
+    i.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 200));
+    const save = [...d.querySelectorAll('.drawer-foot button')].find(b => b.textContent.includes('保存'));
+    if (!save) return { ok: false, why: '未找到保存按钮' };
+    save.click();
+    await new Promise(r => setTimeout(r, 2200));
+    const kv = {};
+    document.querySelectorAll('.kv .k').forEach(k => {
+      const v = k.nextElementSibling;
+      if (v) kv[k.textContent.trim()] = v.textContent.trim().slice(0, 80);
+    });
+    return {
+      ok: true,
+      toasts: [...document.querySelectorAll('.toast')].map(t => t.textContent.trim()),
+      receivedText: kv['已收 / 欠款'] || ''
+    };
+  })()`);
+  const afterReceipt = projectId ? await (await fetch(BASE + `/api/projects/${projectId}`)).json() : null;
+  check('页面上登记实收后欠款当场重算',
+    receiptSaved.ok && afterReceipt && afterReceipt.data.received_amount === 200000
+      && afterReceipt.data.debt_amount === 300000
+      && String(receiptSaved.receivedText).includes('200,000')
+      && String(receiptSaved.receivedText).includes('300,000'),
+    receiptSaved.ok
+      ? `页面：${receiptSaved.receivedText}；接口：已收 ${afterReceipt.data.received_amount}，欠款 ${afterReceipt.data.debt_amount}`
+      : `失败：${receiptSaved.why}`);
+
+  /* ---------- 5. 登记成本 ---------- */
+  const costSaved = await cdp.evalJs(`(async () => {
+    const btn = [...document.querySelectorAll('button')].find(b => b.textContent.includes('登记成本'));
+    if (!btn) return { ok: false, why: '未找到登记成本按钮' };
+    btn.click();
+    await new Promise(r => setTimeout(r, 800));
+    const d = document.querySelector('.drawer');
+    if (!d) return { ok: false, why: '成本抽屉未打开' };
+    const fields = [...d.querySelectorAll('.field')];
+    const amountField = fields.find(x => x.textContent.includes('金额'));
+    const supplierField = fields.find(x => x.textContent.includes('供应商'));
+    if (amountField) {
+      const i = amountField.querySelector('input');
+      i.value = '100000';
+      i.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    if (supplierField) {
+      const i = supplierField.querySelector('input');
+      i.value = '交互测试供应商';
+      i.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    await new Promise(r => setTimeout(r, 200));
+    const save = [...d.querySelectorAll('.drawer-foot button')].find(b => b.textContent.includes('保存'));
+    if (!save) return { ok: false, why: '未找到保存按钮' };
+    save.click();
+    await new Promise(r => setTimeout(r, 2000));
+    const rows = [...document.querySelectorAll('.data-table tbody tr')].map(tr => tr.innerText.replace(/\\s+/g, ' ').trim());
+    return {
+      ok: true,
+      toasts: [...document.querySelectorAll('.toast')].map(t => t.textContent.trim()),
+      hasCostRow: rows.some(r => r.includes('采购成本') && r.includes('100,000'))
+    };
+  })()`);
+  check('页面上登记采购成本并出现在成本台账',
+    costSaved.ok && costSaved.hasCostRow && costSaved.toasts.some((t) => t.includes('成本已登记')),
+    costSaved.ok ? `提示：${(costSaved.toasts || []).join(' / ')}，台账含该笔=${costSaved.hasCostRow}` : `失败：${costSaved.why}`);
+
+  /* ---------- 6. 财务汇总栏随数据更新 ---------- */
+  const financeBar = await cdp.evalJs(`(async () => {
+    const tab = [...document.querySelectorAll('.tabs .tab')].find(t => t.textContent.includes('资料'));
+    if (tab) tab.click();
+    await new Promise(r => setTimeout(r, 500));
+    const stats = [...document.querySelectorAll('.stat')].map(s => ({
+      n: (s.querySelector('.n') || {}).textContent.trim(),
+      l: (s.querySelector('.l') || {}).textContent.trim()
+    }));
+    const get = (label) => (stats.find(s => s.l.includes(label)) || {}).n || '';
+    return {
+      contract: get('合同额'), received: get('已收'), receivable: get('应收'),
+      purchase: get('采购成本'), profit: get('毛利')
+    };
+  })()`);
+  check('「资料」财务汇总栏显示合同额 / 已收 / 应收 / 采购成本 / 毛利',
+    String(financeBar.contract).includes('500,000')
+      && String(financeBar.received).includes('200,000')
+      && String(financeBar.receivable).includes('0')
+      && String(financeBar.purchase).includes('100,000')
+      && String(financeBar.profit).includes('100,000'),
+    JSON.stringify(financeBar));
+
+  /* ---------- 7. 转为历史 ---------- */
+  const archived = await cdp.evalJs(`(async () => {
+    const tab = [...document.querySelectorAll('.tabs .tab')].find(t => t.textContent.includes('项目与财务'));
+    if (tab) tab.click();
+    await new Promise(r => setTimeout(r, 500));
+    const btn = [...document.querySelectorAll('button')].find(b => b.textContent.includes('转为历史'));
+    if (!btn) return { ok: false, why: '未找到转为历史按钮' };
+    btn.click();
+    await new Promise(r => setTimeout(r, 600));
+    const modal = document.querySelector('.modal');
+    if (!modal) return { ok: false, why: '确认框未出现' };
+    const ok = [...modal.querySelectorAll('.modal-foot button')].find(b => b.textContent.includes('转为历史'));
+    if (!ok) return { ok: false, why: '确认框缺少确认按钮' };
+    ok.click();
+    await new Promise(r => setTimeout(r, 2200));
+    return {
+      ok: true,
+      toasts: [...document.querySelectorAll('.toast')].map(t => t.textContent.trim()),
+      isEmpty: document.body.innerText.includes('还没有项目档案'),
+      hasHistory: document.body.innerText.includes('历史项目（1）')
+    };
+  })()`);
+  check('当前项目「转为历史」后项目区为空、历史项目计数为 1',
+    archived.ok && archived.isEmpty && archived.hasHistory
+      && archived.toasts.some((t) => t.includes('已转为历史项目')),
+    archived.ok
+      ? `提示：${(archived.toasts || []).join(' / ')}，空档案=${archived.isEmpty}，历史计数=${archived.hasHistory}`
+      : `失败：${archived.why}`);
+
+  const historyApi = projectId ? await (await fetch(BASE + `/api/customers/${customerId}/history-projects`)).json() : null;
+  check('历史项目在接口里为 archived=1（只读）',
+    historyApi && historyApi.data.length === 1 && historyApi.data[0].archived === 1,
+    historyApi ? `历史 ${historyApi.data.length} 条` : '接口无响应');
+
+  /* ---------- 8. 归档后再建新当前项目 ---------- */
+  const newProjectName = `阶段三交互新项目${TS}`;
+  const rebuilt = await cdp.evalJs(`(async () => {
+    const btn = [...document.querySelectorAll('button')].find(b => b.textContent.includes('建立项目档案'));
+    if (!btn) return { ok: false, why: '未找到建立项目档案按钮' };
+    btn.click();
+    await new Promise(r => setTimeout(r, 900));
+    const d = document.querySelector('.drawer');
+    if (!d) return { ok: false, why: '抽屉未打开' };
+    const nameField = [...d.querySelectorAll('.field')].find(x => {
+      const l = x.querySelector('.field-label');
+      return l && l.textContent.trim().startsWith('项目名称');
+    });
+    if (!nameField) return { ok: false, why: '未找到项目名称字段' };
+    const i = nameField.querySelector('input');
+    i.value = ${JSON.stringify(newProjectName)};
+    i.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 200));
+    const save = [...d.querySelectorAll('.drawer-foot button')].find(b => b.textContent.includes('保存'));
+    save.click();
+    await new Promise(r => setTimeout(r, 2000));
+    const kv = {};
+    document.querySelectorAll('.kv .k').forEach(k => {
+      const v = k.nextElementSibling;
+      if (v) kv[k.textContent.trim()] = v.textContent.trim().slice(0, 60);
+    });
+    return { ok: true, projectName: kv['项目名称'] || '', toasts: [...document.querySelectorAll('.toast')].map(t => t.textContent.trim()) };
+  })()`);
+  const currentApi = await (await fetch(BASE + `/api/customers/${customerId}/project`)).json();
+  check('归档后可以再建新的当前项目（仍然一客户一项目）',
+    rebuilt.ok && rebuilt.projectName === newProjectName
+      && currentApi.data.project && currentApi.data.project.name === newProjectName
+      && currentApi.data.history.length === 1,
+    rebuilt.ok
+      ? `新当前项目=${rebuilt.projectName}，历史=${currentApi.data.history.length} 条`
+      : `失败：${rebuilt.why}`);
+
+  /* ---------- 9. 待办中心快速添加 ---------- */
+  await goto('#/tasks', 3000);
+  const taskInfo = await cdp.evalJs(`(async () => {
+    const tabs = [...document.querySelectorAll('.tab')].map(t => t.textContent.replace(/\\s+/g, ' ').trim());
+    const inp = document.querySelector('.quick-add input.input');
+    if (!inp) return { ok: false, why: '未找到快速添加输入框', tabs };
+    inp.value = ${JSON.stringify('阶段三交互测试待办' + TS)};
+    inp.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 200));
+    const btn = [...document.querySelectorAll('.quick-add button')].find(b => b.textContent.includes('添加'));
+    if (!btn) return { ok: false, why: '未找到添加按钮', tabs };
+    btn.click();
+    await new Promise(r => setTimeout(r, 1600));
+    /* 新待办没有截止日期，默认「今日」视图看不到，切到「全部待办」再确认 */
+    const allTab = [...document.querySelectorAll('.tabs .tab')].find(t => t.textContent.includes('全部待办'));
+    if (allTab) { allTab.click(); await new Promise(r => setTimeout(r, 900)); }
+    return {
+      ok: true, tabs,
+      hasItem: document.body.innerText.includes(${JSON.stringify('阶段三交互测试待办' + TS)}),
+      toasts: [...document.querySelectorAll('.toast')].map(t => t.textContent.trim())
+    };
+  })()`);
+  check('待办中心渲染多个视图且可快速添加',
+    taskInfo.ok && taskInfo.tabs.length >= 5 && taskInfo.hasItem,
+    taskInfo.ok
+      ? `视图：${taskInfo.tabs.join(' / ')}；新待办已出现=${taskInfo.hasItem}`
+      : `失败：${taskInfo.why}`);
+
+  /* ---------- 10. 无 JS 错误 ---------- */
   check('全程无未捕获的 JS 错误',
     cdp.errors.length === 0,
     cdp.errors.length ? cdp.errors.slice(0, 3).join(' | ') : '0 条错误');
 
   /* ---------- 清理 ---------- */
-  const cleanupProjects = await (await fetch(BASE + '/api/projects?q=' + encodeURIComponent('交互测试' + ts) + '&pageSize=100')).json();
-  const pids = (cleanupProjects.data.list || []).map((p) => p.id);
-  if (pids.length) {
-    await fetch(BASE + '/api/projects/batch-delete', {
+  try {
+    const pl = await (await fetch(BASE + `/api/projects?customer_id=${customerId}&pageSize=200&archived=all`)).json();
+    const pids = ((pl.data && pl.data.list) || []).map((p) => p.id);
+    for (const pid of pids) {
+      const d = await (await fetch(BASE + `/api/projects/${pid}`)).json();
+      const rows = [].concat((d.data && d.data.plans) || [], (d.data && d.data.receipts) || []);
+      for (const row of rows) await fetch(BASE + '/api/payments/' + row.id, { method: 'DELETE' });
+    }
+    const cl = await (await fetch(BASE + `/api/costs?customer_id=${customerId}&pageSize=200`)).json();
+    for (const row of (cl.data && cl.data.list) || []) {
+      await fetch(BASE + '/api/costs/' + row.id, { method: 'DELETE' });
+    }
+    if (pids.length) await fetch(BASE + '/api/projects/batch-delete', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ids: pids })
     });
-  }
-  const cleanupTasks = await (await fetch(BASE + '/api/tasks?view=all&customer_id=' + customerId)).json();
-  const tids = (cleanupTasks.data.list || []).map((t) => t.id);
-  if (tids.length) {
-    await fetch(BASE + '/api/tasks/batch-delete', {
+    const tl = await (await fetch(BASE + '/api/tasks?view=all&customer_id=' + customerId)).json();
+    const tids = ((tl.data && tl.data.list) || []).map((t) => t.id);
+    if (tids.length) await fetch(BASE + '/api/tasks/batch-delete', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ids: tids })
     });
-  }
-  await fetch(BASE + '/api/customers/batch-delete', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ ids: [customerId] })
-  });
-  console.log(`\n（已清理：${pids.length} 个项目、${tids.length} 条待办、1 个客户）`);
+    await fetch(BASE + '/api/customers/batch-delete', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids: [customerId] })
+    });
+    console.log(`\n（已清理：${pids.length} 个项目、${tids.length} 条待办、1 个客户）`);
+  } catch (_) { /* 忽略 */ }
 
   cdp.close();
   try { child.kill(); } catch (_) { /* 忽略 */ }

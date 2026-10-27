@@ -92,8 +92,8 @@ function findBrowser() {
   const cust = await (await fetch(BASE + '/api/customers', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      name: `阶段四交互测试客户${ts}`, short_name: `交互${ts}`, type: '终端用户',
-      industry: '石油', level: 'A 重点客户', status: '跟进中',
+      name: `阶段四交互测试客户${ts}`, short_name: `交互${ts}`,
+      industry: '石油', source: '展会',
       next_follow_at: (() => { const d = new Date(); d.setDate(d.getDate() - 1); return d.toISOString().slice(0, 10) + ' 10:00:00'; })()
     })
   })).json();
@@ -222,9 +222,9 @@ function findBrowser() {
     dt.click();
     await new Promise(r => setTimeout(r, 1200));
 
-    /* 选中「下游行业」分类 */
-    const cat = [...document.querySelectorAll('.dict-cat')].find(c => c.textContent.includes('下游行业'));
-    if (!cat) return { ok: false, why: '未找到下游行业分类' };
+    /* 选中「行业」分类（按钮文本含启用数，如「行业 22」） */
+    const cat = [...document.querySelectorAll('.dict-cat')].find(c => c.textContent.trim().startsWith('行业'));
+    if (!cat) return { ok: false, why: '未找到行业分类' };
     cat.click();
     await new Promise(r => setTimeout(r, 700));
     const beforeCount = document.querySelectorAll('.dict-item').length;
@@ -271,9 +271,9 @@ function findBrowser() {
     if (!d) return { ok: false, why: '抽屉未打开' };
     const f = [...d.querySelectorAll('.field')].find(x => {
       const l = x.querySelector('.field-label');
-      return l && l.textContent.includes('下游行业');
+      return l && l.textContent.trim() === '行业';
     });
-    if (!f) return { ok: false, why: '未找到下游行业字段' };
+    if (!f) return { ok: false, why: '未找到行业字段' };
     const sel = f.querySelector('select');
     const opts = sel ? [...sel.options].map(o => o.value) : [];
     return { ok: true, found: opts.includes(${JSON.stringify('交互测试行业' + ts)}), count: opts.length };
@@ -339,8 +339,8 @@ function findBrowser() {
       const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
       const header = aoa[0] || [];
       const dataRows = aoa.length - 1;
-      const hasRequiredCols = header.includes('客户全称') && header.includes('客户简称')
-        && header.includes('下游行业') && header.includes('供应商编码');
+      const hasRequiredCols = header.includes('客户全称') && header.includes('客户编号')
+        && header.includes('行业') && header.includes('联系人手机');
       const hasOurCustomer = aoa.some((r) => String(r[0] || '').includes(`阶段四交互测试客户${ts}`));
       check('导出的 Excel 可被读回且内容正确（表头 + 数据行）',
         hasRequiredCols && dataRows >= 1 && hasOurCustomer,

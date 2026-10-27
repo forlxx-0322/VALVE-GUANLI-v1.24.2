@@ -286,8 +286,9 @@ const created = [];
   {
     const c = await api('POST', '/api/customers', {
       name: '验收测试-持久化验证客户', short_name: '持久化验证',
-      type: '终端用户', industry: '石油', city: '乌鲁木齐市', district: '天山区',
-      annual_demand: 777, remark: '重启后应完整存在'
+      industry: '石油', city: '乌鲁木齐市', district: '天山区',
+      follow_cycle_days: 77, contact_name: '持久化联系人', contact_phone: '13900009999',
+      remark: '重启后应完整存在'
     });
     created.push(c.data.id);
 
@@ -318,11 +319,12 @@ const created = [];
     check(21.2, '重启后客户数据完整存在（字段值一致）',
       restarted.ok && afterCust.status === 200
         && afterCust.data.name === '验收测试-持久化验证客户'
-        && afterCust.data.annual_demand === 777
+        && afterCust.data.follow_cycle_days === 77
+        && afterCust.data.contact_name === '持久化联系人'
         && afterCust.data.city === '乌鲁木齐市'
         && afterCust.data.remark === '重启后应完整存在',
       afterCust.status === 200
-        ? '名称 / 年需求 / 城市 / 备注 全部一致'
+        ? '名称 / 回访周期 / 主联系人 / 城市 / 备注 全部一致'
         : `HTTP ${afterCust.status}`);
 
     check(21.3, '重启后项目与回款金额一致（派生值未错乱）',
@@ -396,8 +398,9 @@ const created = [];
 
     const c = await api('POST', '/api/customers', {
       name: '验收测试-导出中文校验（阀门）公司', short_name: '导出中文校验',
-      type: '终端用户', industry: '石油', city: '克拉玛依市', annual_demand: 1234.56,
-      phone: '0990-1234567', remark: '中文备注：含标点、括号（测试）与数字 123'
+      industry: '石油', city: '克拉玛依市', follow_cycle_days: 30,
+      contact_name: '导出联系人', contact_phone: '0990-1234567',
+      remark: '中文备注：含标点、括号（测试）与数字 123'
     });
     created.push(c.data.id);
 
@@ -419,16 +422,16 @@ const created = [];
     const aoa2 = XLSX.utils.sheet_to_json(wb2.Sheets[wb2.SheetNames[0]], { header: 1, defval: '' });
     const header = aoa2[0];
     const nameIdx = header.indexOf('客户全称');
-    const demandIdx = header.indexOf('年需求量(万元)');
+    const cycleIdx = header.indexOf('回访周期(天)');
     const remarkIdx = header.indexOf('备注');
     const row = aoa2.find((r) => String(r[nameIdx] || '').includes('导出中文校验'));
 
     check(16.1, '导出的 xlsx 是合法文件且可被读回（表头与数据行完整）',
-      !!row && header.length >= 55,
+      !!row && header.length >= 15,
       row ? `表头 ${header.length} 列，找到目标行，共 ${aoa2.length - 1} 条数据` : '未找到目标行');
 
     check(16.2, '中文表头与中文内容不乱码',
-      header.includes('客户全称') && header.includes('年需求量(万元)')
+      header.includes('客户全称') && header.includes('回访周期(天)')
         && String(row[nameIdx]).includes('验收测试-导出中文校验（阀门）公司'),
       `公司名读回="${String(row[nameIdx]).slice(0, 24)}…"`);
 
@@ -437,12 +440,12 @@ const created = [];
       `备注读回="${String(row[remarkIdx]).slice(0, 30)}"`);
 
     check(16.4, '数值列读回仍是数字类型（可参与 Excel 计算）',
-      typeof row[demandIdx] === 'number' && Math.abs(row[demandIdx] - 1234.56) < 0.01,
-      `年需求量类型=${typeof row[demandIdx]}，值=${row[demandIdx]}`);
+      typeof row[cycleIdx] === 'number' && row[cycleIdx] === 30,
+      `回访周期类型=${typeof row[cycleIdx]}，值=${row[cycleIdx]}`);
 
-    const sum = aoa2.slice(1).reduce((s, r) => s + (typeof r[demandIdx] === 'number' ? r[demandIdx] : 0), 0);
+    const sum = aoa2.slice(1).reduce((s, r) => s + (typeof r[cycleIdx] === 'number' ? r[cycleIdx] : 0), 0);
     check(16.5, '数值列可参与计算（求和结果正确）',
-      sum >= 1234.56,
+      sum >= 30,
       `${aoa2.length - 1} 行数值列求和 = ${Math.round(sum * 100) / 100}`);
   }
 
@@ -605,7 +608,7 @@ const created = [];
     const list = await api('GET', '/api/customers?q=' + encodeURIComponent('验收测试客户') + '&pageSize=200');
     check(17.4, '导入后列表可查到 100 条，字段值正确',
       list.data.total === 100,
-      `查到 ${list.data.total} 条；抽样：${(list.data.list[0] || {}).name}（${(list.data.list[0] || {}).industry}，年需求 ${(list.data.list[0] || {}).annual_demand} 万）`);
+      `查到 ${list.data.total} 条；抽样：${(list.data.list[0] || {}).name}（${(list.data.list[0] || {}).industry}，回访周期 ${(list.data.list[0] || {}).follow_cycle_days} 天）`);
 
     const withRegion = list.data.list.filter((x) => x.region_code);
     check(17.5, '导入的客户按「市/地区」自动归属地州',
@@ -614,12 +617,12 @@ const created = [];
 
     /* 错误行：用「库里不存在的两行」做有效对照 + 缺必填 + 文件内重复。
        注意不要复用本批次已导入的行——那样会被判为"库内重复"而非"文件内重复"。 */
-    const validA = { name: '验收测试-校验对照A（未入库）', short_name: '校验对照A', type: '终端用户', industry: '石油', city: '乌鲁木齐市' };
-    const validB = { name: '验收测试-校验对照B（未入库）', short_name: '校验对照B', type: '终端用户', industry: '化工' };
+    const validA = { name: '验收测试-校验对照A（未入库）', short_name: '校验对照A', industry: '石油', city: '乌鲁木齐市' };
+    const validB = { name: '验收测试-校验对照B（未入库）', short_name: '校验对照B', industry: '化工' };
     const badRows = [
       validA, validB,
-      { name: '', short_name: '缺名称', type: '终端用户', industry: '石油' },
-      { name: validA.name, short_name: '重复行', type: '其他', industry: '其他' }
+      { name: '', short_name: '缺名称', industry: '石油' },
+      { name: validA.name, short_name: '重复行', industry: '其他' }
     ];
     const badPreview = await api('POST', '/api/data/preview', { entity: 'customer', rows: badRows });
     check(17.6, '错误行被正确识别并给出原因（必填缺失 / 文件内重复）',
@@ -629,7 +632,7 @@ const created = [];
       `${badPreview.data.valid} 有效 / ${badPreview.data.invalid} 无效；`
       + `第3行：${badPreview.data.rows[2].errors[0]}；第4行：${badPreview.data.rows[3].errors[0]}`);
 
-    const dupRows = [{ name: rows[0].name, short_name: '库内重复', type: '终端用户', industry: '石油' }];
+    const dupRows = [{ name: rows[0].name, short_name: '库内重复', industry: '石油' }];
     const dupPreview = await api('POST', '/api/data/preview', { entity: 'customer', rows: dupRows });
     check('17b', '与库中已有客户重名会被识别为库内重复',
       dupPreview.data.rows[0].duplicateInDb === true
@@ -650,7 +653,7 @@ const created = [];
       return obj;
     });
     const csvPreview = await api('POST', '/api/data/preview', { entity: 'customer', rows: csvRows });
-    const okRow = csvPreview.data.rows.find((r) => (r.data.short_name || '') === '特殊A');
+    const okRow = csvPreview.data.rows.find((r) => (r.data.contact_name || '') === '特殊A');
     const badRow = csvPreview.data.rows.find((r) => r.errors.some((e) => e.includes('必填')));
 
     check(17.7, '含标签/引号/换行/表情/超长文本的行能正确解析',
@@ -689,15 +692,16 @@ const created = [];
         for (const f of tpl.data.fields) r[f.key] = '';
         r.name = `验收测试客户${String(n).padStart(4, '0')}有限公司`;
         r.short_name = `验收客户${n}`;
-        r.type = i % 2 ? '终端用户' : '贸易商/经销商';
         r.industry = industries[i % industries.length];
-        r.level = i % 3 === 0 ? 'A 重点客户' : 'B 普通客户';
-        r.status = '跟进中';
-        r.annual_demand = String(100 + (i % 900));
+        r.source = '展会';
+        r.contact_name = `验收联系人${n}`;
+        r.contact_position = '采购经理';
+        r.contact_phone = `139${String(10000000 + i).slice(-8)}`;
+        r.follow_cycle_days = String(10 + (i % 60));
+        r.next_follow_at = '';
         r.province = '新疆维吾尔自治区';
         r.city = c[0];
         r.district = c[1];
-        r.account_period = '月结30天';
         aoa.push(tpl.data.fields.map((f) => r[f.key]));
       }
       const ws = XLSX.utils.aoa_to_sheet(aoa);
@@ -799,7 +803,7 @@ const created = [];
     /* 制造可验证的差异 */
     const tempCust = await api('POST', '/api/customers', {
       name: '验收测试-备份后新增的客户（恢复后应消失）', short_name: '备份后新增',
-      type: '终端用户', industry: '石油'
+      industry: '石油'
     });
     const deletedId = before.ids[0];
     await api('DELETE', `/api/customers/${deletedId}`);

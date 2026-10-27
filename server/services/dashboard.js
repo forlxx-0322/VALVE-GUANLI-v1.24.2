@@ -127,13 +127,11 @@ function dashboard(db) {
 
   /* ---------- 2. 今日与逾期待跟进客户 ---------- */
   data.follow_customers = plainAll(db.prepare(`
-    SELECT c.id, c.name, c.short_name, c.type, c.industry, c.level, c.status,
+    SELECT c.id, c.name, c.short_name, c.customer_no, c.industry,
            c.next_follow_at, c.last_follow_at, c.follow_count,
-           CAST(julianday(date(c.next_follow_at)) - julianday(date('now','localtime')) AS INTEGER) AS days_left,
-           (SELECT ct.name FROM contacts ct WHERE ct.customer_id = c.id AND ct.deleted_at IS NULL
-              ORDER BY ct.is_primary DESC, ct.id ASC LIMIT 1) AS primary_contact,
-           (SELECT ct.mobile FROM contacts ct WHERE ct.customer_id = c.id AND ct.deleted_at IS NULL
-              ORDER BY ct.is_primary DESC, ct.id ASC LIMIT 1) AS primary_mobile
+           c.contact_name, c.contact_position, c.contact_phone,
+           c.contact_name AS primary_contact, c.contact_phone AS primary_mobile,
+           CAST(julianday(date(c.next_follow_at)) - julianday(date('now','localtime')) AS INTEGER) AS days_left
     FROM customers c
     WHERE c.deleted_at IS NULL AND c.next_follow_at IS NOT NULL AND c.next_follow_at <> ''
       AND date(c.next_follow_at) <= date('now','localtime')

@@ -87,7 +87,7 @@ const ADDR = '克拉玛依市独山子区北京路6号炼油厂西门';
     const a = await api('POST', '/api/customers', {
       name: `【地址验证${tag}】接口新增`,
       short_name: `地址${tag}`,
-      type: '终端用户', industry: '石油',
+      industry: '石油',
       city: '克拉玛依市', district: '独山子区',
       address: ADDR
     });
@@ -97,8 +97,8 @@ const ADDR = '克拉玛依市独山子区北京路6号炼油厂西门';
       aRow.data.address === ADDR,
       `提交「${ADDR}」→ 读回「${aRow.data.address || '（空）'}」`);
 
-    /* 局部更新（只改等级）不应清空地址 */
-    await api('PUT', `/api/customers/${a.data.id}`, { level: 'A 重点客户' });
+    /* 局部更新（只改来源）不应清空地址 */
+    await api('PUT', `/api/customers/${a.data.id}`, { source: '展会' });
     const aRow2 = await api('GET', `/api/customers/${a.data.id}`);
     check('接口 · 局部更新其它字段不会清空详细地址',
       aRow2.data.address === ADDR,
@@ -173,10 +173,8 @@ const ADDR = '克拉玛依市独山子区北京路6号炼油厂西门';
       };
 
       const steps = {
-        name: setText('客户全称', '【地址验证${tag}】界面新增'),
-        short: setText('客户简称', '界面${tag}'),
-        type: setSelect('客户主体类型', '终端用户'),
-        industry: setSelect('下游行业', '石油'),
+        name: setText('公司名称', '【地址验证${tag}】界面新增'),
+        industry: setSelect('行业', '石油'),
         city: setText('市 / 地区', '克拉玛依市'),
         district: setText('区 / 县', '独山子区'),
         address: setText('详细地址', ${JSON.stringify(ADDR)})
@@ -259,7 +257,7 @@ const ADDR = '克拉玛依市独山子区北京路6号炼油厂西门';
       await new Promise(r => setTimeout(r, 3400));
       const inp = document.querySelector('.search-box input');
       if (!inp) return { err: '未找到搜索框' };
-      inp.value = '地址验证${tag}';
+      inp.value = '【地址验证${tag}】界面新增';
       inp.dispatchEvent(new Event('input', { bubbles: true }));
       await new Promise(r => setTimeout(r, 300));
       const sbtn = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === '搜索');

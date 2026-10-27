@@ -26,7 +26,6 @@
         const key = this.activeKey;
         const p = CRM.router.state.route.params || {};
         if (key === 'customers' && p.id) return CRM.pages.CustomerDetail;
-        if (key === 'projects' && p.id) return CRM.pages.ProjectDetail;
         return (CRM.pages && CRM.pages[key]) || CRM.pages.home;
       },
       /* 页面 key：列表与详情之间切换时强制重建组件 */

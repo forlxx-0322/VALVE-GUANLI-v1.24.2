@@ -1,12 +1,12 @@
 /**
- * 数据库结构迁移验证
+ * 数据库结构迁移验证（v1 旧库 → 最新版本）
  *
- * 场景：模拟一个 v1 结构的旧数据库（含 reg_capital 列与数据），
- *       验证升级到 v2 时：
- *         1. 自动备份旧库
- *         2. 正确删除 reg_capital 列
- *         3. 其余字段与业务数据完整保留
- *         4. 版本号更新为 2
+ * 场景：模拟一个 v1 结构的旧数据库（68 列客户表 + reg_capital 列 + 数据），
+ *       验证逐级升级到 v10 时：
+ *         1. 自动备份旧库（备份里仍是旧结构，可回滚）
+ *         2. v2 删除 reg_capital、v3 加归属地州、v9 建 costs、v10 客户精简
+ *         3. 客户业务数据一条不少、内容不变，客户编号自动回填
+ *         4. projects.archived + 一客户一项目唯一索引 + 5 个固定标签
  *         5. 重复执行不会重复迁移（幂等）
  *
  * 用法：node tools/test-migration.js
@@ -18,7 +18,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const { DatabaseSync } = require('node:sqlite');
-const { initDatabase, closeDatabase, SCHEMA_VERSION } = require('../server/db');
+const { initDatabase, closeDatabase, SCHEMA_VERSION, FIXED_TAG_NAMES } = require('../server/db');
+const { seedLegacyCustomers, markVersion } = require('./legacy-schema');
 
 const results = [];
 function check(name, pass, detail) {
@@ -26,64 +27,39 @@ function check(name, pass, detail) {
   console.log(`[${pass ? '✓ 通过' : '✗ 失败'}] ${name}${detail ? '  —— ' + detail : ''}`);
 }
 
-/**
- * 从当前的 customers 建表语句反推出 v1 结构：
- * 在`scale`列之后插回 `reg_capital` 列。
- * 这样旧库除该字段外与真实 v1 完全一致，避免手工列字段漏项。
- */
-function buildLegacyCustomersDDL() {
-  const src = fs.readFileSync(path.join(__dirname, '..', 'server', 'db.js'), 'utf8');
-  const m = src.match(/CREATE TABLE IF NOT EXISTS customers \(([\s\S]*?)\n  \)`/);
-  if (!m) throw new Error('未能从 db.js 中解析出 customers 建表语句');
-
-  const lines = m[1].split('\n');
-  const out = [];
-  for (const line of lines) {
-    out.push(line);
-    if (/^\s*scale\s+TEXT/.test(line)) {
-      out.push('    reg_capital       REAL NOT NULL DEFAULT 0,');
-    }
-  }
-  return `CREATE TABLE IF NOT EXISTS customers (${out.join('\n')}\n  )`;
-}
-
-/* 造一个「旧库」：v1 结构 —— 客户表带 reg_capital，版本号记为 1 */
+/** 造一个 v1 结构的旧库：客户表带 reg_capital，版本号记为 1 */
 function makeLegacyDb(file) {
   const db = new DatabaseSync(file);
-  db.exec(buildLegacyCustomersDDL());
-  db.exec(`CREATE TABLE schema_version (
-    version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL, note TEXT NOT NULL DEFAULT ''
-  )`);
-  db.prepare('INSERT INTO schema_version (version, applied_at, note) VALUES (1, ?, ?)')
-    .run('2026-01-01T00:00:00', '初始建库');
-
-  const ins = db.prepare(
-    `INSERT INTO customers (name, short_name, type, industry, scale, reg_capital, annual_demand, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  );
-  const ts = '2026-01-15T09:00:00';
-  ins.run('中国石油独山子石化分公司', '独山子石化', '终端用户', '石油', '大型', 500000, 800, ts, ts);
-  ins.run('新疆天成阀门销售有限公司', '天成阀门', '贸易商/经销商', '化工', '中型', 1000, 120, ts, ts);
-  ins.run('宝钢集团新疆八一钢铁有限公司', '八一钢铁', '终端用户', '冶金', '大型', 2000000, 1500, ts, ts);
+  seedLegacyCustomers(db, [
+    { name: '中国石油独山子石化分公司', short_name: '独山子石化', industry: '石油', scale: '大型', reg_capital: 500000, annual_demand: 800, city: '克拉玛依市', district: '独山子区' },
+    { name: '新疆天成阀门销售有限公司', short_name: '天成阀门', type: '贸易商/经销商', industry: '化工', scale: '中型', reg_capital: 1000, annual_demand: 120 },
+    { name: '宝钢集团新疆八一钢铁有限公司', short_name: '八一钢铁', industry: '冶金', scale: '大型', reg_capital: 2000000, annual_demand: 1500 }
+  ]);
+  markVersion(db, 1);
   db.close();
 }
 
+/* v10 删掉的 47 个旧列（抽查其中典型的；完整清单在 server/db.js） */
+const DROPPED_SAMPLE = ['type', 'level', 'status', 'owner', 'phone', 'fax', 'website',
+  'wechat', 'credit_code', 'zip_code', 'enterprise_nature', 'scale', 'founded_at',
+  'valve_types', 'annual_demand', 'account_period', 'supplier_code', 'deal_amount',
+  'customer_since', 'last_order_at'];
+const NEW_COLUMNS = ['customer_no', 'contact_name', 'contact_position', 'contact_phone',
+  'contact_birthday', 'follow_cycle_days'];
+
 (async () => {
-  console.log('=== 数据库结构迁移验证（v1 → v2）===\n');
+  console.log('=== 数据库结构迁移验证（v1 → v' + SCHEMA_VERSION + '）===\n');
 
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'crmmig-'));
   const dataDir = path.join(tmp, 'data');
   const backupDir = path.join(dataDir, 'backups');
   const dbFile = path.join(dataDir, 'crm.db');
 
-  /* 必须先建好 data 目录再放旧库文件：
-     initDatabase 以「文件是否已存在」判定新库/旧库，
-     真实运行流程是 server.js 先 prepareDirs() 再建库，这里保持一致。 */
   fs.mkdirSync(backupDir, { recursive: true });
   makeLegacyDb(dbFile);
 
   /* 迁移前状态 */
-  const before = new DatabaseSync(dbFile);
+  const before = new DatabaseSync(dbFile, { readOnly: true });
   const beforeCols = before.prepare('PRAGMA table_info(customers)').all().map((c) => c.name);
   const beforeRows = before.prepare('SELECT COUNT(*) AS n FROM customers').get().n;
   const beforeVer = before.prepare('SELECT MAX(version) AS v FROM schema_version').get().v;
@@ -98,7 +74,7 @@ function makeLegacyDb(file) {
 
   check('迁移被正确识别并逐级执行',
     info.migrated === true && info.fromVersion === 1 && info.schemaVersion === SCHEMA_VERSION,
-    `v${info.fromVersion} → v${info.schemaVersion}（代码当前 v${SCHEMA_VERSION}），执行 ${info.migrations.length} 步：${info.migrations.join('；')}`);
+    `v${info.fromVersion} → v${info.schemaVersion}，执行 ${info.migrations.length} 步（v1→v10 共 9 步）`);
 
   check('迁移前自动备份了旧库',
     !!info.backedUpTo && fs.existsSync(info.backedUpTo),
@@ -123,27 +99,57 @@ function makeLegacyDb(file) {
   const afterCols = db.prepare('PRAGMA table_info(customers)').all().map((c) => c.name);
   const afterCount = db.prepare('SELECT COUNT(*) AS n FROM customers').get().n;
   const afterVer = db.prepare('SELECT MAX(version) AS v FROM schema_version').get().v;
-  const first = db.prepare('SELECT name, short_name, industry, scale, annual_demand FROM customers WHERE id = 1').get();
+  const first = db.prepare('SELECT name, short_name, industry, customer_no FROM customers WHERE id = 1').get();
   const names = db.prepare('SELECT name FROM customers ORDER BY id').all().map((r) => r.name);
+  const nos = db.prepare('SELECT customer_no FROM customers ORDER BY id').all().map((r) => r.customer_no);
 
-  check('reg_capital 列已被删除',
+  check('v2 的 reg_capital 列已被删除',
     !afterCols.includes('reg_capital'),
     `客户表共 ${afterCols.length} 列，已无 reg_capital`);
+
+  check('v10 删掉的 47 个旧列已不存在（抽查 20 个）',
+    DROPPED_SAMPLE.every((c) => !afterCols.includes(c)) && afterCols.length === 27,
+    `仍存在：${DROPPED_SAMPLE.filter((c) => afterCols.includes(c)).join('、') || '无'}；列数 ${afterCols.length}`);
+
+  check('v10 新增的 6 列已存在（行业列保留）',
+    NEW_COLUMNS.every((c) => afterCols.includes(c)) && afterCols.includes('industry'),
+    `新列 ${NEW_COLUMNS.filter((c) => afterCols.includes(c)).length}/6，industry=${afterCols.includes('industry')}`);
 
   check('业务数据完整保留（3 条客户未丢失）',
     afterCount === 3 && names.length === 3,
     `${afterCount} 条：${names.map((n) => n.slice(0, 8)).join(' / ')}`);
 
-  check('其余字段值未被破坏',
-    first && first.short_name === '独山子石化' && first.industry === '石油'
-      && first.scale === '大型' && first.annual_demand === 800,
-    `简称=${first && first.short_name}，行业=${first && first.industry}，规模=${first && first.scale}，年需求=${first && first.annual_demand}`);
+  check('其余字段值未被破坏（简称 / 行业保留）',
+    first && first.short_name === '独山子石化' && first.industry === '石油',
+    `简称=${first && first.short_name}，行业=${first && first.industry}`);
+
+  check('老客户自动回填客户编号（KH-年份-序号，且不重复）',
+    nos.every((n) => /^KH-\d{4}-\d{4}$/.test(String(n || '')))
+      && new Set(nos).size === nos.length,
+    nos.join('、'));
+
+  check('v10 项目表已加 archived 列并建一客户一项目唯一索引',
+    (() => {
+      const projCols = db.prepare('PRAGMA table_info(projects)').all().map((c) => c.name);
+      const uq = db.prepare(
+        "SELECT sql FROM sqlite_master WHERE type='index' AND name='uq_projects_customer_current'"
+      ).get();
+      return projCols.includes('archived') && !!uq && /archived\s*=\s*0/.test(String(uq.sql || ''));
+    })(),
+    'archived 列 + uq_projects_customer_current 均存在');
+
+  check('v10 已种入 5 个固定标签（重点客户 / 老客户 / 待回访 / 已成交 / 暂停合作）',
+    (() => {
+      const rows = db.prepare('SELECT name FROM tags').all().map((r) => r.name);
+      return FIXED_TAG_NAMES.every((n) => rows.includes(n)) && rows.length === 5;
+    })(),
+    FIXED_TAG_NAMES.join('、'));
 
   check('版本号已更新为代码当前版本',
     afterVer === SCHEMA_VERSION,
     `schema_version = ${afterVer}（代码当前 v${SCHEMA_VERSION}）`);
 
-  /* 新库应直接是 v2 结构（不经过迁移） */
+  /* 新库应直接是最新结构（不经过迁移） */
   const freshDir = path.join(tmp, 'fresh');
   const fresh = initDatabase({
     dataDir: freshDir,
@@ -152,9 +158,9 @@ function makeLegacyDb(file) {
   });
   const freshCols = fresh.db.prepare('PRAGMA table_info(customers)').all().map((c) => c.name);
   check('全新数据库直接建为最新结构（不会留下已删除字段）',
-    !freshCols.includes('reg_capital') && fresh.created === true
+    !freshCols.includes('reg_capital') && !freshCols.includes('type') && fresh.created === true
       && fresh.schemaVersion === SCHEMA_VERSION && fresh.backedUpTo === null,
-    `全新建库=${fresh.created}，版本 v${fresh.schemaVersion}，含 reg_capital=${freshCols.includes('reg_capital')}，无谓备份=${fresh.backedUpTo === null}`);
+    `全新建库=${fresh.created}，版本 v${fresh.schemaVersion}，列数 ${freshCols.length}，无谓备份=${fresh.backedUpTo === null}`);
   closeDatabase(fresh.db);
 
   /* 幂等性：再次初始化不应重复迁移 */

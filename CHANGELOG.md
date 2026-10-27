@@ -8,6 +8,128 @@
 
 ---
 
+## [1.23] — 2026-10-27
+
+本次归档：**客户系统简洁化（一客户一项目）**。客户表 68 列精简到 27 列，取消独立「项目管理」模块，
+项目变成客户详情里的 1:1 档案，回款 / 成本 / 财务汇总都在客户详情里完成。
+数据库结构 **v9 → v10**（15 张表不变，`costs` 已在 1.22 建好）。
+
+### 一、为什么改
+
+用了两个版本之后，客户表单 8 个区块 60 多个字段里真正会填的不到 20 个，
+「主体类型 / 客户等级 / 客户状态 / 采购模式 / 认证要求 / 供应商编码 / 年需求量…」这些字段
+录入成本高、事后没人看；而真正要的「这个客户现在有什么项目、收了多少、花了多少、赚了多少」
+散在项目模块里，还要来回跳页面。按《精简版改造》已确认的决策：
+
+- **A 一客户一项目**：取消独立项目模块与页面，项目档案并进客户详情
+- **C 利润扣采购成本**：毛利 = 已收 − 采购成本 − 维护成本 − 其他成本
+- **E 旧字段删除**：45+ 个旧字段直接删列，`industry` 保留
+- **B 主联系人内嵌**：客户表存一份主联系人，第二个人起放「附加联系人」
+- **D 客户编号**：`KH-YYYY-0001` 自动生成、可手改、全库唯一
+- **F 5 个固定标签**：重点客户 / 老客户 / 待回访 / 已成交 / 暂停合作
+
+### 二、客户表：68 列 → 27 列（结构 v10）
+
+保留 21 列：`id / name / short_name / industry / province / city / district / address / email /
+source / next_follow_at / last_follow_at / follow_count / remark / region_code / region_name /
+longitude / latitude / created_at / updated_at / deleted_at`（经纬度保留但界面不显示）。
+
+新增 6 列：`customer_no`（默认 `KH-YYYY-####`）、`contact_name / contact_position /
+contact_phone / contact_birthday`（主联系人四件套）、`follow_cycle_days`（回访周期天数）。
+
+删除 47 列（若存在才删）：`type / level / status / owner / phone / fax / website / wechat /
+credit_code / zip_code / enterprise_nature / parent_group / scale / founded_at / employees /
+legal_person / is_listed / purchase_mode / end_user / design_institute / epc_contractor /
+valve_types / drive_mode / body_material / pressure_rating / size_range / design_standard /
+connection_type / cert_required / annual_demand / purchase_cycle / account_period /
+warranty_ratio / warranty_months / payer / tender_platform / qualification / has_ts_license /
+has_explosion_proof / quality_grade / supplier_code / credit_rating / introducer / competitor /
+deal_amount / customer_since / last_order_at`。
+
+- 主联系人同步：保存客户时把 `contact_*` 同步到 `contacts` 表 `is_primary=1` 的那条
+  （没有就新建）；反过来从联系人抽屉改主联系人也会同步回客户表，删主联系人会清空内嵌字段
+- 客户编号：`nextCustomerNo()` 按「当年已有最大编号 + 1」生成（含回收站，避免撞号）；
+  手填编号做全库唯一校验，编辑时留空表示不改
+- 归属地州：原有的 `syncCustomerRegion / resolveRegionInput / fixLegacyRegionCodes` 全部保留
+
+### 三、一客户一项目（projects 改造）
+
+- `projects` 新增 `archived INTEGER NOT NULL DEFAULT 0`；当前项目 = `archived=0 AND deleted_at IS NULL`
+- 建部分唯一索引 `uq_projects_customer_current ON projects(customer_id)
+  WHERE deleted_at IS NULL AND archived = 0` —— 数据库层兜底"一客户一项目"
+- 迁移时同客户有多条当前项目：按 `updated_at DESC, id DESC` 保留最新一条，其余标 `archived=1`
+  （不删数据，历史可查）
+- 新增服务（`server/services/pm.js`）：`ensureProjectForCustomer / getProjectForCustomer /
+  saveProjectForCustomer / historyProjects / archiveProject`；
+  第一次登记回款或成本时，若客户还没有档案，自动建一条空档案
+- 历史项目只读：普通项目接口与客户接口都返回 `400 ARCHIVED_READONLY`
+- `/api/projects` 列表/详情/看板接口**保留**（内部兼容、导出与历史数据仍要用），但前端不再有入口
+
+### 四、界面：5 个模块 → 4 个模块
+
+- **删除**：`web/js/pages/projects.js`、`web/js/pages/project-detail.js`；
+  `router.js` 去掉「项目管理」菜单与图标；`index.html` 不再引入这两个脚本；
+  `app.js` 去掉 `ProjectDetail` 分支（`c-project-edit` 抽屉保留，客户详情要用）
+- **客户列表**：列改为 编号 / 公司名称 / 行业 / 联系人（职务）/ 来源 / 下次回访 / 标签 / 操作；
+  筛选只留 行业 / 来源 / 地州 / 标签；快捷筛选改为 今日待跟进 / 已逾期 / 从未跟进 / 本月新增；
+  批量操作只留打标签 / 删除
+- **客户编辑抽屉**：4 区块 17 项（资料 / 地址 / 主联系人 / 回访与备注），一屏 2 列；
+  只有公司名称必填，客户编号留空自动生成
+- **客户详情 4 个标签页**：
+  - 资料：财务汇总栏（合同额/已收/应收/采购/维护/其他/毛利/毛利率/预计毛利）+ 客户资料 +
+    主联系人 + 回访设置 + 附加联系人折叠区（可增删改）
+  - 回访与跟进：跟进时间轴 + 下次回访 + 定期提醒；记录跟进后按周期自动排下次
+  - 项目与财务：当前项目档案（编辑抽屉 8 个字段）/ 转为历史 / 回款计划与实收 /
+    成本台账 / 历史项目折叠只读
+  - 附件与日志：客户附件 + 操作日志（原「附件」「变更记录」两页合并）
+- **首页**：1.22 新版不变，只确认「待回访」取数正常（`dashboardV2` 走客户表新字段）
+- **设置页**：字典管理只展示仍在用的分类（行业 / 来源 / 项目阶段 / 收款方式 / 跟进 / 联系人 /
+  阀门参数留给 1.24 产品模块）；标签管理对 5 个固定标签禁用删除
+- **提醒**：客户状态字段删除后不再按「已成交」过滤提醒；主联系人优先取 `contacts`，回退到客户内嵌字段
+
+### 五、迁移（v9 → v10，可重入，不清数据）
+
+`MIGRATIONS[9]`（version 10）做六件事，全部幂等：
+
+1. 客户表加 6 列（已存在则跳过）
+2. 删 47 个旧列（先删这些列上的旧索引，`industry` 保留）
+3. 老客户按建档年份回填 `customer_no`（`KH-YYYY-####`）
+4. `projects` 加 `archived`；同客户多余项目转历史（只处理 `archived=0`，可重入）
+5. 建 `uq_projects_customer_current`、`idx_customers_customer_no`、`idx_customers_contact_name`
+6. `tags` 种入 5 个固定标签（同名已存在则跳过）
+
+- 迁移前自动整库备份（`data/backups/before-migrate-v9-*.db`）机制不变
+- **本版迁移不清库**：旧业务数据已在 1.23 开工前按确认手动清空；迁移只改结构，
+  因此同一套迁移对"空库"和"有数据的老库"都安全（老库的多余项目转历史，不删数据）
+- 已在临时库上验证两种情形：空库建库直接 v10；v9 有数据老库升级后客户/联系人/跟进/项目计数不变、
+  老客户编号回填、多余项目归档、固定标签种入
+
+### 六、测试（改了什么、为什么）
+
+- **重写** `test-phase2-api.js`（54 项）、`test-phase2-ui-contract.js`（24 项）、
+  `test-phase2-ui-interaction.js`（23 项）：客户 CRUD / 查重 / 编号 / 主联系人同步 /
+  筛选排序 / 标签 / 回访周期 / 财务汇总 / 1:1 项目约束
+- **重写** `test-phase3-api.js`（49 项）、`test-phase3-ui-interaction.js`（12 项）：
+  项目列表页 / 看板 / 项目详情页的断言改为「客户详情里的项目档案 + 回款 + 成本 + 归档」
+- **新增** `tools/test-customer-123.js`（37 项）：客户编号、主联系人同步、
+  一客户一项目约束、回访周期、财务汇总口径、5 个固定标签、自清理
+- **更新** `test-phase1.js`（表数/27 列/唯一索引/固定标签）、`test-migration.js`（v1 → v10 全链路）、
+  `test-migration-full.js`（v10 断言）、`test-import-*`（新模板 17 列）、
+  `test-region-select / test-customer-address / test-customer-create-crash / test-remind-ui /
+  test-notify-email / test-phase4-* / test-phase5-ui-interaction / test-acceptance-*`
+- **删除**「项目看板 / 项目详情页 / 招投标日历」相关断言（功能已不存在，不是放宽标准），
+  补上客户详情项目档案、财务栏、固定标签、回访周期检查
+- 夹具（`tools/make-fixtures.js` 生成的 100 条导入 xlsx、特殊字符 CSV）同步改为新表头
+
+### 七、验证
+
+- **全量回归：通过 642 / 642，失败 0**（26 个套件，沙箱空库起跑，Chrome + Edge）
+- 迁移两情形（空库 / 有数据老库）分别验证通过，真实 `data/` 未被读写
+- 手工验收：新增客户→自动编号→记录跟进→按周期排下次→建项目档案→登记回款/成本→
+  财务栏计算→转为历史→再建新档案，全流程无 JS 错误
+
+---
+
 ## [1.22] — 2026-10-27
 
 本次归档：**删掉地图，首页改「客户分布环形图 + 收入报表」**，并新增**成本台账**让"利润"能算出来。

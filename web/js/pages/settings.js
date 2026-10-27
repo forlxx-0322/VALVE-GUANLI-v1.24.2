@@ -57,7 +57,7 @@ window.CRM = window.CRM || {};
         <c-log-panel v-else-if="tab === 'logs'" />
 
         <div v-else-if="tab === 'about'">
-          <c-card title="关于本软件" sub="阀门行业客户与项目管理系统 · 单机版" icon="settings">
+          <c-card title="关于本软件" sub="一客户一项目 · 客户 / 回访 / 项目档案 / 财务台账 · 单机版" icon="settings">
             <div class="kv">
               <div class="k">软件版本</div>
               <div class="v">{{ info ? info.version : '—' }}</div>
@@ -89,8 +89,7 @@ window.CRM = window.CRM || {};
             <div class="note mt-4">
               <c-icon name="alert" :size="16" />
               <div style="font-size:var(--fs-sm)">
-                <strong>断网可用。</strong>软件不引用任何在线资源，断网后全部功能正常；
-                地图使用本地矢量数据，不依赖在线地图服务。
+                <strong>断网可用。</strong>软件不引用任何在线资源，断网后全部功能正常。
               </div>
             </div>
 

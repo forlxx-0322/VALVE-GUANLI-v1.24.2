@@ -152,6 +152,33 @@ module.exports = async function crmRoutes(ctx) {
     /* 单条操作 */
     const id = tailId(segments, 2);
     if (id) {
+      const sub = seg(segments, 3);
+
+      /* ---- 客户内嵌资源（1.23：项目档案 / 历史项目 / 财务汇总） ---- */
+      if (sub === 'project') {
+        const act = seg(segments, 4);
+        if (act === 'archive' && method === 'POST') {
+          return ok(pm.archiveProject(db, id));
+        }
+        if (!act && method === 'GET') {
+          return ok({
+            project: pm.getProjectForCustomer(db, id),
+            history: pm.historyProjects(db, id),
+            finance: crm.getCustomerFinance(db, id)
+          });
+        }
+        if (!act && (method === 'PUT' || method === 'PATCH')) {
+          return ok(pm.saveProjectForCustomer(db, id, body || {}));
+        }
+        return fail(404, 'API_NOT_FOUND', '接口不存在：' + pathname);
+      }
+      if (sub === 'history-projects' && method === 'GET') {
+        return ok(pm.historyProjects(db, id));
+      }
+      if (sub === 'finance' && method === 'GET') {
+        return ok(crm.getCustomerFinance(db, id));
+      }
+
       if (method === 'GET') return ok(crm.getCustomer(db, id));
       if (method === 'PUT' || method === 'PATCH') {
         return ok(crm.saveCustomer(db, Object.assign({}, body, { id })));
@@ -159,10 +186,10 @@ module.exports = async function crmRoutes(ctx) {
       if (method === 'DELETE') return ok(crm.deleteCustomers(db, [id]));
 
       /* 子资源 */
-      if (seg(segments, 3) === 'followups' && method === 'POST') {
+      if (sub === 'followups' && method === 'POST') {
         return ok(crm.saveFollowup(db, Object.assign({}, body, { customer_id: id })));
       }
-      if (seg(segments, 3) === 'contacts' && method === 'POST') {
+      if (sub === 'contacts' && method === 'POST') {
         return ok(crm.saveContact(db, Object.assign({}, body, { customer_id: id })));
       }
     }

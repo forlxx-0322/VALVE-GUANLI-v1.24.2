@@ -87,25 +87,28 @@ function sheetToRows(tpl, buf) {
   try {
     /* ---------- 1. 模板内容 ---------- */
     const tplRes = await api('GET', '/api/data/template?entity=customer');
-    check('模板接口可用', tplRes.status === 200 && tplRes.data.fields.length > 50,
+    check('模板接口可用（1.23 精简为 17 列）',
+      tplRes.status === 200 && tplRes.data.fields.length >= 15 && tplRes.data.fields.length <= 20,
       `${tplRes.data.fields.length} 个字段`);
     const tpl = tplRes.data;
 
     const required = tpl.fields.filter((f) => f.required);
-    check('模板标出必填列', required.length >= 4,
+    check('模板只把「客户全称」标为必填',
+      required.length === 1 && required[0].key === 'name',
       `必填：${required.map((f) => f.label).join('、')}`);
 
     const withOptions = tpl.fields.filter((f) => f.options && f.options.length);
-    check('字典列附带可选值（供"可选值参考"页使用）', withOptions.length >= 8,
+    check('字典列附带可选值（供"可选值参考"页使用）', withOptions.length >= 3,
       `${withOptions.length} 个字典列，例如「${withOptions[0].label}」：${withOptions[0].options.slice(0, 4).join('、')}…`);
 
     check('示例值齐全（用于第 2 行示例）',
-      tpl.sample.length === tpl.fields.length && tpl.sample.filter((x) => x !== '').length > 30,
+      tpl.sample.length === tpl.fields.length && tpl.sample.filter((x) => x !== '').length >= 10,
       `${tpl.sample.filter((x) => x !== '').length} 列有示例值`);
 
     /* 生成一份真实 xlsx 并读回，验证列名匹配逻辑 */
     const sampleBuf = buildSheet(tpl, [{
-      name: `【导入验证${tag}】甲`, short_name: `甲${tag}`, type: '终端用户', industry: '石油',
+      name: `【导入验证${tag}】甲`, short_name: `甲${tag}`, industry: '石油',
+      contact_name: '导入联系人', contact_phone: '13900008888',
       city: '乌鲁木齐市', district: '天山区', address: '天山区某路 1 号'
     }]);
     const backRows = sheetToRows(tpl, sampleBuf);
@@ -115,11 +118,11 @@ function sheetToRows(tpl, buf) {
 
     /* ---------- 2. 预校验 ---------- */
     const rows = [
-      { name: `【导入验证${tag}】甲`, short_name: `甲${tag}`, type: '终端用户', industry: '石油', city: '乌鲁木齐市', district: '天山区' },
-      { name: `【导入验证${tag}】乙`, short_name: `乙${tag}`, type: '设计院', industry: '化工', city: '库尔勒市', district: '' },
-      { name: `【导入验证${tag}】丙`, short_name: `丙${tag}`, type: '终端用户', industry: '石油', district: '莎车县' },
-      { name: '', short_name: '', type: '终端用户', industry: '石油' },                     // 缺必填
-      { name: `【导入验证${tag}】甲`, short_name: '重复', type: '终端用户', industry: '石油' } // 文件内重复
+      { name: `【导入验证${tag}】甲`, short_name: `甲${tag}`, industry: '石油', contact_name: '导入联系人', contact_phone: '13900008888', city: '乌鲁木齐市', district: '天山区' },
+      { name: `【导入验证${tag}】乙`, short_name: `乙${tag}`, industry: '化工', city: '库尔勒市', district: '' },
+      { name: `【导入验证${tag}】丙`, short_name: `丙${tag}`, industry: '石油', district: '莎车县' },
+      { name: '', short_name: '', industry: '石油' },                     // 缺必填
+      { name: `【导入验证${tag}】甲`, short_name: '重复', industry: '石油' } // 文件内重复
     ];
     const prev = await api('POST', '/api/data/preview', { entity: 'customer', rows });
     check('预校验：区分"可导入"与"有问题"',
@@ -148,6 +151,20 @@ function sheetToRows(tpl, buf) {
     }
     check('导入的客户已落库', created.length === 3, `落库 ${created.length} 条`);
 
+    /* 主联系人：导入时同步到 contacts（is_primary=1） */
+    const jiaContact = db.prepare(
+      'SELECT contact_name, contact_phone FROM customers WHERE name = ?'
+    ).get(`【导入验证${tag}】甲`);
+    const jiaPrimary = db.prepare(
+      'SELECT name, mobile, is_primary FROM contacts WHERE customer_id = ?'
+    ).all(jiaContact ? db.prepare('SELECT id FROM customers WHERE name = ?').get(`【导入验证${tag}】甲`).id : 0);
+    check('导入客户的主联系人已同步到 contacts（列表「联系人（职务）」不空）',
+      jiaContact && jiaContact.contact_name === '导入联系人'
+        && jiaContact.contact_phone === '13900008888'
+        && jiaPrimary.length === 1 && jiaPrimary[0].is_primary === 1
+        && jiaPrimary[0].mobile === '13900008888',
+      `客户内嵌=${jiaContact && jiaContact.contact_name}/${jiaContact && jiaContact.contact_phone}，contacts ${jiaPrimary.length} 条`);
+
     /* ---------- 4. 归属地州自动补全（导入路径单独处理） ---------- */
     const jia = db.prepare('SELECT * FROM customers WHERE name = ?').get(`【导入验证${tag}】甲`);
     const yi = db.prepare('SELECT * FROM customers WHERE name = ?').get(`【导入验证${tag}】乙`);
@@ -163,7 +180,7 @@ function sheetToRows(tpl, buf) {
     db.prepare('UPDATE customers SET address = ? WHERE id = ?').run('原有地址不可覆盖', jia.id);
     const dupRows = [{
       name: `【导入验证${tag}】甲`, short_name: '改名尝试',
-      type: '终端用户', industry: '石油', address: '表格里的新地址'
+      industry: '石油', address: '表格里的新地址'
     }];
     const prevSkip = await api('POST', '/api/data/preview', { entity: 'customer', rows: dupRows, duplicate_mode: 'skip' });
     if (!prevSkip.data) {
@@ -207,7 +224,7 @@ function sheetToRows(tpl, buf) {
       entity: 'customer',
       rows: [{
         name: `【导入验证${tag}】丁`, short_name: `丁${tag}`,
-        type: '终端用户', industry: newIndustry, city: '喀什地区'
+        industry: newIndustry, city: '喀什地区'
       }]
     });
     const after = db.prepare("SELECT COUNT(*) AS n FROM dict WHERE category='industry' AND value = ?").get(newIndustry).n;
@@ -231,8 +248,8 @@ function sheetToRows(tpl, buf) {
     const withBlank = await api('POST', '/api/data/preview', {
       entity: 'customer',
       rows: [
-        { name: `【导入验证${tag}】空行测试`, short_name: '空行', type: '终端用户', industry: '石油' },
-        { name: '', short_name: '', type: '', industry: '' }
+        { name: `【导入验证${tag}】空行测试`, short_name: '空行', industry: '石油' },
+        { name: '', short_name: '', industry: '' }
       ]
     });
     check('全空行会被跳过而不是报错',
@@ -241,7 +258,7 @@ function sheetToRows(tpl, buf) {
 
     const tooMany = await api('POST', '/api/data/preview', {
       entity: 'customer',
-      rows: Array.from({ length: 5001 }, (_, i) => ({ name: `x${i}`, short_name: 'y', type: '终端用户', industry: '石油' }))
+      rows: Array.from({ length: 5001 }, (_, i) => ({ name: `x${i}`, short_name: 'y', industry: '石油' }))
     });
     check('超过 5000 行被拒绝并提示',
       tooMany.status === 400 && tooMany.code === 'TOO_MANY',

@@ -71,6 +71,11 @@ window.CRM = window.CRM || {};
         }
       },
       async remove(t) {
+        /* 1.23：5 个固定标签由代码常量维护，界面禁止删除（可改名/改颜色） */
+        if (t.fixed) {
+          CRM.toast(`「${t.name}」是固定标签，不能删除`, 'warn');
+          return;
+        }
         const extra = t.customer_count > 0
           ? `<br>当前有 <strong>${t.customer_count}</strong> 家客户使用该标签，删除后会一并解除关联。`
           : '';
@@ -129,7 +134,8 @@ window.CRM = window.CRM || {};
               <span class="sys">{{ t.customer_count }} 家客户</span>
               <span class="acts">
                 <button title="改名" @click="startEdit(t)">改名</button>
-                <button class="danger" title="删除" @click="remove(t)">删除</button>
+                <button class="danger" :title="t.fixed ? '固定标签不能删除' : '删除'"
+                        :disabled="!!t.fixed" @click="remove(t)">删除</button>
               </span>
             </template>
           </div>

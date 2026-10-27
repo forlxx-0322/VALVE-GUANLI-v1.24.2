@@ -119,15 +119,8 @@ class CDP {
         inp.dispatchEvent(new Event('change', { bubbles: true }));
         return true;
       };
-      setText('客户全称', '【下拉验证${tag}】归属地州测试');
-      setText('客户简称', '下拉验证${tag}');
-      const typeField = field('客户主体类型');
-      if (typeField) {
-        const ts = typeField.querySelector('select');
-        const to = [...ts.options].find(o => o.value === '终端用户');
-        if (to) { ts.value = '终端用户'; ts.dispatchEvent(new Event('change', { bubbles: true })); }
-      }
-      const indField = field('下游行业');
+      setText('公司名称', '【下拉验证${tag}】归属地州测试');
+      const indField = field('行业');
       if (indField) {
         const is = indField.querySelector('select');
         const io = [...is.options].find(o => o.value === '石油');

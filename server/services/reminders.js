@@ -84,9 +84,9 @@ function dueFollowups(db, settings, opts) {
   const until = ymd(addDays(now, lead));
 
   const rows = plainAll(db.prepare(`
-    SELECT c.id, c.name, c.short_name, c.level, c.status, c.owner,
+    SELECT c.id, c.name, c.short_name, c.customer_no, c.industry,
            c.next_follow_at, c.last_follow_at, c.follow_count,
-           c.phone, c.city,
+           c.contact_name, c.contact_phone, c.city,
            (SELECT ct.name FROM contacts ct
               WHERE ct.customer_id = c.id AND ct.deleted_at IS NULL
               ORDER BY ct.is_primary DESC, ct.id ASC LIMIT 1) AS primary_contact,
@@ -103,9 +103,6 @@ function dueFollowups(db, settings, opts) {
 
   const items = [];
   for (const r of rows) {
-    /* 终态客户不再催跟进 */
-    if (CLOSED_STATUS.includes(String(r.status || '').trim())) continue;
-
     const daysLeft = diffDays(today, r.next_follow_at);
     if (daysLeft === null) continue;
 
@@ -120,17 +117,16 @@ function dueFollowups(db, settings, opts) {
       name: r.name,
       short_name: r.short_name || r.name,
       level,
-      customer_level: r.level || '',
-      status: r.status || '',
-      owner: r.owner || '',
+      customer_no: r.customer_no || '',
+      industry: r.industry || '',
       next_follow_at: String(r.next_follow_at).slice(0, 16),
       last_follow_at: r.last_follow_at || '',
       follow_count: r.follow_count || 0,
       days_left: daysLeft,
       days_text: daysLeft < 0 ? `逾期 ${Math.abs(daysLeft)} 天`
         : (daysLeft === 0 ? '今天' : `${daysLeft} 天后`),
-      contact: r.primary_contact || '',
-      mobile: r.primary_mobile || r.phone || '',
+      contact: r.primary_contact || r.contact_name || '',
+      mobile: r.primary_mobile || r.contact_phone || '',
       city: r.city || ''
     });
   }

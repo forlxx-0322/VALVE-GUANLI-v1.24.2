@@ -147,7 +147,8 @@ window.CRM = window.CRM || {};
       },
 
       goCustomer(t) { if (t.customer_id) CRM.router.navigate(`/customers/${t.customer_id}`); },
-      goProject(t) { if (t.project_id) CRM.router.navigate(`/projects/${t.project_id}`); },
+      /* 1.23：没有独立项目页了，项目档案挂在客户详情里 */
+      goProject(t) { if (t.customer_id) CRM.router.navigate(`/customers/${t.customer_id}`); },
 
       dueText(t) {
         if (!t.due_at) return '无截止时间';

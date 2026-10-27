@@ -91,9 +91,25 @@ async function get(pathname, init) {
       `当前 ${region.n} 条（server/data/region.json 种子）`);
 
     const custCols = db.prepare('PRAGMA table_info(customers)').all().map((c) => c.name);
-    check(7, '客户表字段完整（8 区块，且已移除注册资金）',
-      custCols.length >= 60 && !custCols.includes('reg_capital'),
-      `${custCols.length} 个字段，含 reg_capital=${custCols.includes('reg_capital')}`);
+    check(7, '客户表已精简为 27 列（1.23：6 个新列，旧 47 列已删，industry 保留）',
+      custCols.length === 27
+        && ['customer_no', 'contact_name', 'contact_position', 'contact_phone',
+          'contact_birthday', 'follow_cycle_days', 'industry'].every((c) => custCols.includes(c))
+        && ['type', 'level', 'status', 'owner', 'phone', 'supplier_code', 'deal_amount']
+          .every((c) => !custCols.includes(c)),
+      `${custCols.length} 个字段，含 customer_no=${custCols.includes('customer_no')}，`
+      + `旧列 type=${custCols.includes('type')} phone=${custCols.includes('phone')}`);
+
+    const projCols = db.prepare('PRAGMA table_info(projects)').all().map((c) => c.name);
+    const uq = db.prepare(
+      "SELECT name FROM sqlite_master WHERE type='index' AND name='uq_projects_customer_current'"
+    ).get();
+    const fixedTags = db.prepare(
+      "SELECT COUNT(*) AS n FROM tags WHERE name IN ('重点客户','老客户','待回访','已成交','暂停合作')"
+    ).get().n;
+    check('7a', '项目表有 archived 列 + 一客户一项目唯一索引 + 5 个固定标签',
+      projCols.includes('archived') && !!uq && fixedTags === 5,
+      `archived=${projCols.includes('archived')} 唯一索引=${!!uq} 固定标签=${fixedTags}/5`);
 
     db.close();
   } catch (e) {
@@ -204,7 +220,8 @@ async function get(pathname, init) {
   try {
     const files = [
       '/js/util.js', '/js/api.js', '/js/router.js', '/js/components.js', '/js/app.js',
-      '/js/pages/home.js', '/js/pages/customers.js', '/js/pages/projects.js',
+      '/js/customer-fields.js', '/js/customer-edit.js', '/js/project-edit.js',
+      '/js/pages/home.js', '/js/pages/customers.js', '/js/pages/customer-detail.js',
       '/js/pages/tasks.js', '/js/pages/settings.js',
       '/vendor/vue.global.prod.js', '/vendor/echarts.min.js', '/vendor/xlsx.full.min.js'
     ];

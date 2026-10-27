@@ -8,7 +8,7 @@
  *   4. 点「稍后」当日不再显示该客户（localStorage 生效）
  *   5. 点客户行可跳转到客户详情
  *   6. 点「记跟进」能打开跟进抽屉
- *   7. 已成交客户不出现在提醒里
+ *   7. 1.23 起提醒不再按客户状态过滤（状态字段已删除），已成交客户也按级别展示
  *   8. 页面无 JS 报错
  *
  * 用法：先启动服务，再 node tools/test-remind-ui.js
@@ -82,18 +82,18 @@ const offset = (n) => { const d = new Date(); d.setDate(d.getDate() + n); return
 
   /* ---------- 造数据：逾期 / 今天 / 临近 / 已成交 ---------- */
   const ins = db.prepare(`INSERT INTO customers
-    (name, short_name, type, industry, level, status, owner, city, next_follow_at, follow_count, created_at, updated_at)
-    VALUES (?, ?, '终端用户', '石油', ?, ?, '我', '乌鲁木齐市', ?, ?, ?, ?)`);
+    (name, short_name, industry, city, next_follow_at, follow_count, created_at, updated_at)
+    VALUES (?, ?, '石油', '乌鲁木齐市', ?, ?, ?, ?)`);
   const ts = new Date().toISOString().slice(0, 19).replace('T', ' ');
-  const mk = (nm, short, level, status, days, followCount) => {
-    const r = ins.run(`【提醒测试${tag}】${nm}`, short, level, status, `${offset(days)} 10:00:00`, followCount, ts, ts);
+  const mk = (nm, short, days, followCount) => {
+    const r = ins.run(`【提醒测试${tag}】${nm}`, short, `${offset(days)} 10:00:00`, followCount, ts, ts);
     created.push(Number(r.lastInsertRowid));
     return Number(r.lastInsertRowid);
   };
-  const overdueId = mk('逾期客户', `逾期${tag}`, 'A 重点客户', '跟进中', -4, 3);
-  const todayId = mk('今天客户', `今天${tag}`, 'B 一般客户', '跟进中', 0, 1);
-  const soonId = mk('临近客户', `临近${tag}`, '', '潜在', 2, 0);
-  const closedId = mk('已成交客户', `已成交${tag}`, '', '已成交', -1, 5);
+  const overdueId = mk('逾期客户', `逾期${tag}`, -4, 3);
+  const todayId = mk('今天客户', `今天${tag}`, 0, 1);
+  const soonId = mk('临近客户', `临近${tag}`, 2, 0);
+  const closedId = mk('已成交客户', `已成交${tag}`, -1, 5);
   const cid = db.prepare('SELECT id FROM customers WHERE short_name = ?').get(`逾期${tag}`).id;
   db.prepare(`INSERT INTO contacts (customer_id, name, mobile, is_primary, created_at, updated_at)
               VALUES (?, '王经理', '13900001111', 1, ?, ?)`).run(cid, ts, ts);
@@ -104,12 +104,13 @@ const offset = (n) => { const d = new Date(); d.setDate(d.getDate() + n); return
   const dueRes = await (await fetch(`${BASE}/api/reminders/due`)).json();
   const mine = dueRes.data.items.filter((i) => i.short_name.includes(tag));
   const levels = mine.map((i) => `${i.short_name}=${i.level}`).join('，');
-  check('接口：三种级别判定正确，已成交被排除',
-    mine.length === 3
+  /* 1.23：客户状态字段已删除，提醒不再按「已成交」过滤，四位都应出现（按级别区分） */
+  check('接口：三种级别判定正确（逾期/今天/临近都返回）',
+    mine.length === 4
     && mine.some((i) => i.customer_id === overdueId && i.level === 'overdue')
     && mine.some((i) => i.customer_id === todayId && i.level === 'today')
     && mine.some((i) => i.customer_id === soonId && i.level === 'soon')
-    && !mine.some((i) => i.customer_id === closedId),
+    && mine.some((i) => i.customer_id === closedId && i.level === 'overdue'),
     levels);
 
   const ov = mine.find((i) => i.customer_id === overdueId);
@@ -191,9 +192,9 @@ const offset = (n) => { const d = new Date(); d.setDate(d.getDate() + n); return
       check('提醒项都带「记跟进」与「稍后」操作',
         panel.items.length > 0 && panel.items.every((i) => i.ops.includes('记跟进') && i.ops.includes('稍后')),
         panel.items[0] ? panel.items[0].ops.join('/') : '-');
-      check('已成交客户不在面板中',
-        !panel.items.some((i) => i.name.includes(`已成交${tag}`)),
-        '已过滤');
+      check('1.23 起不再按客户状态过滤提醒（已成交客户也按逾期级别展示）',
+        panel.items.some((i) => i.name.includes(`已成交${tag}`)),
+        '按级别展示，不按状态过滤');
 
       /* 3. 展开临近项 */
       const expanded = await cdp.js(`(async () => {

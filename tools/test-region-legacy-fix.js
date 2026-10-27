@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 验证启动时对历史脏数据（region_code 存了地州名）的纠正。
  * 用法：node tools/test-region-legacy-fix.js
  */
@@ -20,14 +20,14 @@ const BAD = [
 const ids = [];
 for (const [name] of BAD) {
   const info = db.prepare(
-    `INSERT INTO customers (name, short_name, type, industry, status, region_code, region_name, created_at, updated_at)
-     VALUES (?, '', '终端用户', '石油', '潜在', ?, '', ?, ?)`
+    `INSERT INTO customers (name, short_name, industry, region_code, region_name, created_at, updated_at)
+     VALUES (?, '', '石油', ?, '', ?, ?)`
   ).run(`[脏数据验证] ${name}`, name, ts, ts);
   ids.push(Number(info.lastInsertRowid));
 }
 const okInfo = db.prepare(
-  `INSERT INTO customers (name, short_name, type, industry, status, region_code, region_name, created_at, updated_at)
-   VALUES ('[脏数据验证] 本来就正确', '', '终端用户', '石油', '潜在', '653100', '喀什地区', ?, ?)`
+  `INSERT INTO customers (name, short_name, industry, region_code, region_name, created_at, updated_at)
+   VALUES ('[脏数据验证] 本来就正确', '', '石油', '653100', '喀什地区', ?, ?)`
 ).run(ts, ts);
 ids.push(Number(okInfo.lastInsertRowid));
 

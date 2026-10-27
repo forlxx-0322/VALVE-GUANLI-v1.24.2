@@ -75,8 +75,8 @@ const tag = Date.now().toString().slice(-6);
   const tpl = tplRes.data;
   const header = tpl.fields.map((f) => (f.required ? f.label + ' *' : f.label));
   const rows = [
-    { name: `【界面导入${tag}】一`, short_name: `界一${tag}`, type: '终端用户', industry: '石油', city: '乌鲁木齐市', district: '天山区', address: '天山区某路 1 号' },
-    { name: `【界面导入${tag}】二`, short_name: `界二${tag}`, type: '设计院', industry: '化工', city: '克拉玛依市', district: '独山子区' }
+    { name: `【界面导入${tag}】一`, short_name: `界一${tag}`, industry: '石油', city: '乌鲁木齐市', district: '天山区', address: '天山区某路 1 号' },
+    { name: `【界面导入${tag}】二`, short_name: `界二${tag}`, industry: '化工', city: '克拉玛依市', district: '独山子区' }
   ];
   const aoa = [header].concat(rows.map((r) => tpl.fields.map((f) => (r[f.key] === undefined ? '' : r[f.key]))));
   const ws = XLSX.utils.aoa_to_sheet(aoa);

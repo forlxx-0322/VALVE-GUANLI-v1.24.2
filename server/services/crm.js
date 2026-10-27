@@ -1,16 +1,21 @@
 /**
  * 业务服务层 —— 客户 / 联系人 / 标签 / 跟进记录
  *
+ * 1.23 起客户模型精简（一客户一项目）：
+ *   - 客户表只保留 21 个基础列 + 6 个新增列（无 type/level/status/phone 等旧字段）
+ *   - 主联系人内嵌在 customers.contact_* 四个列里，同时同步到 contacts 表（is_primary=1）
+ *   - 项目档案（1:1）在 services/pm.js；客户详情里的财务汇总在本文件 getCustomerFinance
+ *
  * 设计要点：
  *   1. 字段白名单写入：前端多传的字段一律忽略，避免写坏数据库
  *   2. SQL 全部参数化；排序字段走白名单映射，杜绝注入
- *   3. 派生字段（跟进次数 / 最近跟进 / 累计成交额）由本层统一维护
+ *   3. 派生字段（跟进次数 / 最近跟进）由本层统一维护
  *   4. 所有写操作写 activity_logs，支持详情页「变更记录」
  */
 
 'use strict';
 
-const { plain, plainAll, now } = require('../db');
+const { plain, plainAll, now, FIXED_TAG_NAMES } = require('../db');
 
 /* ------------------------------------------------------------------ */
 /* 字段白名单                                                          */
@@ -18,28 +23,15 @@ const { plain, plainAll, now } = require('../db');
 
 /** 客户表可写字段（不含 id / 派生字段 / 软删除标记 / 时间戳） */
 const CUSTOMER_FIELDS = [
-  // 基础
-  'name', 'short_name', 'type', 'industry', 'source', 'level', 'status', 'owner',
-  // 联系
-  'phone', 'fax', 'website', 'email', 'wechat', 'credit_code',
-  // 地址
-  'province', 'city', 'district', 'address', 'zip_code',
-  // 企业概况
-  'enterprise_nature', 'parent_group', 'scale', 'founded_at',
-  'employees', 'legal_person', 'is_listed',
-  // 行业属性
-  'purchase_mode', 'end_user', 'design_institute', 'epc_contractor', 'valve_types',
-  'drive_mode', 'body_material', 'pressure_rating', 'size_range', 'design_standard',
-  'connection_type', 'cert_required',
-  // 采购与商务
-  'annual_demand', 'purchase_cycle', 'account_period', 'warranty_ratio',
-  'warranty_months', 'payer', 'tender_platform',
-  // 资质合规
-  'qualification', 'has_ts_license', 'has_explosion_proof', 'quality_grade',
-  'supplier_code', 'credit_rating',
-  // 业务关系与地图
-  'introducer', 'competitor', 'longitude', 'latitude', 'region_code',
-  'customer_since', 'next_follow_at', 'remark'
+  // 资料
+  'name', 'short_name', 'customer_no', 'industry', 'source', 'email',
+  // 主联系人（内嵌）
+  'contact_name', 'contact_position', 'contact_phone', 'contact_birthday',
+  // 回访
+  'next_follow_at', 'follow_cycle_days',
+  // 地址与备注
+  'province', 'city', 'district', 'address', 'region_code',
+  'longitude', 'latitude', 'remark'
 ];
 
 const CONTACT_FIELDS = [
@@ -54,33 +46,23 @@ const FOLLOWUP_FIELDS = [
 
 const TAG_FIELDS = ['name', 'color', 'sort'];
 
-/** 数值字段：非法值归一为 0；经纬度可为空（NULL 表示未定位） */
-const NUMERIC_FIELDS = new Set([
-  'annual_demand', 'warranty_ratio', 'warranty_months'
-]);
-/** 可为 NULL 的数值字段（未定位时不参与地图渲染） */
+/** 数值字段：非法值归一为 0 */
+const NUMERIC_FIELDS = new Set([]);
+/** 可为 NULL 的数值字段（未定位时保持 NULL） */
 const NULLABLE_NUMERIC_FIELDS = new Set(['longitude', 'latitude']);
 /** 整型字段 */
-const INT_FIELDS = new Set(['is_listed', 'has_ts_license', 'has_explosion_proof', 'is_decision', 'is_primary', 'project_id']);
+const INT_FIELDS = new Set(['follow_cycle_days', 'is_decision', 'is_primary', 'project_id']);
 /** 允许排序的列（白名单映射，防注入） */
 const SORT_MAP = {
+  customer_no: 'c.customer_no',
   next_follow_at: 'c.next_follow_at',
   created_at: 'c.created_at',
   updated_at: 'c.updated_at',
-  deal_amount: 'c.deal_amount',
-  annual_demand: 'c.annual_demand',
-  name: 'c.name',
-  level: 'c.level',
-  status: 'c.status'
+  follow_count: 'c.follow_count',
+  name: 'c.name'
 };
 /** 允许筛选的等值字段 */
-const EQ_FILTERS = [
-  'type', 'industry', 'status', 'level', 'source', 'purchase_mode',
-  'enterprise_nature', 'province', 'city', 'district', 'credit_rating',
-  'region_code'
-];
-/** 客户等级排序权重（A 在前） */
-const LEVEL_ORDER = "CASE c.level WHEN 'A 重点客户' THEN 1 WHEN 'B 普通客户' THEN 2 WHEN 'C 潜在客户' THEN 3 ELSE 4 END";
+const EQ_FILTERS = ['industry', 'source', 'province', 'city', 'district', 'region_code'];
 
 /**
  * 中文排序器。
@@ -181,25 +163,19 @@ function listCustomers(db, q) {
   const where = ['c.deleted_at IS NULL'];
   const params = [];
 
-  /* 关键词：客户名 / 简称 / 电话 / 信用代码 / 供应商编码 / 联系人姓名与手机 */
+  /* 关键词：客户名 / 简称 / 客户编号 / 主联系人姓名与手机 / 邮箱 / 附加联系人 */
   if (q.q) {
     const kw = `%${String(q.q).trim()}%`;
-    where.push(`(c.name LIKE ? OR c.short_name LIKE ? OR c.phone LIKE ? OR c.credit_code LIKE ?
-                 OR c.supplier_code LIKE ? OR c.end_user LIKE ? OR c.design_institute LIKE ?
+    where.push(`(c.name LIKE ? OR c.short_name LIKE ? OR c.customer_no LIKE ?
+                 OR c.contact_name LIKE ? OR c.contact_phone LIKE ? OR c.email LIKE ?
                  OR EXISTS (SELECT 1 FROM contacts ct WHERE ct.customer_id = c.id
                             AND ct.deleted_at IS NULL AND (ct.name LIKE ? OR ct.mobile LIKE ?)))`);
-    params.push(kw, kw, kw, kw, kw, kw, kw, kw, kw);
+    params.push(kw, kw, kw, kw, kw, kw, kw, kw);
   }
 
   /* 等值筛选 */
   for (const f of EQ_FILTERS) {
     if (q[f]) { where.push(`c.${f} = ?`); params.push(q[f]); }
-  }
-
-  /* 认证要求：多选值存逗号串，用 LIKE 近似匹配 */
-  if (q.cert_required) {
-    where.push('c.cert_required LIKE ?');
-    params.push(`%${q.cert_required}%`);
   }
 
   /* 标签筛选（命中任一） */
@@ -208,18 +184,12 @@ function listCustomers(db, q) {
     params.push(Number(q.tag_id));
   }
 
-  /* 快捷筛选 */
-  if (q.quick === 'level_a')     where.push(`c.level = 'A 重点客户'`);
-  if (q.quick === 'design')      where.push(`c.type = '设计院'`);
-  if (q.quick === 'has_debt')    where.push(`EXISTS (
-      SELECT 1 FROM projects p WHERE p.customer_id = c.id AND p.deleted_at IS NULL
-        AND p.contract_amount > 0
-        AND p.contract_amount > COALESCE((SELECT SUM(pm.amount) FROM payments pm
-              WHERE pm.project_id = p.id AND pm.type = '实收'), 0))`);
-  if (q.quick === 'stale30')     where.push(`(c.last_follow_at IS NULL OR c.last_follow_at < datetime('now','localtime','-30 days'))`);
-  if (q.quick === 'overdue')     where.push(`(c.next_follow_at IS NOT NULL AND c.next_follow_at < datetime('now','localtime'))`);
-  if (q.quick === 'today')       where.push(`(c.next_follow_at IS NOT NULL AND date(c.next_follow_at) <= date('now','localtime'))`);
-  if (q.quick === 'no_follow')   where.push(`c.follow_count = 0`);
+  /* 快捷筛选（1.23 新口径：没有等级/主体类型这类旧概念了） */
+  if (q.quick === 'today')      where.push(`(c.next_follow_at IS NOT NULL AND date(c.next_follow_at) <= date('now','localtime'))`);
+  if (q.quick === 'overdue')    where.push(`(c.next_follow_at IS NOT NULL AND date(c.next_follow_at) < date('now','localtime'))`);
+  if (q.quick === 'stale30')    where.push(`(c.last_follow_at IS NULL OR date(c.last_follow_at) < date('now','localtime','-30 days'))`);
+  if (q.quick === 'no_follow')  where.push(`c.follow_count = 0`);
+  if (q.quick === 'month_new')  where.push(`date(c.created_at) >= date('now','localtime','start of month')`);
 
   const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
 
@@ -249,11 +219,9 @@ function listCustomers(db, q) {
 
   /* 组装排序子句（非名称排序时使用） */
   let orderSql;
-  if (q.sort === 'level') {
-    orderSql = `${LEVEL_ORDER} ASC, c.id DESC`;
-  } else if (SORT_MAP[q.sort] && q.sort !== 'name') {
+  if (SORT_MAP[q.sort] && q.sort !== 'name') {
     const dir = String(q.order || 'desc').toLowerCase() === 'asc' ? 'ASC' : 'DESC';
-    /* 下次跟进时间：无值的排最后 */
+    /* 下次回访时间：无值的排最后 */
     const nulls = q.sort === 'next_follow_at' ? `(c.next_follow_at IS NULL) ASC,` : '';
     orderSql = `${nulls} ${SORT_MAP[q.sort]} ${dir}, c.id DESC`;
   } else if (q.sort === 'name') {
@@ -272,49 +240,43 @@ function listCustomers(db, q) {
     : '1 = 1';
   const listParams = idPage ? params.concat(idPage) : params.concat([pageSize, offset]);
 
-  /* 列表行的字段集合。
-     注意：列表页的「编辑」是拿列表行当初始值的，因此这里必须包含
-     编辑表单会用到的字段——否则表单里缺失的字段是空值，
-     整体保存时会把库里已有的值覆盖成空（曾导致"详细地址保存后自动清空"）。
-     这里取"表格显示字段 + 编辑表单字段"的并集。 */
-  const rows = db.prepare(`
-    SELECT c.id, c.name, c.short_name, c.type, c.industry, c.source, c.level, c.status,
-           c.phone, c.fax, c.email, c.website, c.wechat, c.credit_code, c.owner,
-           c.province, c.city, c.district, c.address, c.zip_code,
-           c.region_code, c.region_name,
-           c.longitude, c.latitude,
-           c.enterprise_nature, c.parent_group, c.scale, c.employees,
-           c.legal_person, c.founded_at, c.is_listed,
-           c.purchase_mode, c.end_user, c.design_institute, c.epc_contractor,
-           c.valve_types, c.drive_mode, c.body_material, c.pressure_rating,
-           c.size_range, c.design_standard, c.connection_type, c.cert_required,
-           c.annual_demand, c.purchase_cycle, c.account_period,
-           c.warranty_ratio, c.warranty_months, c.payer, c.tender_platform,
-           c.qualification, c.has_ts_license, c.has_explosion_proof, c.quality_grade,
-           c.supplier_code, c.credit_rating, c.introducer, c.competitor,
-           c.customer_since, c.remark,
-           c.next_follow_at, c.last_follow_at, c.follow_count, c.deal_amount,
+  /* 列表行字段：列表列 + 编辑表单字段的并集（编辑用同一份数据，避免覆盖丢字段） */
+  const rows = plainAll(db.prepare(`
+    SELECT c.id, c.name, c.short_name, c.customer_no, c.industry, c.source, c.email,
+           c.contact_name, c.contact_position, c.contact_phone, c.contact_birthday,
+           c.follow_cycle_days, c.province, c.city, c.district, c.address,
+           c.region_code, c.region_name, c.longitude, c.latitude,
+           c.next_follow_at, c.last_follow_at, c.follow_count, c.remark,
            c.updated_at, c.created_at,
-           (SELECT ct.name FROM contacts ct WHERE ct.customer_id = c.id AND ct.deleted_at IS NULL
-              ORDER BY ct.is_primary DESC, ct.id ASC LIMIT 1) AS primary_contact,
-           (SELECT ct.mobile FROM contacts ct WHERE ct.customer_id = c.id AND ct.deleted_at IS NULL
-              ORDER BY ct.is_primary DESC, ct.id ASC LIMIT 1) AS primary_mobile,
-           (SELECT COUNT(*) FROM contacts ct WHERE ct.customer_id = c.id AND ct.deleted_at IS NULL) AS contact_count,
-           (SELECT COUNT(*) FROM projects p WHERE p.customer_id = c.id AND p.deleted_at IS NULL) AS project_count,
-           (SELECT COALESCE(SUM(p.contract_amount),0) FROM projects p
-              WHERE p.customer_id = c.id AND p.deleted_at IS NULL) AS contract_total,
-           (SELECT COALESCE(SUM(pm.amount),0) FROM payments pm
-              JOIN projects p2 ON p2.id = pm.project_id
-              WHERE p2.customer_id = c.id AND pm.type = '实收' AND p2.deleted_at IS NULL) AS received_total
+           (SELECT COUNT(*) FROM contacts ct
+              WHERE ct.customer_id = c.id AND ct.deleted_at IS NULL) AS contact_count,
+           (SELECT COUNT(*) FROM projects p
+              WHERE p.customer_id = c.id AND p.deleted_at IS NULL AND p.archived = 0) AS project_count
     FROM customers c
     ${whereSql}
     ${idPage ? `AND ${pageClause}` : ''}
     ORDER BY ${orderSql}
     ${idPage ? '' : 'LIMIT ? OFFSET ?'}
-  `).all(...listParams);
+  `).all(...listParams));
 
-  let list = plainAll(rows).map((r) => {
-    r.debt_total = Math.round((r.contract_total - r.received_total) * 100) / 100;
+  /* 标签：一次查完再按客户分组，避免 N+1 */
+  const tagMap = new Map();
+  if (rows.length) {
+    const marks = rows.map(() => '?').join(', ');
+    const tagRows = plainAll(db.prepare(`
+      SELECT ct.customer_id, t.id, t.name, t.color
+      FROM customer_tags ct JOIN tags t ON t.id = ct.tag_id
+      WHERE ct.customer_id IN (${marks})
+      ORDER BY t.sort, t.id
+    `).all(...rows.map((r) => r.id)));
+    for (const t of tagRows) {
+      if (!tagMap.has(t.customer_id)) tagMap.set(t.customer_id, []);
+      tagMap.get(t.customer_id).push({ id: t.id, name: t.name, color: t.color });
+    }
+  }
+
+  let list = rows.map((r) => {
+    r.tags = tagMap.get(r.id) || [];
     r.overdue = !!(r.next_follow_at && new Date(String(r.next_follow_at).replace(' ', 'T')).getTime() < Date.now());
     return r;
   });
@@ -332,6 +294,81 @@ function listCustomers(db, q) {
 /* 详情                                                                */
 /* ------------------------------------------------------------------ */
 
+/**
+ * 客户财务汇总（1.23）
+ *
+ * 口径（与界面上的说明一致）：
+ *   合同额   = 当前项目档案上的 contract_amount
+ *   已收     = Σ payments.type='实收'（该客户所有未删除项目）
+ *   应收     = Σ 回款计划 − 已收，负数按 0 显示
+ *   采购成本 = Σ costs 分类=采购成本
+ *   维护成本 = Σ costs 分类=维护成本
+ *   其他成本 = Σ costs 分类=差旅 + 其他
+ *   毛利     = 已收 − 采购成本 − 维护成本 − 其他成本（实际口径，不是合同额）
+ *   毛利率   = 毛利 ÷ 已收（已收为 0 时为 null，界面显示「—」）
+ *   预计毛利 = 合同额 − 采购成本（报价/投标时看这个）
+ */
+function getCustomerFinance(db, customerId) {
+  const cid = Number(customerId);
+  const cust = db.prepare('SELECT id FROM customers WHERE id = ? AND deleted_at IS NULL').get(cid);
+  if (!cust) throw notFound('客户不存在或已删除');
+
+  const project = db.prepare(
+    `SELECT id, name, stage, progress, contract_amount FROM projects
+     WHERE customer_id = ? AND deleted_at IS NULL AND archived = 0
+     ORDER BY id DESC LIMIT 1`
+  ).get(cid);
+
+  const pay = db.prepare(`
+    SELECT
+      COALESCE(SUM(CASE WHEN pm.type = '实收' THEN pm.amount ELSE 0 END), 0) AS received,
+      COALESCE(SUM(CASE WHEN pm.type = '计划' THEN pm.amount ELSE 0 END), 0) AS planned
+    FROM payments pm
+    JOIN projects p ON p.id = pm.project_id AND p.deleted_at IS NULL
+    WHERE p.customer_id = ?
+  `).get(cid);
+
+  const costRows = db.prepare(`
+    SELECT ct.category, COALESCE(SUM(ct.amount), 0) AS amount
+    FROM costs ct
+    WHERE ct.deleted_at IS NULL
+      AND (ct.customer_id = ?
+           OR ct.project_id IN (SELECT id FROM projects WHERE customer_id = ? AND deleted_at IS NULL))
+    GROUP BY ct.category
+  `).all(cid, cid);
+  const costOf = (name) => {
+    const hit = costRows.find((r) => r.category === name);
+    return round2(hit ? hit.amount : 0);
+  };
+
+  const contract = round2(project ? project.contract_amount : 0);
+  const received = round2(pay.received);
+  const planned = round2(pay.planned);
+  const purchase = costOf('采购成本');
+  const maintain = costOf('维护成本');
+  const other = round2(costOf('差旅') + costOf('其他'));
+  const totalCost = round2(purchase + maintain + other);
+  const profit = round2(received - totalCost);
+
+  return {
+    project_id: project ? project.id : null,
+    project_name: project ? project.name : '',
+    contract_amount: contract,
+    planned_amount: planned,
+    received_amount: received,
+    receivable_amount: Math.max(0, round2(planned - received)),
+    purchase_cost: purchase,
+    maintain_cost: maintain,
+    other_cost: other,
+    total_cost: totalCost,
+    profit,
+    margin: received > 0 ? Math.round((profit / received) * 1000) / 10 : null,
+    expected_profit: round2(contract - purchase)
+  };
+}
+
+const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+
 function getCustomer(db, id) {
   const c = db.prepare('SELECT * FROM customers WHERE id = ?').get(Number(id));
   if (!c || c.deleted_at) throw notFound('客户不存在或已删除');
@@ -346,7 +383,7 @@ function getCustomer(db, id) {
     `SELECT t.id, t.name, t.color FROM tags t
      JOIN customer_tags ct ON ct.tag_id = t.id WHERE ct.customer_id = ?
      ORDER BY t.sort, t.id`
-  ).all(customer.id));
+  ).all(customer.id)).map((t) => Object.assign(t, { fixed: FIXED_TAG_NAMES.includes(t.name) }));
 
   customer.followups = plainAll(db.prepare(
     `SELECT f.*, p.name AS project_name FROM followups f
@@ -355,18 +392,29 @@ function getCustomer(db, id) {
      ORDER BY f.followed_at DESC, f.id DESC LIMIT 200`
   ).all(customer.id));
 
-  customer.projects = plainAll(db.prepare(`
-    SELECT p.id, p.name, p.stage, p.progress, p.contract_amount, p.payment_status,
-           p.bid_date, p.bid_result, p.signed_at, p.delivery_date,
-           COALESCE((SELECT SUM(pm.amount) FROM payments pm
-                     WHERE pm.project_id = p.id AND pm.type = '实收'), 0) AS received
-    FROM projects p WHERE p.customer_id = ? AND p.deleted_at IS NULL
-    ORDER BY p.id DESC
-  `).all(customer.id)).map((p) => {
-    p.debt = Math.round((p.contract_amount - p.received) * 100) / 100;
-    p.rate = p.contract_amount > 0 ? Math.round((p.received / p.contract_amount) * 1000) / 10 : 0;
-    return p;
-  });
+  /* 1:1 当前项目档案（可能还没有） */
+  const project = db.prepare(`
+    SELECT p.*, COALESCE((SELECT SUM(pm.amount) FROM payments pm
+                          WHERE pm.project_id = p.id AND pm.type = '实收'), 0) AS received
+    FROM projects p
+    WHERE p.customer_id = ? AND p.deleted_at IS NULL AND p.archived = 0
+    ORDER BY p.id DESC LIMIT 1
+  `).get(customer.id);
+  customer.project = project ? plain(project) : null;
+  if (customer.project) {
+    const contract = Number(customer.project.contract_amount) || 0;
+    customer.project.received = round2(customer.project.received);
+    customer.project.debt = round2(contract - customer.project.received);
+    customer.project.rate = contract > 0
+      ? Math.round((customer.project.received / contract) * 1000) / 10 : 0;
+  }
+
+  /* 历史项目（已归档，只读） */
+  customer.history_projects = plainAll(db.prepare(
+    `SELECT id, name, stage, progress, contract_amount, signed_at, archived, updated_at
+     FROM projects WHERE customer_id = ? AND deleted_at IS NULL AND archived = 1
+     ORDER BY updated_at DESC, id DESC`
+  ).all(customer.id));
 
   customer.tasks = plainAll(db.prepare(
     `SELECT id, title, due_at, priority, status, source FROM tasks
@@ -380,15 +428,22 @@ function getCustomer(db, id) {
      ORDER BY id DESC LIMIT 100`
   ).all(customer.id));
 
-  /* 汇总 */
+  /* 主联系人：客户表内嵌字段为准（contacts 表里有同名副本，is_primary=1） */
+  customer.primary_contact = {
+    name: customer.contact_name || '',
+    position: customer.contact_position || '',
+    phone: customer.contact_phone || '',
+    birthday: customer.contact_birthday || ''
+  };
+
+  customer.finance = getCustomerFinance(db, customer.id);
+
   customer.summary = {
     contact_count: customer.contacts.length,
-    project_count: customer.projects.length,
-    contract_total: customer.projects.reduce((s, p) => s + (p.contract_amount || 0), 0),
-    received_total: customer.projects.reduce((s, p) => s + (p.received || 0), 0),
-    debt_total: customer.projects.reduce((s, p) => s + (p.debt || 0), 0),
+    extra_contact_count: customer.contacts.filter((x) => !x.is_primary).length,
     follow_count: customer.follow_count || 0,
-    task_count: customer.tasks.length
+    task_count: customer.tasks.length,
+    history_project_count: customer.history_projects.length
   };
 
   return customer;
@@ -398,21 +453,44 @@ function getCustomer(db, id) {
 /* 保存客户                                                            */
 /* ------------------------------------------------------------------ */
 
-/** 查重：同名或同电话（排除自身） */
+/** 生成客户编号：KH-YYYY-####（当年已有最大编号 +1，含回收站里的记录，避免复用） */
+function nextCustomerNo(db, year) {
+  const y = String(year || new Date().getFullYear());
+  const prefix = `KH-${y}-`;
+  const rows = db.prepare(
+    'SELECT customer_no FROM customers WHERE customer_no LIKE ?'
+  ).all(prefix + '%');
+  const re = new RegExp(`^KH-${y}-(\\d+)$`);
+  let max = 0;
+  for (const r of rows) {
+    const m = re.exec(String(r.customer_no || ''));
+    if (m) max = Math.max(max, Number(m[1]) || 0);
+  }
+  return `${prefix}${String(max + 1).padStart(4, '0')}`;
+}
+
+/** 客户编号唯一校验（含回收站，避免还原时撞号） */
+function assertCustomerNoUnique(db, customerNo, excludeId) {
+  const hit = db.prepare(
+    `SELECT id, name FROM customers WHERE customer_no = ? ${excludeId ? 'AND id <> ?' : ''} LIMIT 1`
+  ).get(...(excludeId ? [customerNo, excludeId] : [customerNo]));
+  if (hit) throw badRequest(`客户编号「${customerNo}」已被「${hit.name}」占用`, 'DUPLICATE');
+}
+
+/** 查重：同名 / 同联系人手机（排除自身） */
 function findDuplicates(db, name, phone, excludeId) {
   const hits = [];
   const ex = excludeId ? 'AND id <> ?' : '';
+  const cols = 'id, name, short_name, contact_name, contact_phone, customer_no';
   if (name) {
     const rows = db.prepare(
-      `SELECT id, name, short_name, phone, status FROM customers
-       WHERE deleted_at IS NULL AND name = ? ${ex} LIMIT 5`
+      `SELECT ${cols} FROM customers WHERE deleted_at IS NULL AND name = ? ${ex} LIMIT 5`
     ).all(...(excludeId ? [name, excludeId] : [name]));
     for (const r of rows) hits.push(Object.assign(plain(r), { match: 'name' }));
   }
   if (phone) {
     const rows = db.prepare(
-      `SELECT id, name, short_name, phone, status FROM customers
-       WHERE deleted_at IS NULL AND phone = ? AND phone <> '' ${ex} LIMIT 5`
+      `SELECT ${cols} FROM customers WHERE deleted_at IS NULL AND contact_phone = ? AND contact_phone <> '' ${ex} LIMIT 5`
     ).all(...(excludeId ? [phone, excludeId] : [phone]));
     for (const r of rows) {
       if (!hits.some((h) => h.id === r.id)) hits.push(Object.assign(plain(r), { match: 'phone' }));
@@ -422,7 +500,37 @@ function findDuplicates(db, name, phone, excludeId) {
 }
 
 /**
- * 新增或更新客户
+ * 主联系人同步：客户表内嵌 contact_* → contacts 表里 is_primary=1 的那一条。
+ * 没有主联系人且填了姓名时新建一条；客户没填姓名时不动已有联系人。
+ */
+function syncPrimaryContact(db, customerId, ts) {
+  const c = db.prepare(
+    'SELECT contact_name, contact_position, contact_phone, contact_birthday FROM customers WHERE id = ?'
+  ).get(customerId);
+  if (!c) return;
+  const primary = db.prepare(
+    `SELECT id FROM contacts WHERE customer_id = ? AND deleted_at IS NULL AND is_primary = 1
+     ORDER BY id ASC LIMIT 1`
+  ).get(customerId);
+  if (primary) {
+    db.prepare(
+      `UPDATE contacts SET name = ?, position = ?, mobile = ?, birthday = ?, updated_at = ? WHERE id = ?`
+    ).run(c.contact_name || '', c.contact_position || '', c.contact_phone || '',
+      c.contact_birthday || null, ts, primary.id);
+    return;
+  }
+  if (!String(c.contact_name || '').trim()) return;
+  const info = db.prepare(
+    `INSERT INTO contacts (customer_id, name, position, mobile, birthday, is_primary, is_decision, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, 1, 0, ?, ?)`
+  ).run(customerId, c.contact_name, c.contact_position || '', c.contact_phone || '',
+    c.contact_birthday || null, ts, ts);
+  db.prepare('UPDATE contacts SET is_primary = 0 WHERE customer_id = ? AND id <> ?')
+    .run(customerId, Number(info.lastInsertRowid));
+}
+
+/**
+ * 新增或更新客户（1.23 字段模型）
  * @returns {{id:number, created:boolean, duplicates:Array, changed:string[]}}
  */
 function saveCustomer(db, payload) {
@@ -443,7 +551,16 @@ function saveCustomer(db, payload) {
         throw badRequest('客户名称（全称）为必填项', 'NAME_REQUIRED');
       }
 
-      const duplicates = findDuplicates(db, data.name || before.name, data.phone || '', id);
+      /* 编号：允许手改；空值表示「不改」，非空必须唯一 */
+      if (Object.prototype.hasOwnProperty.call(data, 'customer_no')) {
+        if (!String(data.customer_no || '').trim()) {
+          delete data.customer_no;
+        } else {
+          assertCustomerNoUnique(db, data.customer_no, id);
+        }
+      }
+
+      const duplicates = findDuplicates(db, data.name || before.name, data.contact_phone || '', id);
 
       const keys = Object.keys(data);
       if (keys.length) {
@@ -451,6 +568,9 @@ function saveCustomer(db, payload) {
           `UPDATE customers SET ${keys.map((k) => `${k} = ?`).join(', ')}, updated_at = ? WHERE id = ?`
         ).run(...keys.map((k) => data[k]), ts, id);
       }
+
+      /* 主联系人内嵌字段 → contacts 表（is_primary=1） */
+      if (keys.some((k) => k.startsWith('contact_'))) syncPrimaryContact(db, id, ts);
 
       /* 记录变更明细，便于详情页「变更记录」展示 */
       const changed = [];
@@ -463,12 +583,12 @@ function saveCustomer(db, payload) {
       }
       if (changed.length) {
         const FIELD_LABEL = {
-          name: '名称', short_name: '简称', type: '主体类型', industry: '下游行业',
-          source: '来源', level: '等级', status: '状态', owner: '归属',
-          phone: '电话', email: '邮箱', wechat: '微信', address: '地址',
-          purchase_mode: '采购模式', annual_demand: '年需求量', account_period: '账期',
-          cert_required: '认证要求', supplier_code: '供应商编码', next_follow_at: '下次跟进',
-          remark: '备注'
+          name: '名称', short_name: '简称', customer_no: '客户编号',
+          industry: '行业', source: '来源', email: '邮箱',
+          contact_name: '联系人', contact_position: '职务', contact_phone: '手机',
+          contact_birthday: '生日', follow_cycle_days: '回访周期',
+          province: '省', city: '市', district: '区县', address: '详细地址',
+          region_code: '归属地州', next_follow_at: '下次回访', remark: '备注'
         };
         const summary = changed.slice(0, 3)
           .map((c) => `${FIELD_LABEL[c.field] || c.field}：${c.from || '空'} → ${c.to || '空'}`)
@@ -480,11 +600,10 @@ function saveCustomer(db, payload) {
       /* 标签 */
       if (Array.isArray(payload.tag_ids)) applyTags(db, id, payload.tag_ids);
 
-      /* 地址或坐标变化后，重新匹配归属地州 */
+      /* 地址变化后，重新匹配归属地州 */
       if (keys.some((k) => ['city', 'district', 'province', 'region_code'].includes(k))) {
         if (data.region_code) {
-          /* 前端明确指定了归属，按 code 补齐名称。
-             但历史上前端下拉把「地州名」当值传过，会出现 region_code 里存名字的情况，
+          /* 前端明确指定了归属，按 code 补齐名称。历史上前端下拉把「地州名」当值传过，
              这里统一纠正成编码；名字也认不出时才回退到按地址匹配。 */
           const resolved = resolveRegionInput(db, data.region_code);
           if (resolved) {
@@ -507,7 +626,14 @@ function saveCustomer(db, payload) {
     /* ---------- 新增 ---------- */
     const name = (data.name || '').trim();
     if (!name) throw badRequest('客户名称（全称）为必填项', 'NAME_REQUIRED');
-    const duplicates = findDuplicates(db, name, data.phone || '', null);
+    const duplicates = findDuplicates(db, name, data.contact_phone || '', null);
+
+    /* 客户编号：留空自动生成 KH-YYYY-0001；手填则校验唯一 */
+    if (!String(data.customer_no || '').trim()) {
+      data.customer_no = nextCustomerNo(db);
+    } else {
+      assertCustomerNoUnique(db, data.customer_no, null);
+    }
 
     data.created_at = ts;
     data.updated_at = ts;
@@ -518,7 +644,8 @@ function saveCustomer(db, payload) {
 
     const newId = Number(info.lastInsertRowid);
     if (Array.isArray(payload.tag_ids)) applyTags(db, newId, payload.tag_ids);
-    logActivity(db, 'customer', newId, 'create', `新建客户：${name}`, null);
+    syncPrimaryContact(db, newId, ts);
+    logActivity(db, 'customer', newId, 'create', `新建客户：${name}（${data.customer_no}）`, null);
 
     /* 归属地州：优先用指定的 code，否则按地址文本匹配 */
     if (data.region_code) {
@@ -825,7 +952,7 @@ function restoreCustomers(db, ids) {
   }
 }
 
-/** 批量操作：打标签 / 改状态 / 改等级 */
+/** 批量操作：打标签 / 取消标签（1.23 起没有等级/状态/归属等旧概念） */
 function bulkUpdate(db, ids, action) {
   const list = (Array.isArray(ids) ? ids : []).map(Number).filter(Number.isInteger);
   if (!list.length) throw badRequest('未选中任何客户');
@@ -834,21 +961,7 @@ function bulkUpdate(db, ids, action) {
   db.exec('BEGIN');
   try {
     let count = 0;
-    if (action.type === 'status') {
-      if (!action.value) throw badRequest('未指定要设置的状态');
-      const upd = db.prepare('UPDATE customers SET status = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL');
-      const get = db.prepare('SELECT name FROM customers WHERE id = ?');
-      for (const id of list) {
-        upd.run(action.value, ts, id);
-        count++;
-        logActivity(db, 'customer', id, 'update', `批量改状态为「${action.value}」：${(get.get(id) || {}).name || id}`, null);
-      }
-    } else if (action.type === 'level') {
-      if (!action.value) throw badRequest('未指定要设置的等级');
-      const upd = db.prepare('UPDATE customers SET level = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL');
-      for (const id of list) { upd.run(action.value, ts, id); count++; }
-      logActivity(db, 'customer', null, 'bulk', `批量设置等级「${action.value}」共 ${count} 家客户`, null);
-    } else if (action.type === 'tag') {
+    if (action.type === 'tag') {
       if (!action.tag_id) throw badRequest('未指定标签');
       const ins = db.prepare('INSERT OR IGNORE INTO customer_tags (customer_id, tag_id, created_at) VALUES (?, ?, ?)');
       for (const id of list) { ins.run(id, Number(action.tag_id), ts); count++; }
@@ -857,9 +970,6 @@ function bulkUpdate(db, ids, action) {
       if (!action.tag_id) throw badRequest('未指定标签');
       const del = db.prepare('DELETE FROM customer_tags WHERE customer_id = ? AND tag_id = ?');
       for (const id of list) { del.run(id, Number(action.tag_id)); count++; }
-    } else if (action.type === 'owner') {
-      const upd = db.prepare('UPDATE customers SET owner = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL');
-      for (const id of list) { upd.run(String(action.value || ''), ts, id); count++; }
     } else {
       throw badRequest('不支持的批量操作类型：' + action.type);
     }
@@ -886,27 +996,28 @@ function saveContact(db, payload) {
   const ts = now();
   db.exec('BEGIN');
   try {
+    let savedId = id;
     if (id) {
       const keys = Object.keys(data);
       db.prepare(`UPDATE contacts SET ${keys.map((k) => `${k} = ?`).join(', ')}, updated_at = ? WHERE id = ?`)
         .run(...keys.map((k) => data[k]), ts, id);
       if (data.is_primary === 1) clearOtherPrimary(db, customerId, id);
       logActivity(db, 'contact', customerId, 'update', `更新联系人：${data.name}`, null);
-      db.exec('COMMIT');
-      return { id, created: false };
+    } else {
+      data.created_at = ts;
+      data.updated_at = ts;
+      const keys = Object.keys(data);
+      const info = db.prepare(
+        `INSERT INTO contacts (${keys.join(', ')}) VALUES (${keys.map(() => '?').join(', ')})`
+      ).run(...keys.map((k) => data[k]));
+      savedId = Number(info.lastInsertRowid);
+      if (data.is_primary === 1) clearOtherPrimary(db, customerId, savedId);
+      logActivity(db, 'contact', customerId, 'create', `新增联系人：${data.name}${data.position ? '（' + data.position + '）' : ''}`, null);
     }
-
-    data.created_at = ts;
-    data.updated_at = ts;
-    const keys = Object.keys(data);
-    const info = db.prepare(
-      `INSERT INTO contacts (${keys.join(', ')}) VALUES (${keys.map(() => '?').join(', ')})`
-    ).run(...keys.map((k) => data[k]));
-    const newId = Number(info.lastInsertRowid);
-    if (data.is_primary === 1) clearOtherPrimary(db, customerId, newId);
-    logActivity(db, 'contact', customerId, 'create', `新增联系人：${data.name}${data.position ? '（' + data.position + '）' : ''}`, null);
+    /* 主联系人反向同步到客户表的内嵌字段，避免列表里的「联系人（职务）」陈旧 */
+    syncCustomerFromPrimaryContact(db, customerId, savedId, ts);
     db.exec('COMMIT');
-    return { id: newId, created: true };
+    return { id: savedId, created: !id };
   } catch (e) {
     try { db.exec('ROLLBACK'); } catch (_) { /* 忽略 */ }
     throw e;
@@ -918,13 +1029,39 @@ function clearOtherPrimary(db, customerId, keepId) {
   db.prepare('UPDATE contacts SET is_primary = 0 WHERE customer_id = ? AND id <> ?').run(customerId, keepId);
 }
 
+/** contacts 表的主联系人 → 客户表内嵌 contact_* 字段（反向同步） */
+function syncCustomerFromPrimaryContact(db, customerId, contactId, ts) {
+  const ct = db.prepare(
+    'SELECT * FROM contacts WHERE id = ? AND customer_id = ? AND deleted_at IS NULL'
+  ).get(Number(contactId), Number(customerId));
+  if (!ct || !ct.is_primary) return;
+  db.prepare(
+    `UPDATE customers SET contact_name = ?, contact_position = ?, contact_phone = ?,
+            contact_birthday = ?, updated_at = ? WHERE id = ?`
+  ).run(ct.name || '', ct.position || '', ct.mobile || '', ct.birthday || '', ts || now(), customerId);
+}
+
 function deleteContact(db, id) {
   const ts = now();
-  const c = db.prepare('SELECT id, name, customer_id FROM contacts WHERE id = ? AND deleted_at IS NULL').get(Number(id));
+  const c = db.prepare('SELECT id, name, customer_id, is_primary FROM contacts WHERE id = ? AND deleted_at IS NULL').get(Number(id));
   if (!c) throw notFound('联系人不存在');
-  db.prepare('UPDATE contacts SET deleted_at = ?, updated_at = ? WHERE id = ?').run(ts, ts, c.id);
-  logActivity(db, 'contact', c.customer_id, 'delete', `删除联系人：${c.name}`, null);
-  return { count: 1 };
+  db.exec('BEGIN');
+  try {
+    db.prepare('UPDATE contacts SET deleted_at = ?, updated_at = ? WHERE id = ?').run(ts, ts, c.id);
+    /* 删掉的是主联系人：把客户表内嵌字段一并清空，避免详情页还显示已删除的人 */
+    if (c.is_primary) {
+      db.prepare(
+        `UPDATE customers SET contact_name = '', contact_position = '', contact_phone = '',
+                contact_birthday = '', updated_at = ? WHERE id = ?`
+      ).run(ts, c.customer_id);
+    }
+    logActivity(db, 'contact', c.customer_id, 'delete', `删除联系人：${c.name}`, null);
+    db.exec('COMMIT');
+    return { count: 1 };
+  } catch (e) {
+    try { db.exec('ROLLBACK'); } catch (_) { /* 忽略 */ }
+    throw e;
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -968,6 +1105,24 @@ function saveFollowup(db, payload) {
 
     const fid = id || newId;
     syncCustomerFollowStats(db, customerId, ts);
+
+    /* 回访周期（1.23）：没填下次时间时，按客户的「定期提醒天数」自动排下次
+       有填 next_at 的走上面的 syncCustomerFollowStats（以跟进记录为准） */
+    let autoNext = null;
+    if (!data.next_at) {
+      const cust = db.prepare('SELECT follow_cycle_days FROM customers WHERE id = ?').get(customerId);
+      const cycle = Number(cust && cust.follow_cycle_days) || 0;
+      if (cycle > 0) {
+        const base = String(data.followed_at || ts).slice(0, 10);
+        autoNext = addDaysToDate(base, cycle);
+        if (autoNext) {
+          autoNext = `${autoNext} 09:00:00`;
+          db.prepare('UPDATE customers SET next_follow_at = ?, updated_at = ? WHERE id = ?')
+            .run(autoNext, ts, customerId);
+        }
+      }
+    }
+
     logActivity(db, 'customer', customerId, 'followup',
       `记录跟进（${data.method}）：${(data.content || '').slice(0, 40)}${(data.content || '').length > 40 ? '…' : ''}`, null);
 
@@ -990,11 +1145,21 @@ function saveFollowup(db, payload) {
     }
 
     db.exec('COMMIT');
-    return { id: fid, created: !id, taskCreated };
+    return { id: fid, created: !id, taskCreated, next_follow_at: autoNext || data.next_at || null };
   } catch (e) {
     try { db.exec('ROLLBACK'); } catch (_) { /* 忽略 */ }
     throw e;
   }
+}
+
+/** 日期加天数：'YYYY-MM-DD...' → 'YYYY-MM-DD'（本地时区，不用 toISOString 以免跨时区偏一天） */
+function addDaysToDate(dateStr, days) {
+  const m = String(dateStr || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) return '';
+  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  d.setDate(d.getDate() + Number(days || 0));
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
 /** 依据跟进记录重算客户的跟进统计与下次跟进时间 */
@@ -1063,7 +1228,7 @@ function listTags(db) {
               JOIN customers c ON c.id = ct.customer_id AND c.deleted_at IS NULL
             WHERE ct.tag_id = t.id) AS customer_count
     FROM tags t ORDER BY t.sort, t.id
-  `).all());
+  `).all()).map((t) => Object.assign(t, { fixed: FIXED_TAG_NAMES.includes(t.name) }));
 }
 
 function saveTag(db, payload) {
@@ -1206,14 +1371,7 @@ function updateDict(db, id, payload) {
 function renameInBusinessTables(db, category, oldVal, newVal) {
   const MAPPING = {
     industry:            ['customers', 'industry'],
-    customer_type:       ['customers', 'type'],
-    customer_status:     ['customers', 'status'],
-    customer_level:      ['customers', 'level'],
     customer_source:     ['customers', 'source'],
-    purchase_mode:       ['customers', 'purchase_mode'],
-    enterprise_nature:   ['customers', 'enterprise_nature'],
-    credit_rating_src:   ['customers', 'credit_rating'],
-    account_period:      ['customers', 'account_period'],
     project_stage:       ['projects', 'stage'],
     bid_result:          ['projects', 'bid_result'],
     follow_method:       ['followups', 'method'],
@@ -1255,12 +1413,7 @@ function deleteDict(db, id) {
 function countDictUsage(db, category, value) {
   const MAPPING = {
     industry:          ['customers', 'industry'],
-    customer_type:     ['customers', 'type'],
-    customer_status:   ['customers', 'status'],
-    customer_level:    ['customers', 'level'],
     customer_source:   ['customers', 'source'],
-    purchase_mode:     ['customers', 'purchase_mode'],
-    enterprise_nature: ['customers', 'enterprise_nature'],
     project_stage:     ['projects', 'stage'],
     follow_method:     ['followups', 'method'],
     follow_result:     ['followups', 'result']
@@ -1388,7 +1541,9 @@ module.exports = {
   readDict,
   listCustomers,
   getCustomer,
+  getCustomerFinance,
   saveCustomer,
+  nextCustomerNo,
   deleteCustomers,
   restoreCustomers,
   bulkUpdate,
@@ -1397,6 +1552,7 @@ module.exports = {
   saveFollowup,
   deleteFollowup,
   syncCustomerFollowStats,
+  syncPrimaryContact,
   listTags,
   saveTag,
   deleteTag,

@@ -1,6 +1,7 @@
 /**
- * 客户列表页
- * 搜索 / 快捷筛选 / 多维筛选 / 排序 / 分页 / 批量操作 / 新增编辑 / 行内记跟进
+ * 客户列表页（1.23 精简版）
+ * 搜索 / 快捷筛选 / 行业·来源·地州筛选 / 排序 / 分页 / 批量打标签 / 新增编辑 / 行内记跟进
+ * 列：编号 / 公司名称 / 行业 / 联系人（职务）/ 来源 / 下次回访 / 标签 / 操作
  */
 'use strict';
 
@@ -11,15 +12,13 @@ window.CRM = window.CRM || {};
   const { FILTERS, QUICKS, SORTS } = CRM.customerForm;
 
   const columns = [
-    { key: 'name', label: '客户名称', sortable: true, sortKey: 'name', width: '230px' },
-    { key: 'type', label: '主体类型', width: '120px' },
-    { key: 'industry', label: '下游行业', width: '92px' },
-    { key: 'level', label: '等级', width: '104px' },
-    { key: 'status', label: '状态', width: '84px' },
-    { key: 'primary', label: '主联系人', width: '132px' },
-    { key: 'next_follow_at', label: '下次跟进', sortable: true, width: '112px' },
-    { key: 'annual_demand', label: '年需求(万)', sortable: true, align: 'right', width: '100px' },
-    { key: 'project_count', label: '项目', align: 'center', width: '60px' },
+    { key: 'customer_no', label: '编号', sortable: true, sortKey: 'customer_no', width: '128px' },
+    { key: 'name', label: '公司名称', sortable: true, sortKey: 'name', width: '250px' },
+    { key: 'industry', label: '行业', width: '92px' },
+    { key: 'contact', label: '联系人（职务）', width: '140px' },
+    { key: 'source', label: '来源', width: '110px' },
+    { key: 'next_follow_at', label: '下次回访', sortable: true, width: '112px' },
+    { key: 'tags', label: '标签', width: '160px' },
     { key: 'ops', label: '操作', width: '132px', align: 'right' }
   ];
 
@@ -36,7 +35,7 @@ window.CRM = window.CRM || {};
         page: 1,
         pageSize: 20,
         pages: 1,
-        sort: 'next_follow_at',
+        sort: 'customer_no',
         order: 'asc',
         loading: false,
         editingLoading: false,
@@ -55,14 +54,12 @@ window.CRM = window.CRM || {};
         selected: [],
         showAdvanced: false,
         query: {
-          q: '', quick: '', type: '', industry: '', status: '', level: '',
-          purchase_mode: '', enterprise_nature: '', source: '', province: '', tag_id: ''
+          q: '', quick: '', industry: '', source: '', region_code: '', tag_id: ''
         },
         editOpen: false,
         editing: null,
         followOpen: false,
         followCustomer: null,
-        bulkStatus: '',
         bulkTagId: '',
         /* 行政区划（归属地州筛选用） */
         regions: { cities: [] }
@@ -71,8 +68,7 @@ window.CRM = window.CRM || {};
     computed: {
       selectedCount() { return this.selected.length; },
       activeFilterCount() {
-        return ['type', 'industry', 'status', 'level', 'purchase_mode',
-          'enterprise_nature', 'source', 'province', 'tag_id']
+        return ['industry', 'source', 'region_code', 'tag_id']
           .filter((k) => this.query[k]).length;
       },
       /* 导入预览里有问题的行 */
@@ -88,20 +84,6 @@ window.CRM = window.CRM || {};
     },
     methods: {
       fmtDate: CRM.util.fmtDate,
-
-      levelClass(level) {
-        if (!level) return 'muted';
-        if (level.startsWith('A')) return 'danger';
-        if (level.startsWith('B')) return '';
-        return 'muted';
-      },
-
-      statusClass(status) {
-        if (status === '已成交') return 'success';
-        if (status === '已流失' || status === '暂停合作') return 'muted';
-        if (status === '已报价') return 'warning';
-        return '';
-      },
 
       rowClass(row) { return row.overdue ? 'row-overdue clickable' : 'clickable'; },
 
@@ -297,19 +279,7 @@ window.CRM = window.CRM || {};
         }
       },
 
-      async bulkSetStatus() {
-        if (!this.bulkStatus) { CRM.toast('请先选择要设置的状态', 'error'); return; }
-        try {
-          const r = await CRM.api.bulk({ ids: this.selected, type: 'status', value: this.bulkStatus });
-          CRM.toast(`已将 ${r.count} 家客户状态改为「${this.bulkStatus}」`, 'success');
-          this.bulkStatus = '';
-          this.load();
-        } catch (e) {
-          CRM.toast(e.message || '操作失败', 'error');
-        }
-      },
-
-      async bulkAddTag() {
+      async bulkSetTag() {
         if (!this.bulkTagId) { CRM.toast('请先选择标签', 'error'); return; }
         try {
           const r = await CRM.api.bulk({ ids: this.selected, type: 'tag', tag_id: Number(this.bulkTagId) });
@@ -334,7 +304,7 @@ window.CRM = window.CRM || {};
     template: `
       <div>
         <c-page-header title="客户管理"
-          desc="阀门行业定制：下游行业、主体类型、采购模式、认证要求、设计院与最终用户等完整画像。" />
+          desc="一客户一项目：客户资料 + 主联系人 + 回访周期；项目档案、回款与成本在客户详情里维护。" />
 
         <div class="card" style="margin-bottom:16px">
           <div class="card-body" style="padding:14px 16px">
@@ -342,7 +312,7 @@ window.CRM = window.CRM || {};
               <div class="search-box">
                 <c-icon name="search" :size="15" style="color:var(--c-text-3)" />
                 <input class="input" v-model="query.q"
-                       placeholder="搜索客户名 / 简称 / 电话 / 联系人 / 供应商编码 / 设计院"
+                       placeholder="搜索公司名称 / 客户编号 / 联系人 / 手机 / 邮箱"
                        @keydown.enter="reload" />
                 <button v-if="query.q" class="icon-btn" title="清空" @click="query.q = ''; reload()">✕</button>
               </div>
@@ -399,16 +369,11 @@ window.CRM = window.CRM || {};
         <div v-if="selectedCount" class="note" style="margin-bottom:12px;align-items:center;flex-wrap:wrap">
           <span>已选中 <strong>{{ selectedCount }}</strong> 家客户</span>
           <div style="flex:1"></div>
-          <select class="input input-sm" v-model="bulkStatus" style="min-width:130px">
-            <option value="">改状态为…</option>
-            <option v-for="o in api.options('customer_status')" :key="o" :value="o">{{ o }}</option>
-          </select>
-          <button class="btn btn-sm" :disabled="!bulkStatus" @click="bulkSetStatus">应用</button>
           <select class="input input-sm" v-model="bulkTagId" style="min-width:130px">
             <option value="">打标签…</option>
             <option v-for="t in api.cache.tags" :key="t.id" :value="t.id">{{ t.name }}</option>
           </select>
-          <button class="btn btn-sm" :disabled="!bulkTagId" @click="bulkAddTag">应用</button>
+          <button class="btn btn-sm" :disabled="!bulkTagId" @click="bulkSetTag">应用</button>
           <button class="btn btn-sm btn-danger" @click="bulkDelete">删除选中</button>
           <button class="btn btn-sm" @click="selected = []">取消选择</button>
         </div>
@@ -418,35 +383,38 @@ window.CRM = window.CRM || {};
                    selectable v-model:selected="selected"
                    :sort="sort" :order="order" :row-class="rowClass"
                    empty-text="还没有客户数据"
-                   empty-desc="点击右上角「新增客户」开始录入；也可在阶段四用 Excel 批量导入。"
+                   empty-desc="点击右上角「新增客户」开始录入；也可用 Excel 批量导入。"
                    @sort-change="onSort" @row-click="openDetail">
+
+            <template #cell-customer_no="{ row }">
+              <span class="muted" style="font-size:var(--fs-xs)">{{ row.customer_no || '—' }}</span>
+            </template>
 
             <template #cell-name="{ row }">
               <div style="font-weight:500">{{ row.name }}</div>
               <div class="muted" style="font-size:var(--fs-xs)">
-                {{ row.short_name }}<span v-if="row.city"> · {{ row.city }}</span>
+                {{ row.short_name ? row.short_name + ' · ' : '' }}{{ row.region_name || row.city || '未归属' }}
               </div>
             </template>
 
-            <template #cell-type="{ row }">
-              <span class="tag muted">{{ row.type || '—' }}</span>
-            </template>
-
-            <template #cell-level="{ row }">
-              <span v-if="row.level" class="tag" :class="levelClass(row.level)">{{ row.level }}</span>
+            <template #cell-industry="{ row }">
+              <span v-if="row.industry" class="tag muted">{{ row.industry }}</span>
               <span v-else class="muted">—</span>
             </template>
 
-            <template #cell-status="{ row }">
-              <span class="tag" :class="statusClass(row.status)">{{ row.status || '—' }}</span>
-            </template>
-
-            <template #cell-primary="{ row }">
-              <template v-if="row.primary_contact">
-                <div>{{ row.primary_contact }}</div>
-                <div class="muted" style="font-size:var(--fs-xs)">{{ row.primary_mobile || '' }}</div>
+            <template #cell-contact="{ row }">
+              <template v-if="row.contact_name">
+                <div>{{ row.contact_name }}</div>
+                <div class="muted" style="font-size:var(--fs-xs)">
+                  {{ row.contact_position || '职务未填' }}{{ row.contact_phone ? ' · ' + row.contact_phone : '' }}
+                </div>
               </template>
               <span v-else class="muted">未录入</span>
+            </template>
+
+            <template #cell-source="{ row }">
+              <span v-if="row.source" class="tag muted">{{ row.source }}</span>
+              <span v-else class="muted">—</span>
             </template>
 
             <template #cell-next_follow_at="{ row }">
@@ -458,12 +426,14 @@ window.CRM = window.CRM || {};
               <span v-else class="muted">—</span>
             </template>
 
-            <template #cell-annual_demand="{ row }">
-              <span :class="row.annual_demand ? '' : 'muted'">{{ row.annual_demand || '—' }}</span>
-            </template>
-
-            <template #cell-project_count="{ row }">
-              <span :class="row.project_count ? '' : 'muted'">{{ row.project_count }}</span>
+            <template #cell-tags="{ row }">
+              <template v-if="row.tags && row.tags.length">
+                <span v-for="t in row.tags.slice(0, 3)" :key="t.id" class="tag"
+                      :style="t.color ? 'border-color:' + t.color + ';color:' + t.color : ''"
+                      style="margin-right:4px">{{ t.name }}</span>
+                <span v-if="row.tags.length > 3" class="muted" style="font-size:11px">+{{ row.tags.length - 3 }}</span>
+              </template>
+              <span v-else class="muted">—</span>
             </template>
 
             <template #cell-ops="{ row }">

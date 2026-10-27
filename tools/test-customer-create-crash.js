@@ -1,18 +1,19 @@
 /**
- * 复现「录入客户信息时闪退到客户管理页面」。
+ * 客户录入路径回归（1.23 精简表单）
  *
- * 判别标准（任一出现即视为闪退）：
+ * 复现并防止「录入客户信息时闪退到客户管理页面 / 保存后抽屉莫名关闭」：
  *   - 保存后抽屉消失，但**没有新增成功**（列表里查不到该客户）
  *   - 出现 JS 运行时异常
  *   - 抽屉消失后页面停留在客户列表，且无任何成功提示
  *
- * 覆盖多种录入方式：
- *   A. 只填 4 项必填，直接保存
- *   B. 填全部常用字段（含地址、下拉、多选标签）
- *   C. 与库中已有客户**同名**（触发查重）
- *   D. 与库中已有客户**同电话**（触发查重）
- *   E. 填了名称后不填其余必填就保存（应被校验拦住，不该关闭）
- *   F. 先填一半关闭抽屉再打开（半途状态）
+ * 覆盖：
+ *   A. 只填公司名称（1.23 只有它必填）→ 保存
+ *   B. 填常用字段（行业 / 来源 / 主联系人 / 地址 / 归属地州 / 回访周期）
+ *   C. 与库中已有客户**同名**（触发查重面板）
+ *   D. 与库中已有客户**同主联系人手机**（触发查重面板）
+ *   D2. 同手机命中多家 → 逐条渲染成卡片
+ *   E. 不填必填就保存（应被校验拦住，抽屉不关）
+ *   F. 填一半关闭再打开（表单已重置）
  *
  * 用法：先启动服务，再 node tools/test-customer-create-crash.js
  */
@@ -74,7 +75,7 @@ class CDP {
 
 const tag = Date.now().toString().slice(-6);
 
-/* 在浏览器里注入一段通用工具（打开抽屉 / 填字段 / 点保存），供各场景复用 */
+/* 浏览器内通用工具：打开抽屉 / 填字段 / 点保存 / 读状态 */
 const HELPERS = `
 window.__probe = {
   openDrawer: async () => {
@@ -139,7 +140,7 @@ window.__probe = {
 `;
 
 (async () => {
-  console.log('=== 「录入客户闪退」复现测试 ===\n');
+  console.log('=== 客户录入路径回归（1.23 精简表单）===\n');
 
   const db = new DatabaseSync(path.join(ROOT, 'data', 'crm.db'));
 
@@ -147,7 +148,7 @@ window.__probe = {
   const existing = {
     name: `【闪退复现${tag}】已有客户`,
     short_name: `已有${tag}`,
-    phone: `0991${tag}`
+    phone: `0991-${tag}-0`
   };
   const mk = async (body) => {
     const r = await fetch(BASE + '/api/customers', {
@@ -157,8 +158,11 @@ window.__probe = {
     });
     return (await r.json()).data;
   };
-  const base = await mk({ name: existing.name, short_name: existing.short_name, type: '终端用户', industry: '石油', phone: existing.phone });
-  console.log(`已造对照客户 #${base.id}（电话 ${existing.phone}）\n`);
+  const base = await mk({
+    name: existing.name, short_name: existing.short_name, industry: '石油',
+    contact_name: '已有联系人', contact_phone: existing.phone
+  });
+  console.log(`已造对照客户 #${base.id}（主联系人手机 ${existing.phone}）\n`);
 
   const createdIds = [base.id];
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'crash-'));
@@ -185,9 +189,7 @@ window.__probe = {
       await sleep(2200);
       await cdp.js(HELPERS);
 
-      /* 先关掉可能残留的抽屉。
-         查重面板出现时抽屉不会自动关闭，若上一场景停在查重面板上，
-         其遮罩会挡住"新增客户"按钮，导致下一场景点不到、却又"看起来正常"。 */
+      /* 关掉可能残留的抽屉（查重面板出现时抽屉不会自动关闭） */
       await cdp.js(`(() => {
         let guard = 0;
         while (guard++ < 5) {
@@ -196,7 +198,6 @@ window.__probe = {
           const d = ds[ds.length - 1];
           const x = [...d.querySelectorAll('.drawer-head button')].pop();
           if (x) x.click();
-          /* 同步等待一帧，让 Vue 完成移除 */
         }
         return document.querySelectorAll('.drawer').length;
       })()`);
@@ -207,31 +208,14 @@ window.__probe = {
         check(title, false, '无法打开新增抽屉：' + open);
         return null;
       }
-      /* 确认抽屉真的打开了（而不是被残留遮罩挡住按钮） */
       const openedCount = await cdp.js(`document.querySelectorAll('.drawer').length`);
       if (openedCount < 1) {
         check(title, false, '抽屉未真正打开（可能有残留遮罩挡住按钮）');
         return null;
-      }      const fill = await cdp.js(`(async () => {
-        /* 先展开全部折叠区块：公司电话等字段在「联系方式」等折叠区里，
-           不展开的话 DOM 中根本没有该输入框，setText 会静默失败。
-           注意：每次操作前都重新取抽屉元素 —— 展开会触发重渲染，
-           拿旧引用可能操作到已废弃的节点。 */
-        let d = window.__probe.drawer();
-        if (d) {
-          const heads = [...d.querySelectorAll('.form-block-head')];
-          for (const h of heads) {
-            if (!h.classList.contains('open')) {
-              h.click();
-              await new Promise(r => setTimeout(r, 80));
-              d = window.__probe.drawer();       // 重新取
-            }
-          }
-          await new Promise(r => setTimeout(r, 350));
-        }
+      }
+      const fill = await cdp.js(`(async () => {
         ${fillScript}
         await new Promise(r => setTimeout(r, 400));
-        /* 回报各字段实际值，便于定位"哪个字段没填上" */
         const d2 = window.__probe.drawer();
         const val = (label) => {
           if (!d2) return '（无抽屉）';
@@ -241,90 +225,73 @@ window.__probe = {
           const c = f.querySelector('input, select, textarea');
           return c ? c.value : '（无控件）';
         };
-        return 'filled: 电话=' + val('公司电话') + ' 名称=' + val('客户全称') + ' 字段数=' + (d2 ? d2.querySelectorAll('.field').length : 0);
+        return 'filled: 名称=' + val('公司名称') + ' 行业=' + val('行业') + ' 联系人=' + val('姓名') + ' 字段数=' + (d2 ? d2.querySelectorAll('.field').length : 0);
       })()`);
       const saveClick = await cdp.js(`window.__probe.clickFoot('保存')`);
 
-      /* 轮询等待保存完成，而不是死等固定时长。
-         原因：保存成功后抽屉会有一个关闭过程，而浏览器/机器的调度有波动；
-         固定 2.6 秒在个别情况下会在"数据已落库、抽屉还没关"的瞬间做断言，
-         于是出现"落库=true 但抽屉仍开"的假失败（曾全量连跑时偶发）。 */
+      /* 轮询等待保存完成，避免固定等待造成"已落库但抽屉未关"的假失败 */
       let state = null;
       for (let i = 0; i < 24; i++) {
         await sleep(400);
         const st = await cdp.js(`JSON.stringify(window.__probe.state())`);
         state = JSON.parse(st);
-        if (!state.drawerOpen) break;                    // 抽屉已关，保存流程走完
-        if (state.hasDupPanel) break;                    // 停在查重面板，也是稳定状态
+        if (!state.drawerOpen) break;
+        if (state.hasDupPanel) break;
       }
-      /* 再等一拍，让 toast 渲染出来 */
       await sleep(300);
       if (!state.drawerOpen) {
-        const st2 = await cdp.js(`JSON.stringify(window.__probe.state())`);
-        state = JSON.parse(st2);
+        state = JSON.parse(await cdp.js(`JSON.stringify(window.__probe.state())`));
       }
 
       const row = db.prepare('SELECT id, name FROM customers WHERE name = ?').get(name);
       if (row) createdIds.push(row.id);
 
-      return {
-        title, fill, saveClick, state,
-        saved: !!row,
-        errors: cdp.errors.slice(0, 3)
-      };
+      return { title, fill, saveClick, state, saved: !!row, errors: cdp.errors.slice(0, 3) };
     }
 
-    /* ---------- A. 只填必填 ---------- */
+    /* ---------- A. 只填公司名称 ---------- */
     const A = `【闪退复现${tag}】只填必填`;
-    const ra = await scenario('A. 只填 4 项必填 → 保存', A, `
-      window.__probe.setText('客户全称', ${JSON.stringify(A)});
-      window.__probe.setText('客户简称', '必填${tag}');
-      window.__probe.setSelect('客户主体类型', '终端用户');
-      window.__probe.setSelect('下游行业', '石油');
+    const ra = await scenario('A. 只填公司名称 → 保存', A, `
+      window.__probe.setText('公司名称', ${JSON.stringify(A)});
     `);
     if (ra) {
-      check('A. 只填必填：保存成功且抽屉关闭',
+      check('A. 只填公司名称：保存成功且抽屉关闭',
         ra.saved && !ra.state.drawerOpen && ra.errors.length === 0,
         `落库=${ra.saved}，抽屉仍开=${ra.state.drawerOpen}，提示=${ra.state.toasts.join('/')}，JS错误=${ra.errors.join(' | ') || '无'}`);
     }
 
-    /* ---------- B. 填全部常用字段 ---------- */
+    /* ---------- B. 填常用字段 ---------- */
     const B = `【闪退复现${tag}】全字段`;
-    /* 电话必须**每次唯一**：曾用硬编码的 0991-0000000，
-       与另一个套件留下的客户撞号，于是正确触发了查重、抽屉不关，
-       被误判成"保存后抽屉没关"的缺陷。测试数据不能与其它套件撞车。 */
-    const BPhone = `0991-${tag}`;
+    const BPhone = `0991-${tag}-b`;
     const rb = await scenario('B. 填常用字段（含地址与归属地州）→ 保存', B, `
-      window.__probe.setText('客户全称', ${JSON.stringify(B)});
-      window.__probe.setText('客户简称', '全字段${tag}');
-      window.__probe.setSelect('客户主体类型', '终端用户');
-      window.__probe.setSelect('下游行业', '石油');
-      window.__probe.setText('公司电话', ${JSON.stringify(BPhone)});
+      window.__probe.setText('公司名称', ${JSON.stringify(B)});
+      window.__probe.setSelect('行业', '石油');
+      window.__probe.setSelect('客户来源', '展会');
+      window.__probe.setText('姓名', '全字段联系人');
+      window.__probe.setText('手机', ${JSON.stringify(BPhone)});
       window.__probe.setText('省 / 自治区', '新疆维吾尔自治区');
       window.__probe.setText('市 / 地区', '乌鲁木齐市');
       window.__probe.setText('区 / 县', '天山区');
       window.__probe.setText('详细地址', '天山区测试路 1 号');
       window.__probe.setSelect('归属地州', '650100');
-      window.__probe.setText('年需求量预估（万元）', '800');
+      window.__probe.setText('定期提醒天数', '30');
     `);
     if (rb) {
       check('B. 全字段：保存成功且抽屉关闭',
         rb.saved && !rb.state.drawerOpen && rb.errors.length === 0,
-        `填报结果=${rb.fill}；落库=${rb.saved}，抽屉仍开=${rb.state.drawerOpen}，提示=${rb.state.toasts.join('/')}，JS错误=${rb.errors.join(' | ') || '无'}`);
+        `填报=${rb.fill}；落库=${rb.saved}，提示=${rb.state.toasts.join('/')}，JS错误=${rb.errors.join(' | ') || '无'}`);
       if (rb.saved) {
-        const row = db.prepare('SELECT city, district, address, region_code FROM customers WHERE name = ?').get(B);
-        check('B. 全字段：地址与归属正确落库',
-          row && row.address === '天山区测试路 1 号' && row.region_code === '650100',
-          row ? `地址="${row.address}" 归属=${row.region_code}` : '未找到');
+        const row = db.prepare('SELECT city, district, address, region_code, contact_name, follow_cycle_days FROM customers WHERE name = ?').get(B);
+        check('B. 全字段：地址 / 归属 / 主联系人 / 回访周期正确落库',
+          row && row.address === '天山区测试路 1 号' && row.region_code === '650100'
+            && row.contact_name === '全字段联系人' && row.follow_cycle_days === 30,
+          row ? `地址="${row.address}" 归属=${row.region_code} 联系人=${row.contact_name} 周期=${row.follow_cycle_days}` : '未找到');
       }
     }
 
     /* ---------- C. 同名（触发查重） ---------- */
     const rc = await scenario('C. 与已有客户同名 → 保存', existing.name, `
-      window.__probe.setText('客户全称', ${JSON.stringify(existing.name)});
-      window.__probe.setText('客户简称', '同名${tag}');
-      window.__probe.setSelect('客户主体类型', '终端用户');
-      window.__probe.setSelect('下游行业', '石油');
+      window.__probe.setText('公司名称', ${JSON.stringify(existing.name)});
     `);
     if (rc) {
       check('C. 同名：出现查重面板，抽屉不关闭、不闪退',
@@ -332,19 +299,17 @@ window.__probe = {
         `抽屉仍开=${rc.state.drawerOpen}，查重面板=${rc.state.hasDupPanel}，JS错误=${rc.errors.join(' | ') || '无'}`);
     }
 
-    /* ---------- D. 同电话（触发查重） ---------- */
-    const rd = await scenario('D. 与已有客户同电话 → 保存', `【闪退复现${tag}】同电话`, `
-      window.__probe.setText('客户全称', '【闪退复现${tag}】同电话');
-      window.__probe.setText('客户简称', '同电话${tag}');
-      window.__probe.setSelect('客户主体类型', '终端用户');
-      window.__probe.setSelect('下游行业', '石油');
-      window.__probe.setText('公司电话', ${JSON.stringify(existing.phone)});
+    /* ---------- D. 同主联系人手机（触发查重） ---------- */
+    const rd = await scenario('D. 与已有客户同手机 → 保存', `【闪退复现${tag}】同电话`, `
+      window.__probe.setText('公司名称', '【闪退复现${tag}】同电话');
+      window.__probe.setSelect('行业', '石油');
+      window.__probe.setText('姓名', '同电话联系人');
+      window.__probe.setText('手机', ${JSON.stringify(existing.phone)});
     `);
     if (rd) {
-      check('D. 同电话：出现查重面板，抽屉不关闭、不闪退',
+      check('D. 同手机：出现查重面板，抽屉不关闭、不闪退',
         rd.state.drawerOpen && rd.state.hasDupPanel && rd.errors.length === 0,
         `抽屉仍开=${rd.state.drawerOpen}，查重面板=${rd.state.hasDupPanel}，JS错误=${rd.errors.join(' | ') || '无'}`);
-      /* 查重面板上的两个按钮都要能点 */
       const dupActions = await cdp.js(`(async () => {
         const d = window.__probe.drawer();
         if (!d) return { err: '抽屉已关闭' };
@@ -356,67 +321,36 @@ window.__probe = {
         !dupActions.err && dupActions.hasView
         && dupActions.btns.some((t) => t.includes('继续') || t.includes('创建')),
         dupActions.err || '按钮：' + dupActions.btns.join(' / '));
-
-      /* 多条重复时每一条都要渲染成卡片。
-         这一条是为 v-if/v-for 重构加的回归：此前两者写在同一元素上
-         （Vue 3 里 v-if 优先级更高，属不推荐写法），改为 <template v-if> 包 v-for 后，
-         必须确认多条重复仍然逐条渲染、且每条都带自己的匹配原因与按钮。 */
-      const dupCards = await cdp.js(`(async () => {
-        const d = window.__probe.drawer();
-        if (!d) return { err: '抽屉已关闭' };
-        /* 查重卡片用的是 .mini-card */
-        const cards = [...d.querySelectorAll('.mini-card')];
-        return {
-          count: cards.length,
-          items: cards.map(c => ({
-            name: ((c.querySelector('.nm') || {}).textContent || '').replace(/\\s+/g, ' ').trim(),
-            rows: [...c.querySelectorAll('.rows > div')].map(x => x.textContent.trim()),
-            hasBtn: !!([...c.querySelectorAll('button')].find(b => b.textContent.includes('查看这条记录')))
-          }))
-        };
-      })()`);
-      check('D. 多条重复逐条渲染成卡片（v-if/v-for 重构后仍正确）',
-        !dupCards.err && dupCards.count >= 1
-        && dupCards.items.every((c) => c.hasBtn && c.rows.length >= 3),
-        dupCards.err || `卡片 ${dupCards.count} 张：${dupCards.items.map((c) => c.name).join(' / ')}`);
     }
 
-    /* ---------- D2. 多条重复：确认 v-for 真的逐条渲染 ---------- */
+    /* ---------- D2. 同手机命中多家：逐条渲染 ---------- */
     {
-      /* 造 3 家同电话客户，再用同电话新增 → 查重应命中多条 */
-      const bulkPhone = `0991${tag}`;
+      const bulkPhone = `0991-${tag}-9`;
       for (let i = 1; i <= 3; i++) {
         const r = await mk({
           name: `【闪退复现${tag}】同电话${i}`,
           short_name: `同话${i}${tag}`,
-          type: '终端用户', industry: '石油', phone: bulkPhone
+          industry: '石油', contact_name: `同话联系人${i}`, contact_phone: bulkPhone
         });
         if (r && r.id) createdIds.push(r.id);
       }
-      /* 注意：这个客户名必须"在库中绝对不存在"。
-         若名称先命中查重，面板一出现整个表单就被 v-if="!showDup" 隐藏，
-         后续 setText 找不到输入框会静默失败（本用例曾因此把电话没填上，
-         导致只按名称命中 1 条，误以为是渲染问题）。 */
       const multiName = `【同话核对${tag}】待录入`;
-      const multi = await scenario('D2. 同电话命中多条 → 查重面板', multiName, `
-        window.__probe.setText('客户全称', ${JSON.stringify(multiName)});
-        window.__probe.setText('客户简称', '同话核对${tag}');
-        window.__probe.setSelect('客户主体类型', '终端用户');
-        window.__probe.setSelect('下游行业', '石油');
-        window.__probe.setText('公司电话', ${JSON.stringify(bulkPhone)});
+      const multi = await scenario('D2. 同手机命中多条 → 查重面板', multiName, `
+        window.__probe.setText('公司名称', ${JSON.stringify(multiName)});
+        window.__probe.setSelect('行业', '石油');
+        window.__probe.setText('姓名', '同话核对联系人');
+        window.__probe.setText('手机', ${JSON.stringify(bulkPhone)});
       `);
-      /* 先问服务端：这个电话到底能查出几条重复（排除界面问题） */
       const dupApi = await (await fetch(
         `${BASE}/api/customers/check-duplicate?name=${encodeURIComponent(multiName)}&phone=${encodeURIComponent(bulkPhone)}`
       )).json();
       const apiCount = (dupApi && dupApi.data && dupApi.data.length) || 0;
       const dbCount = db.prepare(
-        'SELECT COUNT(*) AS n FROM customers WHERE deleted_at IS NULL AND phone = ?'
+        'SELECT COUNT(*) AS n FROM customers WHERE deleted_at IS NULL AND contact_phone = ?'
       ).get(bulkPhone).n;
-      /* 服务端查重会把我刚造的那家"同电话N"也算进去，但界面上它自己不算自己的重复，
-         所以界面卡片数应等于 apiCount − 1（仅名称来自 check-duplicate 的额外命中）。 */
-      check('D2. 前置条件：库中确有 3 家以上同电话客户',
-        dbCount >= 3, `库中同电话 ${dbCount} 家，服务端查重返回 ${apiCount} 条`);
+      check('D2. 前置条件：库中确有 3 家同手机客户',
+        dbCount >= 3 && apiCount >= 3,
+        `库中同手机 ${dbCount} 家，服务端查重返回 ${apiCount} 条`);
 
       if (multi) {
         const cards = await cdp.js(`(() => {
@@ -430,18 +364,10 @@ window.__probe = {
             matches: cs.map(c => ((c.querySelector('.tag') || {}).textContent || '').trim())
           };
         })()`);
-
-        /* 关键断言：多条重复必须**逐条**渲染成独立卡片（v-for 的核心作用）。
-           这是为 v-if/v-for 同元素重构加的回归 —— 那条 <div v-if="showDup" v-for="d in duplicates">
-           在 Vue 3 里 v-if 优先级更高（官方不推荐），改为 <template v-if> 包 v-for 后，
-           必须确认多条重复仍然逐条渲染、每条带自己的匹配标记与按钮。
-           说明：本次造的是 3 家同电话客户（外加既有 1 家同名同电话），
-           均为"同电话"命中——因为本条记录尚未保存，名称不会与自己重复。 */
-        const phoneCards = (cards.matches || []).filter((m) => m === '同电话').length;
+        const phoneCards = (cards.matches || []).filter((m) => m === '同手机').length;
         check('D2. 命中多条重复时逐条渲染（每家重复各成一张独立卡片）',
-          !cards.err && cards.count === apiCount - 1 && phoneCards === cards.count && cards.count >= 4 && cards.allHaveBtn,
-          cards.err || `服务端查重 ${apiCount} 条（含未保存的自己）→ 界面 ${cards.count} 张卡片，`
-            + `全部为「同电话」命中且每张都带查看按钮；客户：${cards.names.join(' / ')}`);
+          !cards.err && cards.count === apiCount - 1 && phoneCards === cards.count && cards.count >= 3 && cards.allHaveBtn,
+          cards.err || `服务端查重 ${apiCount} 条（含刚保存的这条自己）→ 界面 ${cards.count} 张卡片，全部为「同手机」命中且每张都带查看按钮`);
       }
     }
 
@@ -452,43 +378,39 @@ window.__probe = {
     await cdp.js(HELPERS);
     const re = await (async () => {
       await cdp.js(`window.__probe.openDrawer()`);
-      await cdp.js(`window.__probe.setText('客户全称', '【闪退复现${tag}】缺必填')`);
       await cdp.js(`window.__probe.clickFoot('保存')`);
       await sleep(1500);
       return JSON.parse(await cdp.js(`JSON.stringify(window.__probe.state())`));
     })();
     check('E. 缺必填：被校验拦住，抽屉保持打开',
       re.drawerOpen && cdp.errors.length === 0,
-      `抽屉仍开=${re.drawerOpen}，JS错误=${cdp.errors.join(' | ') || '无'}`);
+      `抽屉仍开=${re.drawerOpen}，提示=${re.toasts.join('/')}，JS错误=${cdp.errors.join(' | ') || '无'}`);
 
     /* ---------- F. 填一半关闭再打开 ---------- */
     cdp.clearErrors();
     const rf = await (async () => {
-      /* 关掉当前抽屉 */
       await cdp.js(`(() => { const d = window.__probe.drawer(); if (d) { const x = [...d.querySelectorAll('.drawer-head button')].pop(); x.click(); } return 'ok'; })()`);
       await sleep(1200);
       await cdp.js(`window.__probe.openDrawer()`);
-      await cdp.js(`window.__probe.setText('客户全称', '【闪退复现${tag}】半途')`);
+      await cdp.js(`window.__probe.setText('公司名称', '【闪退复现${tag}】半途')`);
       await sleep(400);
       const mid = JSON.parse(await cdp.js(`JSON.stringify(window.__probe.state())`));
-      /* 再关闭、再打开，确认表单已重置 */
       await cdp.js(`(() => { const d = window.__probe.drawer(); if (d) { const x = [...d.querySelectorAll('.drawer-head button')].pop(); x.click(); } return 'ok'; })()`);
       await sleep(1000);
       await cdp.js(`window.__probe.openDrawer()`);
       await sleep(600);
-      const nm = await cdp.js(`(() => { const f = window.__probe.field('客户全称'); const i = f && f.querySelector('input'); return i ? i.value : '（未取到）'; })()`);
+      const nm = await cdp.js(`(() => { const f = window.__probe.field('公司名称'); const i = f && f.querySelector('input'); return i ? i.value : '（未取到）'; })()`);
       return { mid, reopenedValue: nm };
     })();
     check('F. 填一半关闭再打开：表单已重置且无异常',
       rf.reopenedValue === '' && cdp.errors.length === 0,
-      `重开后客户全称="${rf.reopenedValue}"，JS错误=${cdp.errors.join(' | ') || '无'}`);
+      `重开后公司名称="${rf.reopenedValue}"，JS错误=${cdp.errors.join(' | ') || '无'}`);
 
     check('全程无 JS 运行时异常', cdp.errors.length === 0,
       cdp.errors.length ? cdp.errors.slice(0, 3).join('\n    ') : '0 条');
 
     cdp.ws.close();
   } finally {
-    /* 清理 */
     for (const id of [...new Set(createdIds.filter(Boolean))]) {
       for (const t of ['contacts', 'followups', 'customer_tags', 'tasks']) {
         db.prepare(`DELETE FROM ${t} WHERE customer_id = ?`).run(id);
@@ -497,7 +419,9 @@ window.__probe = {
       db.prepare('DELETE FROM customers WHERE id = ?').run(id);
     }
     db.prepare('DELETE FROM customers WHERE name LIKE ?').run(`【闪退复现${tag}】%`);
-    const left = db.prepare('SELECT COUNT(*) AS n FROM customers WHERE name LIKE ?').get(`【闪退复现${tag}】%`).n;
+    db.prepare('DELETE FROM customers WHERE name LIKE ?').run(`【同话核对${tag}】%`);
+    const left = db.prepare('SELECT COUNT(*) AS n FROM customers WHERE name LIKE ? OR name LIKE ?')
+      .get(`【闪退复现${tag}】%`, `【同话核对${tag}】%`).n;
     check('测试数据已清理', left === 0, `残留 ${left} 条`);
     db.close();
     child.kill();

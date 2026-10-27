@@ -38,9 +38,9 @@ function makeDb() {
   const db = new DatabaseSync(dbFile);
   db.exec(`CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)`);
   db.exec(`CREATE TABLE customers (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, short_name TEXT, level TEXT, status TEXT, owner TEXT,
-    phone TEXT, city TEXT, next_follow_at TEXT, last_follow_at TEXT, follow_count INTEGER DEFAULT 0,
-    deleted_at TEXT)`);
+    id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, short_name TEXT, customer_no TEXT, industry TEXT,
+    contact_name TEXT, contact_phone TEXT, city TEXT, next_follow_at TEXT, last_follow_at TEXT,
+    follow_count INTEGER DEFAULT 0, deleted_at TEXT)`);
   db.exec(`CREATE TABLE contacts (
     id INTEGER PRIMARY KEY AUTOINCREMENT, customer_id INTEGER, name TEXT, mobile TEXT,
     is_primary INTEGER DEFAULT 0, deleted_at TEXT)`);
@@ -259,15 +259,16 @@ function settingsOf(db) {
     setS.run('smtp_user', 'me@example.com', ts);
     setS.run('smtp_pass', 'auth-code-123456', ts);
 
-    /* 造 3 位客户：1 逾期、1 今天、1 三天后；再加 1 位已成交（不应出现） */
+    /* 造 3 位客户：1 逾期、1 今天、1 三天后；再加 1 位已成交
+       （1.23 起客户状态字段已删除，提醒不再按状态过滤，四位都会出现） */
     const today = reminders.ymd();
-    const ins = db.prepare(`INSERT INTO customers (name, short_name, level, status, next_follow_at, deleted_at, follow_count)
-                            VALUES (?, ?, ?, ?, ?, NULL, ?)`);
-    ins.run('某某石化有限公司', '某某石化', 'A 重点客户', '跟进中',
+    const ins = db.prepare(`INSERT INTO customers (name, short_name, industry, next_follow_at, deleted_at, follow_count)
+                            VALUES (?, ?, ?, ?, NULL, ?)`);
+    ins.run('某某石化有限公司', '某某石化', '石油',
       reminders.ymd(reminders.addDays(new Date(), -5)) + ' 10:00:00', 3);
-    ins.run('某某设计院', '某某设计院', 'B 一般客户', '跟进中', today + ' 09:00:00', 1);
-    ins.run('某某工程公司', '某某工程', '', '潜在', reminders.ymd(reminders.addDays(new Date(), 2)) + ' 14:00:00', 0);
-    ins.run('已成交客户', '已成交', '', '已成交', reminders.ymd(reminders.addDays(new Date(), -1)), 0);
+    ins.run('某某设计院', '某某设计院', '化工', today + ' 09:00:00', 1);
+    ins.run('某某工程公司', '某某工程', '电力', reminders.ymd(reminders.addDays(new Date(), 2)) + ' 14:00:00', 0);
+    ins.run('已成交客户', '已成交', '冶金', reminders.ymd(reminders.addDays(new Date(), -1)), 0);
     const cid = db.prepare('SELECT id FROM customers WHERE short_name = ?').get('某某石化').id;
     db.prepare('INSERT INTO contacts (customer_id, name, mobile, is_primary, deleted_at) VALUES (?, ?, ?, 1, NULL)')
       .run(cid, '王经理', '13900000000');
@@ -277,7 +278,9 @@ function settingsOf(db) {
     check('有待跟进客户时成功发送',
       r.ok === true && r.data.sent === true && mock.records.length === countBefore + 1,
       r.data ? `发送 ${r.data.count} 位 → ${r.data.to}；主题「${r.data.subject}」` : JSON.stringify(r));
-    check('已成交客户不进入提醒', r.data && r.data.count === 3, `计数 ${r.data ? r.data.count : '?'}（应为 3）`);
+    check('1.23 起不再按客户状态过滤（已成交也进提醒）',
+      r.data && r.data.count === 4,
+      `计数 ${r.data ? r.data.count : '?'}（应为 4）`);
 
     const last = mock.records[mock.records.length - 1];
     /* 用同一个 MIME 解码函数，避免各写一份又写错 */
@@ -288,7 +291,7 @@ function settingsOf(db) {
     check('邮件正文含客户与联系人信息',
       body.includes('某某石化') && body.includes('王经理') && body.includes('13900000000'),
       `客户名=${body.includes('某某石化')}、联系人=${body.includes('王经理')}、手机号=${body.includes('13900000000')}`);
-    check('邮件正文不含已成交客户', !body.includes('已成交客户'), '已过滤');
+    check('邮件正文含已成交客户（状态字段删除后不再过滤）', body.includes('已成交客户'), '已包含');
 
     /* 同日重复发送应被拒绝 */
     const r2 = await notify.sendDailyReminder(db, settingsOf(db));
@@ -316,8 +319,8 @@ function settingsOf(db) {
     setS.run('smtp_pass', 'auth-code-123456', ts);
 
     const today = reminders.ymd();
-    db.prepare(`INSERT INTO customers (name, short_name, status, next_follow_at, deleted_at, follow_count)
-                VALUES ('失败测试客户', '失败测试', '跟进中', ?, NULL, 0)`).run(today + ' 09:00:00');
+    db.prepare(`INSERT INTO customers (name, short_name, industry, next_follow_at, deleted_at, follow_count)
+                VALUES ('失败测试客户', '失败测试', '石油', ?, NULL, 0)`).run(today + ' 09:00:00');
 
     let degradedAt = 0;
     for (let i = 1; i <= 3; i++) {

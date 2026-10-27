@@ -3,7 +3,7 @@
  *
  * 职责：
  *   1. 建立 SQLite 连接（Node 内置 node:sqlite，零依赖）
- *   2. 建全 13 张表与索引
+ *   2. 建全 15 张表与索引
  *   3. 结构版本管理（schema_version）+ 迁移前自动备份
  *   4. 写入初始字典数据与系统设置
  *
@@ -16,84 +16,45 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
 
-const SCHEMA_VERSION = 9;
+const SCHEMA_VERSION = 10;
 
 /* ------------------------------------------------------------------ */
-/* 13 张表结构                                                          */
+/* 15 张表结构                                                          */
 /* ------------------------------------------------------------------ */
 
 const TABLES = [
 
-  /* 1. 客户主表 —— 8 区块，阀门行业定制 */
+  /* 1. 客户主表 —— 1.23 精简版：一客户一项目，客户只留 21 个基础列 + 6 个新增列
+   *    项目信息由 projects 表以 1:1 档案承载（界面无独立项目模块）；
+   *    经纬度保留但界面不显示（以后想接地图不必再迁移）。 */
   `CREATE TABLE IF NOT EXISTS customers (
-    id                INTEGER PRIMARY KEY AUTOINCREMENT,
-    name              TEXT NOT NULL,
-    short_name        TEXT NOT NULL DEFAULT '',
-    type              TEXT NOT NULL DEFAULT '',
-    industry          TEXT NOT NULL DEFAULT '',
-    source            TEXT NOT NULL DEFAULT '',
-    level             TEXT NOT NULL DEFAULT '',
-    status            TEXT NOT NULL DEFAULT '潜在',
-    owner             TEXT NOT NULL DEFAULT '',
-    phone             TEXT NOT NULL DEFAULT '',
-    fax               TEXT NOT NULL DEFAULT '',
-    website           TEXT NOT NULL DEFAULT '',
-    email             TEXT NOT NULL DEFAULT '',
-    wechat            TEXT NOT NULL DEFAULT '',
-    credit_code       TEXT NOT NULL DEFAULT '',
-    province          TEXT NOT NULL DEFAULT '',
-    city              TEXT NOT NULL DEFAULT '',
-    district          TEXT NOT NULL DEFAULT '',
-    address           TEXT NOT NULL DEFAULT '',
-    zip_code          TEXT NOT NULL DEFAULT '',
-    enterprise_nature TEXT NOT NULL DEFAULT '',
-    parent_group      TEXT NOT NULL DEFAULT '',
-    scale             TEXT NOT NULL DEFAULT '',
-    founded_at        TEXT,
-    employees         TEXT NOT NULL DEFAULT '',
-    legal_person      TEXT NOT NULL DEFAULT '',
-    is_listed         INTEGER NOT NULL DEFAULT 0,
-    purchase_mode     TEXT NOT NULL DEFAULT '',
-    end_user          TEXT NOT NULL DEFAULT '',
-    design_institute  TEXT NOT NULL DEFAULT '',
-    epc_contractor    TEXT NOT NULL DEFAULT '',
-    valve_types       TEXT NOT NULL DEFAULT '',
-    drive_mode        TEXT NOT NULL DEFAULT '',
-    body_material     TEXT NOT NULL DEFAULT '',
-    pressure_rating   TEXT NOT NULL DEFAULT '',
-    size_range        TEXT NOT NULL DEFAULT '',
-    design_standard   TEXT NOT NULL DEFAULT '',
-    connection_type   TEXT NOT NULL DEFAULT '',
-    cert_required     TEXT NOT NULL DEFAULT '',
-    annual_demand     REAL NOT NULL DEFAULT 0,
-    purchase_cycle    TEXT NOT NULL DEFAULT '',
-    account_period    TEXT NOT NULL DEFAULT '',
-    warranty_ratio    REAL NOT NULL DEFAULT 0,
-    warranty_months   INTEGER NOT NULL DEFAULT 0,
-    payer             TEXT NOT NULL DEFAULT '',
-    tender_platform   TEXT NOT NULL DEFAULT '',
-    qualification     TEXT NOT NULL DEFAULT '',
-    has_ts_license    INTEGER NOT NULL DEFAULT 0,
-    has_explosion_proof INTEGER NOT NULL DEFAULT 0,
-    quality_grade     TEXT NOT NULL DEFAULT '',
-    supplier_code     TEXT NOT NULL DEFAULT '',
-    credit_rating     TEXT NOT NULL DEFAULT '',
-    introducer        TEXT NOT NULL DEFAULT '',
-    competitor        TEXT NOT NULL DEFAULT '',
-    longitude         REAL,
-    latitude          REAL,
-    region_code       TEXT NOT NULL DEFAULT '',
-    region_name       TEXT NOT NULL DEFAULT '',
-    customer_since    TEXT,
-    last_order_at     TEXT,
-    next_follow_at    TEXT,
-    last_follow_at    TEXT,
-    follow_count      INTEGER NOT NULL DEFAULT 0,
-    deal_amount       REAL NOT NULL DEFAULT 0,
-    remark            TEXT NOT NULL DEFAULT '',
-    created_at        TEXT NOT NULL,
-    updated_at        TEXT NOT NULL,
-    deleted_at        TEXT
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    name               TEXT NOT NULL,
+    short_name         TEXT NOT NULL DEFAULT '',
+    customer_no        TEXT NOT NULL DEFAULT '',
+    industry           TEXT NOT NULL DEFAULT '',
+    source             TEXT NOT NULL DEFAULT '',
+    email              TEXT NOT NULL DEFAULT '',
+    contact_name       TEXT NOT NULL DEFAULT '',
+    contact_position   TEXT NOT NULL DEFAULT '',
+    contact_phone      TEXT NOT NULL DEFAULT '',
+    contact_birthday   TEXT NOT NULL DEFAULT '',
+    follow_cycle_days  INTEGER NOT NULL DEFAULT 0,
+    province           TEXT NOT NULL DEFAULT '',
+    city               TEXT NOT NULL DEFAULT '',
+    district           TEXT NOT NULL DEFAULT '',
+    address            TEXT NOT NULL DEFAULT '',
+    longitude          REAL,
+    latitude           REAL,
+    region_code        TEXT NOT NULL DEFAULT '',
+    region_name        TEXT NOT NULL DEFAULT '',
+    next_follow_at     TEXT,
+    last_follow_at     TEXT,
+    follow_count       INTEGER NOT NULL DEFAULT 0,
+    remark             TEXT NOT NULL DEFAULT '',
+    created_at         TEXT NOT NULL,
+    updated_at         TEXT NOT NULL,
+    deleted_at         TEXT
   )`,
 
   /* 2. 联系人 —— 一客户多人 */
@@ -152,7 +113,9 @@ const TABLES = [
     deleted_at  TEXT
   )`,
 
-  /* 6. 项目 */
+  /* 6. 项目 —— 1.23 起作为「客户的项目档案」（1:1），
+   *    archived=1 表示该客户的历史项目（只读，不再作为当前档案）。
+   *    回款 / 成本 / 待办 / 附件仍挂 project_id（内部保留，界面并入客户详情）。 */
   `CREATE TABLE IF NOT EXISTS projects (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
     name              TEXT NOT NULL,
@@ -176,6 +139,7 @@ const TABLES = [
     payment_status    TEXT NOT NULL DEFAULT '未开始',
     remark            TEXT NOT NULL DEFAULT '',
     data_origin       TEXT NOT NULL DEFAULT '手动录入',
+    archived          INTEGER NOT NULL DEFAULT 0,
     created_at        TEXT NOT NULL,
     updated_at        TEXT NOT NULL,
     deleted_at        TEXT
@@ -302,15 +266,12 @@ const TABLES = [
 const INDEXES = [
   'CREATE INDEX IF NOT EXISTS idx_customers_name           ON customers(name)',
   'CREATE INDEX IF NOT EXISTS idx_customers_short_name     ON customers(short_name)',
-  'CREATE INDEX IF NOT EXISTS idx_customers_phone          ON customers(phone)',
-  'CREATE INDEX IF NOT EXISTS idx_customers_status         ON customers(status)',
-  'CREATE INDEX IF NOT EXISTS idx_customers_type           ON customers(type)',
   'CREATE INDEX IF NOT EXISTS idx_customers_industry       ON customers(industry)',
   'CREATE INDEX IF NOT EXISTS idx_customers_next_follow    ON customers(next_follow_at)',
-  'CREATE INDEX IF NOT EXISTS idx_customers_supplier_code  ON customers(supplier_code)',
-  /* 注意：region_code 的索引不放在这里 —— 旧库（v2）还没有该列，
+  /* 注意：customer_no / 1:1 项目索引不放在这里 —— 老库（v9）还没有这些列，
      而建索引发生在迁移之前，会报 no such column。
-     该索引在 v3 迁移脚本内部创建。 */
+     这些索引在 v10 迁移脚本内部创建。 */
+  /* 注意：region_code 的索引同样在 v3 迁移脚本内部创建（原因相同）。 */
   'CREATE INDEX IF NOT EXISTS idx_customers_deleted        ON customers(deleted_at)',
   'CREATE INDEX IF NOT EXISTS idx_contacts_customer        ON contacts(customer_id)',
   'CREATE INDEX IF NOT EXISTS idx_contacts_deleted         ON contacts(deleted_at)',
@@ -347,6 +308,23 @@ const INDEXES = [
 ];
 
 /* ------------------------------------------------------------------ */
+/* 固定标签（1.23 内置，由代码常量维护，不加数据库列）                    */
+/*                                                                     */
+/* 约定：这 5 个标签在任何库里都必须存在（迁移时种入）；界面据此禁用删除， */
+/*       自定义标签随意增删。名称即标识，改名后会被视为自定义标签。        */
+/* ------------------------------------------------------------------ */
+
+const FIXED_TAGS = [
+  { name: '重点客户', color: '#dc2626', sort: 10 },
+  { name: '老客户', color: '#0ea5e9', sort: 20 },
+  { name: '待回访', color: '#f59e0b', sort: 30 },
+  { name: '已成交', color: '#16a34a', sort: 40 },
+  { name: '暂停合作', color: '#64748b', sort: 50 }
+];
+
+const FIXED_TAG_NAMES = FIXED_TAGS.map((t) => t.name);
+
+/* ------------------------------------------------------------------ */
 /* 结构迁移脚本                                                        */
 /*                                                                     */
 /* 约定：数组下标 + 1 = 目标版本号。例如 MIGRATIONS[1] 把库从 v1 升到 v2。 */
@@ -355,6 +333,22 @@ const INDEXES = [
 /* 说明：SQLite 不支持 DROP COLUMN 时回退方案是「建新表→搬数据→换名」，   */
 /*       当前环境为 SQLite 3.53.4，支持 ALTER TABLE DROP COLUMN，直接用。 */
 /* ------------------------------------------------------------------ */
+
+/** 1.23 删掉的旧客户字段（顺序即删列顺序；不存在则跳过，可重入）
+ *  说明：需求列出的 45/46 项之外，旧库还有 last_order_at（成交额同步的冗余列），
+ *  新模型里已无「累计成交额」概念，一并删除，避免遗留列与新字段白名单不一致。 */
+const DROPPED_CUSTOMER_COLUMNS = [
+  'type', 'level', 'status', 'owner', 'phone', 'fax', 'website', 'wechat',
+  'credit_code', 'zip_code', 'enterprise_nature', 'parent_group', 'scale',
+  'founded_at', 'employees', 'legal_person', 'is_listed', 'purchase_mode',
+  'end_user', 'design_institute', 'epc_contractor', 'valve_types', 'drive_mode',
+  'body_material', 'pressure_rating', 'size_range', 'design_standard',
+  'connection_type', 'cert_required', 'annual_demand', 'purchase_cycle',
+  'account_period', 'warranty_ratio', 'warranty_months', 'payer',
+  'tender_platform', 'qualification', 'has_ts_license', 'has_explosion_proof',
+  'quality_grade', 'supplier_code', 'credit_rating', 'introducer', 'competitor',
+  'deal_amount', 'customer_since', 'last_order_at'
+];
 
 const MIGRATIONS = [
   /* v1 → v2：删除客户表的「注册资金」字段（按需求移除，不再使用） */
@@ -835,6 +829,135 @@ const MIGRATIONS = [
       db.prepare("DELETE FROM settings WHERE key = 'map_approval_no'").run();
       return '新建 costs 表与 4 个索引；清理 map_approval_no 设置';
     }
+  },
+
+  /* v9 → v10：客户系统简洁化（1.23 · 一客户一项目）
+   *
+   * 做六件事（全部幂等，可重入）：
+   *   1. customers 新增 6 列：customer_no / contact_name / contact_position /
+   *      contact_phone / contact_birthday / follow_cycle_days
+   *   2. customers 删掉 47 个旧列（含 45 个业务冗余列 + deal_amount / last_order_at），
+   *      industry 保留；删列前先删掉旧列上的索引（SQLite 不允许带索引直接删列）
+   *   3. projects 加 archived 列；同一客户多条「当前项目」时只保留最新一条，
+   *      其余标 archived=1（历史项目，只读）
+   *   4. 建部分唯一索引 uq_projects_customer_current：
+   *      UNIQUE(customer_id) WHERE deleted_at IS NULL AND archived = 0 —— 保证一客户一项目
+   *   5. 建 customer_no 索引（新列上的索引不能放在 INDEXES 里，老库迁移前还没有该列）
+   *   6. 种入 5 个固定标签（重点客户 / 老客户 / 待回访 / 已成交 / 暂停合作）
+   *
+   * 注意：本版**不清空业务数据**（旧数据由使用者在 1.22 → 1.23 之间自行清空）。
+   *       老库里的客户/项目会保留；多余项目转为历史归档，不丢数据。
+   */
+  {
+    version: 10,
+    note: '客户精简（一客户一项目）：加 6 列、删 47 个旧列、projects.archived + 1:1 唯一索引、5 个固定标签',
+    run(db) {
+      const done = [];
+
+      /* ---------- 1. 新增客户列 ---------- */
+      const hasCol = (table, col) => db.prepare(`PRAGMA table_info(${table})`).all()
+        .some((c) => c.name === col);
+      const addCols = [
+        ['customer_no', "TEXT NOT NULL DEFAULT ''"],
+        ['contact_name', "TEXT NOT NULL DEFAULT ''"],
+        ['contact_position', "TEXT NOT NULL DEFAULT ''"],
+        ['contact_phone', "TEXT NOT NULL DEFAULT ''"],
+        ['contact_birthday', "TEXT NOT NULL DEFAULT ''"],
+        ['follow_cycle_days', 'INTEGER NOT NULL DEFAULT 0']
+      ];
+      const added = [];
+      for (const [name, def] of addCols) {
+        if (!hasCol('customers', name)) {
+          db.exec(`ALTER TABLE customers ADD COLUMN ${name} ${def}`);
+          added.push(name);
+        }
+      }
+      if (added.length) done.push(`新增列 ${added.join('、')}`);
+
+      /* ---------- 1b. 老客户回填客户编号（KH-YYYY-####，按建档年份排） ---------- */
+      if (added.includes('customer_no')) {
+        const empties = db.prepare(
+          "SELECT id, created_at FROM customers WHERE customer_no IS NULL OR customer_no = '' ORDER BY id"
+        ).all();
+        if (empties.length) {
+          const maxOf = db.prepare(
+            "SELECT customer_no FROM customers WHERE customer_no LIKE ? ORDER BY LENGTH(customer_no) DESC, customer_no DESC LIMIT 1"
+          );
+          const upd = db.prepare('UPDATE customers SET customer_no = ? WHERE id = ?');
+          const seq = {};
+          for (const r of empties) {
+            const year = String(r.created_at || '').slice(0, 4) || String(new Date().getFullYear());
+            if (seq[year] === undefined) {
+              const hit = maxOf.get(`KH-${year}-%`);
+              const n = hit ? Number(String(hit.customer_no).split('-')[2]) || 0 : 0;
+              seq[year] = n;
+            }
+            seq[year] += 1;
+            upd.run(`KH-${year}-${String(seq[year]).padStart(4, '0')}`, r.id);
+          }
+          done.push(`回填客户编号 ${empties.length} 条`);
+        }
+      }
+
+      /* ---------- 2. 删除旧列（先删这些列上的旧索引） ---------- */
+      for (const idx of ['idx_customers_phone', 'idx_customers_status',
+        'idx_customers_type', 'idx_customers_supplier_code']) {
+        db.exec(`DROP INDEX IF EXISTS ${idx}`);
+      }
+      const dropped = [];
+      for (const col of DROPPED_CUSTOMER_COLUMNS) {
+        if (!hasCol('customers', col)) continue;
+        db.exec(`ALTER TABLE customers DROP COLUMN ${col}`);
+        dropped.push(col);
+      }
+      if (dropped.length) done.push(`删除旧列 ${dropped.length} 个`);
+
+      /* ---------- 3. projects.archived + 归档多余项目 ---------- */
+      if (!hasCol('projects', 'archived')) {
+        db.exec('ALTER TABLE projects ADD COLUMN archived INTEGER NOT NULL DEFAULT 0');
+        done.push('projects 新增列 archived');
+      }
+      /* 每个客户只保留最新的一条「当前项目」，其余转历史（按 updated_at、id 倒序） */
+      const rows = db.prepare(`
+        SELECT id, customer_id FROM projects
+        WHERE deleted_at IS NULL AND archived = 0
+        ORDER BY customer_id ASC, updated_at DESC, id DESC
+      `).all();
+      const seen = new Set();
+      const toArchive = [];
+      for (const r of rows) {
+        if (seen.has(r.customer_id)) toArchive.push(r.id);
+        else seen.add(r.customer_id);
+      }
+      for (const id of toArchive) {
+        db.prepare('UPDATE projects SET archived = 1 WHERE id = ?').run(id);
+      }
+      if (toArchive.length) done.push(`归档多余项目 ${toArchive.length} 个`);
+
+      /* ---------- 4. 一客户一项目：部分唯一索引 ---------- */
+      db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_projects_customer_current
+               ON projects(customer_id) WHERE deleted_at IS NULL AND archived = 0`);
+
+      /* ---------- 5. 新列上的索引 ---------- */
+      db.exec('CREATE INDEX IF NOT EXISTS idx_customers_customer_no ON customers(customer_no)');
+      db.exec('CREATE INDEX IF NOT EXISTS idx_customers_contact_name ON customers(contact_name)');
+
+      /* ---------- 6. 固定标签 ---------- */
+      const ts = now();
+      const findTag = db.prepare('SELECT id FROM tags WHERE name = ?');
+      const insTag = db.prepare(
+        'INSERT INTO tags (name, color, sort, created_at, updated_at) VALUES (?, ?, ?, ?, ?)'
+      );
+      const tagAdded = [];
+      for (const t of FIXED_TAGS) {
+        if (findTag.get(t.name)) continue;
+        insTag.run(t.name, t.color, t.sort, ts, ts);
+        tagAdded.push(t.name);
+      }
+      if (tagAdded.length) done.push(`种入固定标签 ${tagAdded.join('、')}`);
+
+      return done.length ? done.join('；') : '结构已是最新，无需变更';
+    }
   }
 ];
 
@@ -1194,6 +1317,9 @@ module.exports = {
   SCHEMA_VERSION,
   DICT_LABEL,
   DICT_SEED,
+  FIXED_TAGS,
+  FIXED_TAG_NAMES,
+  DROPPED_CUSTOMER_COLUMNS,
   initDatabase,
   getSettings,
   closeDatabase,

@@ -356,31 +356,28 @@ trailer<</Root 1 0 R>>
     del.ok && del.after === 1,
     del.ok ? `确认文案="${del.modalText}…"，删除后剩余 ${del.after} 个` : `失败：${del.why}`);
 
-  /* ================= 8. 项目详情也有附件标签页 ================= */
-  const proj = await (await fetch(BASE + '/api/projects', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name: `阶段五交互测试项目${ts}`, customer_id: customerId, stage: '已中标/已签约', contract_amount: 100000 })
-  })).json();
-  await goto('#/projects/' + proj.data.id, 3400);
+  /* ================= 8. 客户详情「附件与日志」标签页（1.23 项目页已并入客户详情） ================= */
+  await goto('#/customers/' + customerId, 3400);
   const projTab = await cdp.evalJs(`(async () => {
-    const tabs = [...document.querySelectorAll('.tab')].map(t => t.textContent.trim());
-    const t = [...document.querySelectorAll('.tab')].find(x => x.textContent.includes('附件'));
+    const tabs = [...document.querySelectorAll('.tabs .tab')].map(t => t.textContent.trim());
+    const t = [...document.querySelectorAll('.tabs .tab')].find(x => x.textContent.includes('附件与日志'));
     if (!t) return { tabs, hasFiles: false };
     t.click();
     await new Promise(r => setTimeout(r, 1200));
-    /* 同样只取可见的附件面板 */
+    /* 只取可见的附件面板（各标签页用 v-show 隐藏） */
     const panels = [...document.querySelectorAll('.content > div > div')]
       .filter(d => d.style.display !== 'none' && d.querySelector('.drop-zone'));
     const panel = panels[panels.length - 1];
     return {
       tabs, hasFiles: true,
       hasDropZone: !!panel,
-      emptyText: panel ? ((panel.querySelector('.placeholder h3') || {}).textContent || '') : ''
+      emptyText: panel ? ((panel.querySelector('.placeholder h3') || {}).textContent || '') : '',
+      hasLogs: document.body.innerText.includes('操作日志')
     };
   })()`);
-  check('项目详情页也有「附件」标签页且面板可渲染',
-    projTab.hasFiles && projTab.hasDropZone && projTab.emptyText.includes('还没有附件'),
-    `标签页：${projTab.tabs.join(' / ')}；面板可见=${projTab.hasDropZone}，空状态="${projTab.emptyText}"`);
+  check('客户详情「附件与日志」标签页可渲染附件面板与日志',
+    projTab.hasFiles && projTab.hasDropZone && projTab.hasLogs,
+    `标签页：${projTab.tabs.join(' / ')}；面板可见=${projTab.hasDropZone}；含操作日志=${projTab.hasLogs}；空状态="${projTab.emptyText}"`);
 
   /* ================= 9. 设置页附件与存储面板 ================= */
   await goto('#/settings', 3000);
@@ -420,7 +417,6 @@ trailer<</Root 1 0 R>>
     });
   }
   await fetch(BASE + '/api/attachments/clean-orphans', { method: 'POST' });
-  await fetch(BASE + `/api/projects/${proj.data.id}`, { method: 'DELETE' });
   await fetch(BASE + `/api/customers/${customerId}`, { method: 'DELETE' });
   console.log('\n（已清理测试数据）');
 

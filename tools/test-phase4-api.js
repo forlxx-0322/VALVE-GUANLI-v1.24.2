@@ -76,10 +76,9 @@ const created = {};
   /* ================= 0. 造一套完整业务数据（供总览与导出测试） ================= */
   const cust = await api('POST', '/api/customers', {
     name: '阶段四测试客户（新疆天业集团）', short_name: '天业集团',
-    type: '终端用户', industry: '化工', level: 'A 重点客户', status: '跟进中',
-    city: '石河子市', phone: '0993-1234567',
-    annual_demand: 500, next_follow_at: dayOffset(-2) + ' 10:00:00',
-    supplier_code: 'P4-TEST-001'
+    industry: '化工', source: '工程公司配套',
+    city: '石河子市', contact_phone: '0993-1234567',
+    next_follow_at: dayOffset(-2) + ' 10:00:00'
   });
   created.customer = cust.data.id;
   await api('POST', '/api/contacts', {
@@ -261,17 +260,17 @@ const created = {};
 
   /* ================= 4. 导入导出 ================= */
   const tpl = await api('GET', '/api/data/template?entity=customer');
-  /* 必填列与界面表单一致：客户全称 / 简称 / 主体类型 / 下游行业，共 4 列 */
+  /* 必填列与界面表单一致：1.23 只有「客户全称」是必填 */
   const requiredLabels = tpl.data.fields.filter((f) => f.required).map((f) => f.label);
-  check(25, '导入模板返回字段定义与示例',
-    tpl.data.fields.length >= 55 && tpl.data.sample.length === tpl.data.fields.length
-      && requiredLabels.length === 4
-      && ['客户全称', '客户简称', '主体类型', '下游行业'].every((l) => requiredLabels.includes(l)),
+  check(25, '导入模板返回字段定义与示例（1.23 精简为 17 列）',
+    tpl.data.fields.length >= 15 && tpl.data.fields.length <= 20
+      && tpl.data.sample.length === tpl.data.fields.length
+      && requiredLabels.length === 1 && requiredLabels[0] === '客户全称',
     `客户模板 ${tpl.data.fields.length} 列（必填 ${requiredLabels.length} 列：${requiredLabels.join('、')}），示例 ${tpl.data.sample.filter(Boolean).length} 个`);
 
   const exp = await api('GET', '/api/data/export?entity=customer');
   check(26, '导出客户数据（含列定义）',
-    exp.data.rows.length >= 1 && exp.data.fields.length >= 55,
+    exp.data.rows.length >= 1 && exp.data.fields.length >= 15,
     `导出 ${exp.data.count} 条 × ${exp.data.fields.length} 列`);
 
   const expProj = await api('GET', '/api/data/export?entity=project');
@@ -284,20 +283,19 @@ const created = {};
   /* 为"库内重复"这一条专门建一个客户：不依赖前面步骤留下的数据，
      避免那些数据在此处之前被清理掉导致查重测不到（曾经因此误判为功能故障）。 */
   const dupTarget = await api('POST', '/api/customers', {
-    name: '阶段四导入查重对照客户', short_name: '查重对照',
-    type: '终端用户', industry: '石油'
+    name: '阶段四导入查重对照客户', short_name: '查重对照', industry: '石油'
   });
   const dupTargetId = dupTarget.data.id;
 
   const importRows = [
-    { name: '导入测试客户A', short_name: '导入A', type: '终端用户', industry: '煤化工',
-      level: 'A 重点客户', status: '潜在', annual_demand: '1200', is_listed: '是',
-      founded_at: '2010/5/20', city: '乌鲁木齐市' },
-    { name: '导入测试客户B', short_name: '导入B', type: '贸易商/经销商', industry: '测试新行业XYZ',
-      status: '跟进中', annual_demand: 'abc' },
-    { name: '', short_name: '缺名称', type: '终端用户' },
-    { name: '导入测试客户A', short_name: '重复行', type: '其他' },
-    { name: '阶段四导入查重对照客户', short_name: '库里已有', type: '终端用户', industry: '石油' }
+    { name: '导入测试客户A', short_name: '导入A', industry: '煤化工',
+      contact_name: '导入联系人A', contact_phone: '13909930011',
+      follow_cycle_days: '30', contact_birthday: '2010/5/20', city: '乌鲁木齐市' },
+    { name: '导入测试客户B', short_name: '导入B', industry: '测试新行业XYZ',
+      follow_cycle_days: 'abc' },
+    { name: '', short_name: '缺名称' },
+    { name: '导入测试客户A', short_name: '重复行' },
+    { name: '阶段四导入查重对照客户', short_name: '库里已有', industry: '石油' }
   ];
   const prev = await api('POST', '/api/data/preview', { entity: 'customer', rows: importRows });
   /* 注意：与库中重名现在归为"重复"（可跳过/可更新）而不是"错误"，
@@ -313,15 +311,15 @@ const created = {};
   const row5 = prev.data.rows[4];
   check(29, '校验细节：必填/文件内重复/库内重复/字典外值',
     row1.errors.length === 0
-      && row1.data.annual_demand === 1200 && row1.data.is_listed === 1 && row1.data.founded_at === '2010-05-20'
-      && row2.warnings.some((w) => w.includes('测试新行业XYZ')) && row2.data.annual_demand === 0
+      && row1.data.follow_cycle_days === 30 && row1.data.contact_birthday === '2010-05-20'
+      && row2.warnings.some((w) => w.includes('测试新行业XYZ')) && row2.data.follow_cycle_days === 0
       && row3.errors.some((e) => e.includes('必填'))
       && row4.errors.some((e) => e.includes('文件内'))
       /* 库内重名：不算错误，标记为重复并给出"将跳过/将更新"的提示 */
       && row5.errors.length === 0 && row5.duplicateInDb === true
       && row5.action === 'skip'
       && row5.warnings.some((w) => w.includes('库中已有同名')),
-    `A:数字/是/日期归一正确；B:字典外值提示 ${row2.warnings.length} 条且非法数字归 0；C:必填报错；D:文件内重复；E:库内重名标记为 ${row5.action}`);
+    `A:数值/日期归一正确；B:字典外值提示 ${row2.warnings.length} 条且非法数字归 0；C:必填报错；D:文件内重复；E:库内重名标记为 ${row5.action}`);
 
   const imp = await api('POST', '/api/data/import', { entity: 'customer', rows: importRows });
   /* 新增 2 条、库内重名的 1 条被跳过、必填缺失与文件内重复 2 条校验未通过 */
@@ -391,22 +389,25 @@ const created = {};
   /* ================= 清理 ================= */
   const cleanupCust = await api('GET', '/api/customers?q=' + encodeURIComponent('导入测试'));
   const ids = (cleanupCust.data.list || []).map((x) => x.id);
-  for (const id of ids) {
-    const pl = await api('GET', `/api/projects?customer_id=${id}&pageSize=200`);
+  const allCust = [...ids, created.customer, dupTargetId].filter(Boolean);
+  for (const id of allCust) {
+    const pl = await api('GET', `/api/projects?customer_id=${id}&pageSize=200&archived=all`);
     const pids = (pl.data.list || []).map((p) => p.id);
+    for (const pid of pids) {
+      const d = await api('GET', `/api/projects/${pid}`);
+      const rows = [].concat((d.data && d.data.plans) || [], (d.data && d.data.receipts) || []);
+      for (const row of rows) await api('DELETE', `/api/payments/${row.id}`);
+    }
+    const cl = await api('GET', `/api/costs?customer_id=${id}&pageSize=200`);
+    for (const row of (cl.data && cl.data.list) || []) await api('DELETE', `/api/costs/${row.id}`);
     if (pids.length) await api('POST', '/api/projects/batch-delete', { ids: pids });
   }
   if (ids.length) await api('POST', '/api/customers/batch-delete', { ids });
-
-  const pl2 = await api('GET', `/api/projects?customer_id=${created.customer}&pageSize=200`);
-  if ((pl2.data.list || []).length) {
-    await api('POST', '/api/projects/batch-delete', { ids: pl2.data.list.map((p) => p.id) });
-  }
   await api('POST', '/api/tasks/batch-delete', { ids: [created.task] });
   await api('POST', '/api/customers/batch-delete', { ids: [created.customer] });
   /* 查重对照客户也一并清理 */
   await api('POST', '/api/customers/batch-delete', { ids: [dupTargetId] });
-  console.log(`\n（已清理测试数据：客户 ${ids.length + 2} 个及其项目、待办）`);
+  console.log(`\n（已清理测试数据：客户 ${ids.length + 2} 个及其项目、回款、成本、待办）`);
 
   const pass = results.filter((r) => r.pass).length;
   const fail = results.length - pass;

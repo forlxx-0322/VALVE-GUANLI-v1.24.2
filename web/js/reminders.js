@@ -187,9 +187,7 @@ window.CRM = window.CRM || {};
                   <div class="ri-main" @click="openCustomer(it)">
                     <div class="ri-name">
                       {{ it.short_name }}
-                      <span v-if="it.customer_level" class="tag" :class="it.customer_level.startsWith('A') ? 'danger' : 'muted'">
-                        {{ it.customer_level }}
-                      </span>
+                      <span v-if="it.industry" class="tag muted">{{ it.industry }}</span>
                     </div>
                     <div class="ri-meta">
                       <span :class="levelClass(it.level)" class="ri-days">{{ it.days_text }}</span>

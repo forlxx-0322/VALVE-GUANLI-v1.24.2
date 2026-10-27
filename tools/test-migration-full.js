@@ -2,8 +2,9 @@
  * 数据库迁移测试（全面版，全程在临时副本上进行，不碰生产数据）
  *
  * 与 test-migration.js 的区别：
- *   - test-migration.js 专测 v1 → v2 的"删除 reg_capital 列"这一特定迁移
- *   - 本文件覆盖**迁移到最新版本**的完整链路，且版本无关（目标取自 SCHEMA_VERSION）
+ *   - test-migration.js 专测 v1 → 最新版本的完整升级链路
+ *   - 本文件覆盖**迁移到最新版本**的完整链路，且版本无关（目标取自 SCHEMA_VERSION），
+ *     并逐版核对各版本的产物（v8 删表、v9 costs、v10 客户精简与一客户一项目）
  *
  * 起点自适应（重要）：
  *   全套件连跑时，运行器会先清库重建为**最新版本**，此时真实库没有"旧版本"可迁移。
@@ -24,6 +25,7 @@ const { DatabaseSync } = require('node:sqlite');
 const ROOT = path.resolve(__dirname, '..');
 const REAL_DB = path.join(ROOT, 'data', 'crm.db');
 const TARGET = require(path.join(ROOT, 'server', 'db.js')).SCHEMA_VERSION;
+const { seedLegacyCustomers, markVersion } = require('./legacy-schema');
 
 const results = [];
 function check(name, pass, detail) {
@@ -48,41 +50,15 @@ function counts(db) {
   };
 }
 
-/**
- * 从 db.js 当前的 customers 建表语句反推出 v1 结构（在 scale 之后插回 reg_capital）。
- * 这样旧库除该字段外与真实 v1 一致，避免手工列字段漏项。
- */
-function buildLegacyCustomersDDL() {
-  const src = fs.readFileSync(path.join(ROOT, 'server', 'db.js'), 'utf8');
-  const m = src.match(/CREATE TABLE IF NOT EXISTS customers \(([\s\S]*?)\n  \)`/);
-  if (!m) throw new Error('未能从 db.js 中解析出 customers 建表语句');
-  const out = [];
-  for (const line of m[1].split('\n')) {
-    out.push(line);
-    if (/^\s*scale\s+TEXT/.test(line)) out.push('    reg_capital       REAL NOT NULL DEFAULT 0,');
-  }
-  return `CREATE TABLE IF NOT EXISTS customers (${out.join('\n')}\n  )`;
-}
-
 /** 造一个 v1 旧库（带 reg_capital 列与业务数据） */
 function makeLegacyDb(file) {
   const db = new DatabaseSync(file);
-  db.exec(buildLegacyCustomersDDL());
-  db.exec(`CREATE TABLE schema_version (
-    version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL, note TEXT NOT NULL DEFAULT ''
-  )`);
-  db.prepare('INSERT INTO schema_version (version, applied_at, note) VALUES (1, ?, ?)')
-    .run('2026-01-01T00:00:00', '初始建库');
-  const ins = db.prepare(`INSERT INTO customers
-    (name, short_name, type, industry, scale, reg_capital, annual_demand, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
-  const ts = '2026-01-15T09:00:00';
-  const rows = [
-    ['迁移测试客户甲', '迁移甲', '终端用户', '石油', '大型', 500000, 800],
-    ['迁移测试客户乙', '迁移乙', '贸易商/经销商', '化工', '中型', 1000, 120],
-    ['迁移测试客户丙', '迁移丙', '设计院', '电力', '小型', 200, 60]
-  ];
-  for (const r of rows) ins.run(r[0], r[1], r[2], r[3], r[4], r[5], r[6], ts, ts);
+  seedLegacyCustomers(db, [
+    { name: '迁移测试客户甲', short_name: '迁移甲', industry: '石油', scale: '大型', reg_capital: 500000, annual_demand: 800, city: '乌鲁木齐市' },
+    { name: '迁移测试客户乙', short_name: '迁移乙', type: '贸易商/经销商', industry: '化工', scale: '中型', reg_capital: 1000, annual_demand: 120 },
+    { name: '迁移测试客户丙', short_name: '迁移丙', type: '设计院', industry: '电力', scale: '小型', reg_capital: 200, annual_demand: 60 }
+  ]);
+  markVersion(db, 1);
   db.close();
 }
 
@@ -123,7 +99,8 @@ function makeLegacyDb(file) {
   const tablesBefore = before.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((r) => r.name);
   const projectsColsBefore = before.prepare('PRAGMA table_info(projects)').all().map((c) => c.name);
   const customersColsBefore = before.prepare('PRAGMA table_info(customers)').all().map((c) => c.name);
-  const sample = before.prepare('SELECT id, name, annual_demand FROM customers ORDER BY id LIMIT 1').get();
+  const sample = before.prepare('SELECT id, name FROM customers ORDER BY id LIMIT 1').get();
+  const customersBefore = before.prepare('SELECT name, short_name, industry FROM customers ORDER BY id').all();
   before.close();
 
   console.log(`迁移前：结构 v${vBefore}，表 ${tablesBefore.length} 张`);
@@ -153,7 +130,7 @@ function makeLegacyDb(file) {
   const tablesAfter = after.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((r) => r.name);
   const projectsColsAfter = after.prepare('PRAGMA table_info(projects)').all().map((c) => c.name);
   const customersColsAfter = after.prepare('PRAGMA table_info(customers)').all().map((c) => c.name);
-  const sampleAfter = after.prepare('SELECT id, name, annual_demand FROM customers ORDER BY id LIMIT 1').get();
+  const sampleAfter = after.prepare('SELECT id, name FROM customers ORDER BY id LIMIT 1').get();
 
   check(`结构版本已升到 v${TARGET}`, vAfter === TARGET, `v${vAfter}`);
   check('迁移步骤数与版本跨度一致',
@@ -192,6 +169,46 @@ function makeLegacyDb(file) {
       "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='costs'"
     ).all().map((r) => r.name);
     check('v9 成本表索引已建立', costIdx.length >= 3, costIdx.join('、'));
+  }
+
+  /* ---------- v10：客户精简 + 一客户一项目 ---------- */
+  if (TARGET >= 10) {
+    const NEW_COLS = ['customer_no', 'contact_name', 'contact_position', 'contact_phone',
+      'contact_birthday', 'follow_cycle_days'];
+    const DROPPED = ['type', 'level', 'status', 'owner', 'phone', 'fax', 'website', 'wechat',
+      'credit_code', 'zip_code', 'enterprise_nature', 'parent_group', 'scale', 'founded_at',
+      'employees', 'legal_person', 'is_listed', 'purchase_mode', 'end_user', 'design_institute',
+      'epc_contractor', 'valve_types', 'drive_mode', 'body_material', 'pressure_rating',
+      'size_range', 'design_standard', 'connection_type', 'cert_required', 'annual_demand',
+      'purchase_cycle', 'account_period', 'warranty_ratio', 'warranty_months', 'payer',
+      'tender_platform', 'qualification', 'has_ts_license', 'has_explosion_proof',
+      'quality_grade', 'supplier_code', 'credit_rating', 'introducer', 'competitor',
+      'deal_amount', 'customer_since', 'last_order_at'];
+    check('v10 客户表已加 6 个新列且保留 industry',
+      NEW_COLS.every((c) => customersColsAfter.includes(c)) && customersColsAfter.includes('industry'),
+      `新列 ${NEW_COLS.filter((c) => customersColsAfter.includes(c)).length}/6，industry=${customersColsAfter.includes('industry')}`);
+    const left = DROPPED.filter((c) => customersColsAfter.includes(c));
+    check(`v10 已删除 ${DROPPED.length} 个旧列（含 last_order_at）`,
+      left.length === 0 && customersColsAfter.length === 27,
+      left.length ? `仍在：${left.join('、')}` : `旧列全部删除，现 ${customersColsAfter.length} 列`);
+
+    const uq = after.prepare(
+      "SELECT sql FROM sqlite_master WHERE type='index' AND name='uq_projects_customer_current'"
+    ).get();
+    check('v10 已建一客户一项目唯一索引（archived=0 的部分唯一索引）',
+      projectsColsAfter.includes('archived') && !!uq && /archived\s*=\s*0/.test(String(uq.sql || '')),
+      uq ? String(uq.sql) : '索引不存在');
+
+    const fixed = after.prepare(
+      "SELECT name FROM tags WHERE name IN ('重点客户','老客户','待回访','已成交','暂停合作')"
+    ).all().map((r) => r.name);
+    check('v10 已种入 5 个固定标签', fixed.length === 5, fixed.join('、'));
+
+    const nos = after.prepare('SELECT customer_no FROM customers ORDER BY id').all().map((r) => r.customer_no);
+    check('v10 老客户自动回填客户编号',
+      nos.length === customersBefore.length && nos.every((n) => /^KH-\d{4}-\d{4}$/.test(String(n || '')))
+        && new Set(nos).size === nos.length,
+      nos.join('、') || '（无客户）');
   }
 
   /* ---------- v2/v3 的列变更 ---------- */
@@ -233,17 +250,17 @@ function makeLegacyDb(file) {
     `字典 ${countsBefore.dict} → ${countsAfter.dict}；设置 ${countsBefore.settings} → ${countsAfter.settings}`);
 
   /* 客户内容与数量必须原样保留（迁移最有价值的保证） */
-  const custBefore = before || null;
-  check('客户数据内容未变（逐条比对名称与年需求量）', (() => {
+  check('客户数据内容未变（逐条比对名称 / 简称 / 行业）', (() => {
     const probe = new DatabaseSync(dbFile, { readOnly: true });
-    const rowsA = probe.prepare('SELECT name, annual_demand FROM customers ORDER BY id').all();
+    const rowsAfter = probe.prepare('SELECT name, short_name, industry FROM customers ORDER BY id').all();
     probe.close();
-    const probe2 = new DatabaseSync(dbFile, { readOnly: true });
-    const rowsB = probe2.prepare('SELECT name, annual_demand FROM customers ORDER BY id').all();
-    probe2.close();
-    if (rowsA.length !== rowsB.length) return false;
-    return rowsA.every((r, i) => r.name === rowsB[i].name && r.annual_demand === rowsB[i].annual_demand);
-  })(), sampleAfter ? `共 ${countsAfter.customers} 条，示例「${sampleAfter.name}」年需求=${sampleAfter.annual_demand}` : '（无客户）');
+    if (customersBefore.length !== rowsAfter.length) return false;
+    return customersBefore.every((r, i) => r.name === rowsAfter[i].name
+      && r.short_name === rowsAfter[i].short_name
+      && r.industry === rowsAfter[i].industry);
+  })(), sampleAfter
+    ? `共 ${countsAfter.customers} 条，示例「${sampleAfter.name}」`
+    : '（无客户）');
 
   /* 表结构保持：只在"起点本来就有 projects 表"时才可比对。
      v1 旧库根本没有 projects 表（它由后续版本建出），此时该断言不适用——
