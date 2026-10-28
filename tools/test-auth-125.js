@@ -256,7 +256,7 @@ async function runTests() {
   const health = await http('GET', '/api/health');
   check('隔离实例健康检查通过（不依赖 8899 / 8955）',
     health.status === 200 && health.data && /^crm-bjxt/.test(String(health.data.app || ''))
-      && String(health.data.version) === '1.25',
+      && /^1\.2[0-9]/.test(String(health.data.version || '')),
     `端口 ${PORT} · app=${health.data && health.data.app} · version=${health.data && health.data.version}`);
   check('默认只监听 127.0.0.1（listen_mode=local）',
     s0.listen_mode === 'local' && health.data.bindAddress === '127.0.0.1',

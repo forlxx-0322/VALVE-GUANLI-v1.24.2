@@ -194,5 +194,10 @@
   /* 从「退出登录」回来时避免浏览器缓存表单状态 */
   passEl.value = '';
 
+  /* 登录页也注册 Service Worker：这样即使还没登录，也能把站点「安装为桌面应用」 */
+  if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) {
+    navigator.serviceWorker.register('/sw.js').catch(() => {});
+  }
+
   boot();
 })();

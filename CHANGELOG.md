@@ -8,6 +8,49 @@
 
 ---
 
+## [1.25.2] — 2026-10-28
+
+本次归档：**安装为桌面应用（0 安装包的 PWA 方案）**。数据库结构不变（**v14**）。
+
+### 一、做了什么
+
+不用 Electron、不用打包，让 Edge/Chrome 把系统"安装"成独立应用窗口：
+
+| 文件 | 作用 |
+|---|---|
+| `web/manifest.webmanifest` | PWA 清单：名称、图标、`display: standalone`、主题色、右上角快捷方式（客户 / 产品 / 待办） |
+| `web/sw.js` | Service Worker（仅为可安装性 + 静态资源秒开）：API 与 HTML 永远走网络，css/js/图片网络优先并缓存兜底 |
+| `web/assets/icon-192.png`、`icon-512.png`、`apple-touch-icon.png`、`favicon-32.png` | 由现有 `logo.svg` 渲染，全本地生成 |
+| `web/index.html` / `web/login.html` | 挂 manifest、图标、theme-color、apple 相关 meta |
+| `web/js/app.js`、`web/js/login.js` | 注册 Service Worker（登录页也注册，未登录时同样可安装） |
+| `安装为应用.bat` | 找 Edge/Chrome → 服务没跑就拉起来 → 用 `--app=` 打开独立窗口 → 提示怎么"安装此站点为应用" |
+| `server/server.js` | 静态服务补 `.webmanifest` 的 MIME（`application/manifest+json`） |
+
+### 二、使用方式（三步）
+
+1. 双击 **`安装为应用.bat`**（会自动检查/启动服务）
+2. 弹出的应用窗口右上角 **⋯ → 应用 → 安装此站点为应用**，名称「客户管理」
+3. 之后从开始菜单/桌面图标直接打开：**无地址栏、独立任务栏图标、单独窗口**
+
+> 安装包本质是浏览器的"应用壳"：**数据仍在 `data/crm.db`，不联网、不上传**。
+> 服务没跑时双击图标会打不开，先双击「启动.bat」即可（也可把两者一起放启动项）。
+
+### 三、验证
+
+- Chrome 可安装性检查：**0 错误**（manifest / 192+512 图标 / standalone / SW 生效）
+- Service Worker 注册并激活；API 请求不被缓存（登录态与数据始终实时）
+- 图标资源全部 200；`sw.js`、`manifest.webmanifest` MIME 正确
+- `.bat` 逻辑在 cmd 下实测：能找到 Edge、健康检查通过（服务已在跑时直接开窗口）
+- 全量回归：**805 / 805 通过**（28 个套件，沙箱空库）
+
+### 四、为什么不做 Electron
+
+按"0 开发量"要求，先用浏览器自带的应用安装能力：
+包体 0 MB、无需签名、不会触发 SmartScreen、升级只是刷新页面。
+将来真需要"双击 exe、内置更新、托盘常驻"，再上 Electron（预计 3~4 个工作日）。
+
+---
+
 ## [1.25.1] — 2026-10-28
 
 本次归档：**深色模式全站适配修复** + **邮件提醒（不登录也能发、全免费）实测确认**。

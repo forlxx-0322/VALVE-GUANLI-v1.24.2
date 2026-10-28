@@ -132,4 +132,12 @@
   CRM.app = app;
   app.mount('#app');
 
+  /* 安装为桌面应用（PWA）：注册 Service Worker。
+     只在 http/https 下注册；失败不影响系统（只是没有"安装应用"入口）。 */
+  if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('/sw.js').catch(() => {});
+    });
+  }
+
 })(window.CRM);
