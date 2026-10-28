@@ -12,6 +12,14 @@
 (function () {
   const $ = (id) => document.getElementById(id);
 
+  /* 跟随主应用里选的主题（默认浅色），登录页也要跟着变，不然进系统会闪一下 */
+  try {
+    const saved = localStorage.getItem('crm_theme');
+    if (saved === 'dark' || saved === 'light') {
+      document.documentElement.setAttribute('data-theme', saved);
+    }
+  } catch (_) { /* 隐私模式下读不到 localStorage，用默认浅色 */ }
+
   const form = $('login-form');
   const userEl = $('username');
   const passEl = $('password');

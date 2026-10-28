@@ -38,6 +38,27 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* 深色主题：跟随主应用里选的主题（login.js 会读 localStorage 写到 <html data-theme>） */
+:root[data-theme="dark"] {
+  --text: #e6eaf0;
+  --text-2: #a8b2c1;
+  --text-3: #78828f;
+  --border: #2c333e;
+  --surface: #1f242d;
+  --danger-soft: rgba(217, 45, 63, .16);
+  --warning-soft: rgba(201, 122, 12, .16);
+}
+:root[data-theme="dark"] body {
+  background:
+    radial-gradient(1100px 500px at 15% -10%, rgba(47, 111, 237, .22) 0%, transparent 60%),
+    radial-gradient(900px 460px at 110% 10%, rgba(90, 120, 200, .14) 0%, transparent 55%),
+    #14181f;
+}
+:root[data-theme="dark"] .login-card {
+  box-shadow: 0 30px 80px rgba(0, 0, 0, .55), 0 2px 6px rgba(0, 0, 0, .3);
+}
+:root[data-theme="dark"] .input { background: #191e25; }
+
 .login-wrap { width: 100%; max-width: 392px; }
 
 .login-card {
