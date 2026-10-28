@@ -305,9 +305,9 @@ async function get(pathname, init) {
     check(18, '全部后端与前端脚本语法检查通过', false, e.message);
   }
 
-  /* --- 19. .bat 文件编码（UTF-8 无 BOM） --- */
+  /* --- 19. 启动器编码（UTF-8 无 BOM；1.25.4 起只保留 启动.bat 一个） --- */
   try {
-    const bats = ['启动.bat', '停止.bat', '打开数据目录.bat'];
+    const bats = ['启动.bat'];
     const bad = [];
     const info = [];
     for (const b of bats) {

@@ -1,5 +1,5 @@
 /**
- * .bat 启动器生成器
+ * 启动器生成器（只生成 启动.bat）
  *
  * 为什么用脚本生成而不用手写：
  *   .bat 必须保存为 **UTF-8 无 BOM** 才能在 chcp 65001 下正确显示中文；
@@ -33,6 +33,18 @@ const START_BAT = [
   '',
   'set "PORT=8899"',
   'set "MAXPORT=8910"',
+  '',
+  'rem Find a Chromium browser once (used by both branches below).',
+  'rem If none is found we simply open the default browser (still works).',
+  'set "BROWSER="',
+  'for %%P in (',
+  '  "%ProgramFiles(x86)%\\Microsoft\\Edge\\Application\\msedge.exe"',
+  '  "%ProgramFiles%\\Microsoft\\Edge\\Application\\msedge.exe"',
+  '  "%ProgramFiles%\\Google\\Chrome\\Application\\chrome.exe"',
+  '  "%ProgramFiles(x86)%\\Google\\Chrome\\Application\\chrome.exe"',
+  ') do (',
+  '  if not defined BROWSER if exist %%P set "BROWSER=%%~P"',
+  ')',
   '',
   'echo.',
   'echo   ==================================================',
@@ -70,7 +82,7 @@ const START_BAT = [
   '  call :openbrowser',
   '  echo.',
   '  echo   已为你打开浏览器：http://127.0.0.1:!FOUNDPORT!',
-  '  timeout /t 3 >nul',
+  '  ping -n 4 127.0.0.1 >nul',
   '  exit /b 0',
   ')',
   'echo   [2/4] 未发现运行中的服务，准备启动',
@@ -88,7 +100,13 @@ const START_BAT = [
   'echo.',
   'set "CRM_ROOT=%ROOT%"',
   'set "CRM_PORT=%PORT%"',
-  'start "" "http://127.0.0.1:%PORT%/"',
+  '',
+  'if defined BROWSER (',
+  '  rem Give the server ~2.5s to bind, then open the app window (no address bar).',
+  '  start "" /min powershell -NoProfile -WindowStyle Hidden -Command "Start-Sleep -Milliseconds 2500; Start-Process -FilePath \'%BROWSER%\' -ArgumentList \'--app=http://127.0.0.1:%PORT%/\'"',
+  ') else (',
+  '  start "" "http://127.0.0.1:%PORT%/"',
+  ')',
   'echo   --------------------------------------------------',
   'echo    服务日志（关闭本窗口即停止服务）：',
   'echo   --------------------------------------------------',
@@ -96,7 +114,7 @@ const START_BAT = [
   '',
   'echo.',
   'echo   服务已停止。',
-  'timeout /t 5 >nul',
+  'ping -n 6 127.0.0.1 >nul',
   'exit /b 0',
   '',
   'rem ================= subroutines =================',
@@ -155,77 +173,13 @@ const START_BAT = [
   ')',
   'exit /b 0',
   '',
-  'rem Open the browser.',
+  'rem Open the app window (already-running branch uses the recorded port).',
   ':openbrowser',
-  'start "" "http://127.0.0.1:!FOUNDPORT!/"',
-  'exit /b 0',
-  ''
-].join('\r\n');
-
-/* ------------------------------------------------------------------ */
-/* 停止.bat                                                            */
-/* ------------------------------------------------------------------ */
-
-const STOP_BAT = [
-  '@echo off',
-  'chcp 65001 >nul',
-  'setlocal',
-  'title 客户管理系统 - 停止服务',
-  '',
-  'cd /d "%~dp0"',
-  'set "RUNFILE=%~dp0data\\.run.json"',
-  '',
-  'echo.',
-  'echo   正在停止 客户管理系统 服务...',
-  'echo.',
-  '',
-  'if not exist "%RUNFILE%" (',
-  '  echo   未找到运行记录，服务可能已经停止。',
-  '  echo.',
-  '  pause',
-  '  exit /b 0',
+  'if defined BROWSER (',
+  '  start "" "%BROWSER%" --app="http://127.0.0.1:!FOUNDPORT!/"',
+  ') else (',
+  '  start "" "http://127.0.0.1:!FOUNDPORT!/"',
   ')',
-  '',
-  'rem Prefer the local API for a graceful shutdown (flushes data first).',
-  'set "RUNPORT=8899"',
-  'for /f "usebackq tokens=2 delims=:," %%a in (`findstr /i "\\"port\\"" "%RUNFILE%"`) do set "RUNPORT=%%a"',
-  'set "RUNPORT=%RUNPORT: =%"',
-  'powershell -NoProfile -ExecutionPolicy Bypass -Command "try{Invoke-WebRequest -Uri (\'http://127.0.0.1:%RUNPORT%/api/shutdown\') -Method POST -UseBasicParsing -TimeoutSec 3 | Out-Null}catch{}" >nul 2>nul',
-  'timeout /t 2 >nul',
-  '',
-  'if not exist "%RUNFILE%" (',
-  '  echo   服务已优雅停止，数据已安全保存。',
-  '  echo.',
-  '  pause',
-  '  exit /b 0',
-  ')',
-  '',
-  'rem Fallback: kill the recorded process tree.',
-  'for /f "usebackq tokens=2 delims=:," %%a in (`findstr /i "\\"pid\\"" "%RUNFILE%"`) do set "PID=%%a"',
-  'set "PID=%PID: =%"',
-  'if not "%PID%"=="" (',
-  '  taskkill /PID %PID% /T /F >nul 2>nul',
-  '  if not errorlevel 1 echo   已结束进程 %PID%。',
-  ')',
-  'if exist "%RUNFILE%" del "%RUNFILE%" >nul 2>nul',
-  '',
-  'echo   服务已停止。',
-  'echo.',
-  'pause',
-  'exit /b 0',
-  ''
-].join('\r\n');
-
-/* ------------------------------------------------------------------ */
-/* 打开数据目录.bat                                                    */
-/* ------------------------------------------------------------------ */
-
-const OPEN_DATA_BAT = [
-  '@echo off',
-  'chcp 65001 >nul',
-  'cd /d "%~dp0"',
-  'if not exist "data" mkdir "data"',
-  'start "" explorer "%~dp0data"',
   'exit /b 0',
   ''
 ].join('\r\n');
@@ -242,7 +196,6 @@ function writeBat(name, content) {
   return file;
 }
 
+/* 1.25.4 起只保留一个启动器：双击 启动.bat（关闭窗口即停止服务） */
 writeBat('启动.bat', START_BAT);
-writeBat('停止.bat', STOP_BAT);
-writeBat('打开数据目录.bat', OPEN_DATA_BAT);
-console.log('\n完成。双击 启动.bat 即可运行。');
+console.log('\n完成。双击 启动.bat 即可运行；桌面快捷方式也指向它。');

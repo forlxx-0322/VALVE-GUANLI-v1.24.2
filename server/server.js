@@ -44,7 +44,7 @@ const RUN_FILE = path.join(DATA_DIR, '.run.json');
 /** 本软件的标识串 —— 用于单实例判定时确认"这是我们自己的服务" */
 const APP_SIGNATURE = 'crm-bjxt/1';
 /** 应用版本号：每次功能修改或 Bug 修复后递增，并在 CHANGELOG.md 归档 */
-const APP_VERSION = '1.25.3';
+const APP_VERSION = '1.25.4';
 /** 扫描端口的范围：服务端从 CRM_PORT 起向后扫描这么多端口（启动器不再预检端口） */
 const PORT_SCAN_RANGE = 11;
 
@@ -548,7 +548,7 @@ async function main() {
     console.log('  [提示] 服务已经在运行了，无需重复启动。');
     console.log(`         运行端口：${existing.port}    进程号：${existing.pid}`);
     console.log(`         访问地址：http://127.0.0.1:${existing.port}`);
-    console.log('         如需停止，请关闭原来的服务窗口，或双击「停止.bat」。');
+    console.log('         如需停止，请关闭原来的服务窗口。');
     console.log('');
     process.exit(0);
   }
@@ -736,7 +736,7 @@ async function main() {
     console.log(`  字典新增 : ${info.dictCount} 项`);
     console.log(`  Node     : ${process.version}`);
     console.log('  ----------------------------------------');
-    console.log('  关闭本窗口即停止服务；也可双击 停止.bat');
+    console.log('  关闭本窗口即停止服务');
     console.log('');
   });
 

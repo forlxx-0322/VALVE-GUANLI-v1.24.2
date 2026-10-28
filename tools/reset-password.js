@@ -12,7 +12,7 @@
  *   并写一条审计（entity_type='auth'，action='password_change'）。
  *
  * 用法：
- *   1. 先关闭服务窗口（或双击 停止.bat），确保数据库没有被占用
+ *   1. 先关闭服务窗口（关掉黑色窗口即停服务），确保数据库没有被占用
  *   2. 在本项目目录执行：node tools/reset-password.js
  *   3. 重新双击 启动.bat
  *

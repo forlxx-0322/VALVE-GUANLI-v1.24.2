@@ -10,6 +10,18 @@ if "%ROOT:~-1%"=="\" set "ROOT=%ROOT:~0,-1%"
 set "PORT=8899"
 set "MAXPORT=8910"
 
+rem Find a Chromium browser once (used by both branches below).
+rem If none is found we simply open the default browser (still works).
+set "BROWSER="
+for %%P in (
+  "%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe"
+  "%ProgramFiles%\Microsoft\Edge\Application\msedge.exe"
+  "%ProgramFiles%\Google\Chrome\Application\chrome.exe"
+  "%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"
+) do (
+  if not defined BROWSER if exist %%P set "BROWSER=%%~P"
+)
+
 echo.
 echo   ==================================================
 echo      客户管理系统  ·  本地服务启动器
@@ -46,7 +58,7 @@ if "!RUNNING!"=="1" (
   call :openbrowser
   echo.
   echo   已为你打开浏览器：http://127.0.0.1:!FOUNDPORT!
-  timeout /t 3 >nul
+  ping -n 4 127.0.0.1 >nul
   exit /b 0
 )
 echo   [2/4] 未发现运行中的服务，准备启动
@@ -64,7 +76,13 @@ echo   [4/4] 正在启动服务...
 echo.
 set "CRM_ROOT=%ROOT%"
 set "CRM_PORT=%PORT%"
-start "" "http://127.0.0.1:%PORT%/"
+
+if defined BROWSER (
+  rem Give the server ~2.5s to bind, then open the app window (no address bar).
+  start "" /min powershell -NoProfile -WindowStyle Hidden -Command "Start-Sleep -Milliseconds 2500; Start-Process -FilePath '%BROWSER%' -ArgumentList '--app=http://127.0.0.1:%PORT%/'"
+) else (
+  start "" "http://127.0.0.1:%PORT%/"
+)
 echo   --------------------------------------------------
 echo    服务日志（关闭本窗口即停止服务）：
 echo   --------------------------------------------------
@@ -72,7 +90,7 @@ node "%ROOT%\server\server.js"
 
 echo.
 echo   服务已停止。
-timeout /t 5 >nul
+ping -n 6 127.0.0.1 >nul
 exit /b 0
 
 rem ================= subroutines =================
@@ -131,7 +149,11 @@ if exist "%TEMP%\crm_probe_%1.txt" (
 )
 exit /b 0
 
-rem Open the browser.
+rem Open the app window (already-running branch uses the recorded port).
 :openbrowser
-start "" "http://127.0.0.1:!FOUNDPORT!/"
+if defined BROWSER (
+  start "" "%BROWSER%" --app="http://127.0.0.1:!FOUNDPORT!/"
+) else (
+  start "" "http://127.0.0.1:!FOUNDPORT!/"
+)
 exit /b 0

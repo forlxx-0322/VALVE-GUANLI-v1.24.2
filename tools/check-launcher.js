@@ -59,7 +59,7 @@ console.log('');
 
 /* ---------- 3. bat 文件静态检查 ---------- */
 console.log('3) bat 文件静态检查');
-for (const name of ['启动.bat', '停止.bat', '打开数据目录.bat']) {
+for (const name of ['启动.bat']) {
   const buf = fs.readFileSync(path.join(ROOT, name));
   const text = buf.toString('utf8');
   const lines = text.split(/\r\n/);
