@@ -386,7 +386,7 @@ window.CRM = window.CRM || {};
                 <button class="btn btn-sm" @click="tab = 'project'">查看明细</button>
               </div>
               <div class="card-body">
-                <div class="stat-grid" style="grid-template-columns:repeat(auto-fit,minmax(140px,1fr))">
+                <div class="stat-grid fin-grid">
                   <div class="stat" v-for="c in financeCards" :key="c.key">
                     <div class="n" :style="c.danger ? 'color:var(--c-danger)' :
                          (c.signed ? (c.value < 0 ? 'color:var(--c-danger)' : 'color:var(--c-success)') : '')">
@@ -397,7 +397,7 @@ window.CRM = window.CRM || {};
                   </div>
                   <div class="stat">
                     <div class="n">{{ fmtMoney(finance ? finance.expected_profit : 0) }}</div>
-                    <div class="l">预计毛利（合同额−采购成本）</div>
+                    <div class="l" title="合同额 − 采购成本">预计毛利</div>
                   </div>
                 </div>
               </div>

@@ -252,8 +252,8 @@ window.CRM = window.CRM || {};
                   <span :style="t.is_overdue === 1 && t.status !== '已完成' ? 'color:var(--c-danger);font-weight:600' : ''">
                     {{ dueText(t) }}
                   </span>
-                  <span class="tag" :class="prioClass(t.priority)" style="font-size:10px">{{ t.priority }}</span>
-                  <span class="tag muted" style="font-size:10px">{{ t.source }}</span>
+                  <span class="tag" :class="prioClass(t.priority)" style="font-size:11px">{{ t.priority }}</span>
+                  <span class="tag muted" style="font-size:11px">{{ t.source }}</span>
                   <a v-if="t.customer_id" href="javascript:;" @click="goCustomer(t)">
                     客户：{{ t.customer_short || t.customer_name }}
                   </a>

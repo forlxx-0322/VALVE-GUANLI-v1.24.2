@@ -12,6 +12,7 @@ const crm = require('../services/crm');
 const dashboard = require('../services/dashboard');
 const backup = require('../services/backup');
 const excel = require('../services/excel');
+const auth = require('../services/auth');
 const { now } = require('../db');
 
 module.exports = async function systemRoutes(ctx) {
@@ -35,6 +36,8 @@ module.exports = async function systemRoutes(ctx) {
       const settings = {};
       const meta = {};
       for (const r of rows) {
+        /* 1.25：密码哈希 / 会话密钥 / 锁定状态 / TOTP 预留一律不回传前端 */
+        if (auth.SECRET_SETTINGS.includes(r.key)) continue;
         settings[r.key] = r.value;
         meta[r.key] = r.remark;
       }
@@ -42,6 +45,17 @@ module.exports = async function systemRoutes(ctx) {
     }
     if (method === 'PUT' || method === 'POST') {
       const payload = body || {};
+
+      /* 1.25：登录相关字段的校验（密码只能走 /api/auth/password；
+         切局域网/异地访问前必须已设密码；白名单/监听范围/用户名合法性） */
+      const prep = auth.prepareSettingsUpdate(db, payload);
+      if (prep.reject) {
+        return fail(prep.reject.status, prep.reject.code, prep.reject.message);
+      }
+      const patch = prep.patch || {};
+      /* 审计里要记「从哪一档改到哪一档」，必须在写库前取旧值 */
+      const modeBefore = auth.normalizeListenMode(auth.readSettings(db).listen_mode);
+
       const ts = now();
       const allowed = new Set(
         db.prepare('SELECT key FROM settings').all().map((r) => r.key)
@@ -49,7 +63,7 @@ module.exports = async function systemRoutes(ctx) {
       const updated = [];
       db.exec('BEGIN');
       try {
-        for (const [k, v] of Object.entries(payload)) {
+        for (const [k, v] of Object.entries(patch)) {
           if (!allowed.has(k)) continue;   // 只允许改已知键，防止写入垃圾数据
           db.prepare('UPDATE settings SET value = ?, updated_at = ? WHERE key = ?')
             .run(String(v === null || v === undefined ? '' : v), ts, k);
@@ -64,7 +78,21 @@ module.exports = async function systemRoutes(ctx) {
         try { db.exec('ROLLBACK'); } catch (_) { /* 忽略 */ }
         throw e;
       }
-      return ok({ updated });
+
+      /* 监听范围变更单独审计（含来源 IP / UA，重启后才生效） */
+      if (prep.listenChanged) {
+        const ip = auth.clientIp(ctx.req);
+        const ua = auth.userAgent(ctx.req);
+        auth.audit(db, 'listen_mode',
+          `监听范围变更：${auth.listenModeLabel(modeBefore)} → ${auth.listenModeLabel(patch.listen_mode)}（重启后生效，操作来自 ${ip}）`,
+          { ip, ua, from: modeBefore, to: patch.listen_mode, restart_required: true });
+      }
+
+      return ok({
+        updated,
+        restart_required: !!prep.restartRequired,
+        warning: prep.warning || ''
+      });
     }
     return fail(404, 'API_NOT_FOUND', '接口不存在：' + pathname);
   }

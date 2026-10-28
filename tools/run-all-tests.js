@@ -158,6 +158,8 @@ const SUITES = [
   ['客户精简专项（1.23）', 'tools/test-customer-123.js'],
   /* 1.24：产品分类模块（分类树 / 产品价目表 / 折后价 / 导出 / 审计） */
   ['产品分类专项（1.24）', 'tools/test-products-124.js'],
+  /* 1.25：登录与异地访问（自带隔离实例，不依赖 8899 / 8955 的共享服务） */
+  ['登录与异地访问专项（1.25）', 'tools/test-auth-125.js'],
   ['阶段四 · 接口', 'tools/test-phase4-api.js'],
   ['阶段四 · 界面交互', 'tools/test-phase4-ui-interaction.js'],
   ['阶段五 · 接口', 'tools/test-phase5-api.js'],

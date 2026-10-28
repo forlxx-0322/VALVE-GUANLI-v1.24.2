@@ -33,7 +33,11 @@ window.CRM = window.CRM || {};
     trash: 'M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13M10 11.5v6M14 11.5v6',
     book: 'M4 5.5A2.5 2.5 0 0 1 6.5 3H20v14.5H6.5A2.5 2.5 0 0 0 4 20V5.5ZM4 20a2.5 2.5 0 0 1 2.5-2.5H20V21H6.5A2.5 2.5 0 0 1 4 20Z',
     sun: 'M12 17a5 5 0 1 0 0-10 5 5 0 0 0 0 10ZM12 1v2M12 21v2M4.2 4.2l1.4 1.4M18.4 18.4l1.4 1.4M1 12h2M21 12h2M4.2 19.8l1.4-1.4M18.4 5.6l1.4-1.4',
-    moon: 'M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z'
+    moon: 'M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z',
+    /* 1.25 登录与异地访问 */
+    lock: 'M6 10.5h12a1 1 0 0 1 1 1V20a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1v-8.5a1 1 0 0 1 1-1ZM8.5 10.5V7a3.5 3.5 0 1 1 7 0v3.5M12 14.5v2.5',
+    globe: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18ZM3.4 9h17.2M3.4 15h17.2M12 3c2.4 2.4 3.6 5.4 3.6 9s-1.2 6.6-3.6 9c-2.4-2.4-3.6-5.4-3.6-9S9.6 5.4 12 3Z',
+    shield: 'M12 3 4.5 6v5.4c0 4.4 3.1 8.4 7.5 9.6 4.4-1.2 7.5-5.2 7.5-9.6V6L12 3ZM8.8 12.2l2.2 2.2 4.2-4.4'
   };
 
   /** 通用图标组件：<c-icon name="home" /> */
@@ -131,7 +135,20 @@ window.CRM = window.CRM || {};
       subtitle: String
     },
     setup() {
-      return { theme: CRM.theme.state, themeApi: CRM.theme };
+      return {
+        theme: CRM.theme.state,
+        themeApi: CRM.theme,
+        auth: CRM.auth.state
+      };
+    },
+    methods: {
+      /* 1.25：只在启用登录时显示「退出登录」 */
+      async doLogout() {
+        try {
+          await CRM.auth.logout();
+        } catch (_) { /* 会话本来就失效了也照样去登录页 */ }
+        window.location.replace('/login.html');
+      }
     },
     template: `
       <header class="topbar">
@@ -146,6 +163,14 @@ window.CRM = window.CRM || {};
           <span class="kbd" style="margin-left:auto">Ctrl K</span>
         </div>
         <c-reminder-bell />
+        <div v-if="auth.enabled" class="auth-box">
+          <span class="auth-user" :title="'当前登录：' + (auth.username || 'admin')">
+            {{ auth.username || 'admin' }}
+          </span>
+          <button class="btn btn-sm" type="button" title="退出登录，回到登录页" @click="doLogout">
+            退出登录
+          </button>
+        </div>
         <button class="icon-btn theme-toggle" type="button"
                 :title="theme.mode === 'dark' ? '切换到浅色主题' : '切换到深色主题'"
                 :aria-label="theme.mode === 'dark' ? '切换到浅色主题' : '切换到深色主题'"

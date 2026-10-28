@@ -24,6 +24,8 @@ const systemRoutes = require('./routes/system');
 const attachmentRoutes = require('./routes/attachment');
 const statsRoutes = require('./routes/stats');
 const remindersRoutes = require('./routes/reminders');
+const authRoutes = require('./routes/auth');
+const authService = require('./services/auth');
 const backupService = require('./services/backup');
 
 /* ------------------------------------------------------------------ */
@@ -42,7 +44,7 @@ const RUN_FILE = path.join(DATA_DIR, '.run.json');
 /** 本软件的标识串 —— 用于单实例判定时确认"这是我们自己的服务" */
 const APP_SIGNATURE = 'crm-bjxt/1';
 /** 应用版本号：每次功能修改或 Bug 修复后递增，并在 CHANGELOG.md 归档 */
-const APP_VERSION = '1.24.2';
+const APP_VERSION = '1.25';
 /** 扫描端口的范围：服务端从 CRM_PORT 起向后扫描这么多端口（启动器不再预检端口） */
 const PORT_SCAN_RANGE = 11;
 
@@ -340,6 +342,19 @@ function buildRouter(ctx) {
     /* ---------- API ---------- */
     if (pathname.startsWith('/api/')) {
 
+      /* ------------------------------------------------------------------
+       * 1.25 鉴权中间件
+       *   · 静态文件一律不拦（否则登录页都加载不出来）
+       *   · /api/health、/api/auth/login、/api/auth/status、/api/auth/logout 放行
+       *     （logout 永远允许，这样会话失效时也能把浏览器里的 Cookie 清掉）
+       *   · auth_enabled=1 时，其余 /api/* 必须带有效会话，否则 401 JSON
+       *   · IP 白名单（auth_ip_allow 非空）对所有 /api/* 生效（health 除外），
+       *     不在名单内直接 403，且不区分密码对错，避免借此判断密码
+       * ------------------------------------------------------------------ */
+      if (!ctx.db) return fail(res, 503, 'SERVICE_RESTARTING', '服务正在重启，请稍候…');
+      const gate = authService.guard(ctx.db, req, pathname);
+      if (gate) return fail(res, gate.status, gate.code, gate.message);
+
       if (pathname === '/api/health' && (method === 'GET' || method === 'HEAD')) {
         return ok(res, {
           app: APP_SIGNATURE,
@@ -347,6 +362,8 @@ function buildRouter(ctx) {
           version: APP_VERSION,
           pid: process.pid,
           port: ctx.port,
+          listenMode: ctx.listenMode || 'local',
+          bindAddress: ctx.bindAddress || '127.0.0.1',
           uptimeSec: Math.floor((Date.now() - startedAt) / 1000),
           time: new Date().toISOString()
         });
@@ -373,7 +390,7 @@ function buildRouter(ctx) {
           dictCategories: dictStats.length,
           dictItems: dictStats.reduce((s, r) => s + r.n, 0),
           dictStat: dictStats,
-          settings,
+          settings: authService.publicSettings(settings),
           node: process.version,
           platform: `${process.platform} ${process.arch}`,
           startedAt: new Date(startedAt).toISOString(),
@@ -431,6 +448,9 @@ function buildRouter(ctx) {
           dataDir: DATA_DIR
         },
         getSettings: () => getSettings(ctx.db),
+        /* 1.25：登录与监听范围（路由里查状态 / 校验改密用） */
+        bindAddress: ctx.bindAddress || '127.0.0.1',
+        listenMode: ctx.listenMode || 'local',
         /* 阶段五：附件需要的上下文 */
         attachDir: ATTACH_DIR,
         maxMb: Number(getSettings(ctx.db).attachment_max_mb) || 50,
@@ -451,7 +471,7 @@ function buildRouter(ctx) {
       };
 
       /* 依次尝试各模块路由，返回 null 表示未命中 */
-      const handlers = [crmRoutes, pmRoutes, productRoutes, systemRoutes,
+      const handlers = [authRoutes, crmRoutes, pmRoutes, productRoutes, systemRoutes,
         attachmentRoutes, statsRoutes, remindersRoutes];
       for (const handler of handlers) {
         const handled = await handler(routeCtx);
@@ -603,6 +623,25 @@ async function main() {
 
   /* 每日自动备份：当天没备份过就备一次（不阻塞启动） */
   const settings = getSettings(ctx.db);
+
+  /* ------------------------------------------------------------------ */
+  /* 1.25：监听范围                                                      */
+  /*   local → 127.0.0.1（默认，其他设备完全连不上）                      */
+  /*   lan / all → 0.0.0.0（局域网 / 异地可访问，必须先设登录密码）        */
+  /*   安全网：库里被直接改成非 local 但没密码时，强制退回本机监听。        */
+  /* ------------------------------------------------------------------ */
+  let listenMode = authService.normalizeListenMode(settings.listen_mode);
+  if (listenMode !== 'local' && !authService.hasPassword(settings)) {
+    console.warn('');
+    console.warn('  [安全] 设置里要求对外开放访问（listen_mode=' + listenMode + '），');
+    console.warn('         但还没有设置登录密码。为避免客户资料裸奔，已强制退回「仅本机」。');
+    console.warn('         请在「设置 → 登录与异地访问」里设置密码后再切换监听范围。');
+    listenMode = 'local';
+  }
+  const bindAddress = authService.bindAddressOf(listenMode);
+  ctx.listenMode = listenMode;
+  ctx.bindAddress = bindAddress;
+
   backupService.autoBackupOnStart({
     db: ctx.db,
     dbFile: DB_FILE,
@@ -658,13 +697,15 @@ async function main() {
     process.exit(1);
   });
 
-  ctx.server.listen(port, '127.0.0.1', () => {
+  ctx.server.listen(port, bindAddress, () => {
     ctx.port = port;
     writeRunFile({
       pid: process.pid,
       port,
       app: APP_SIGNATURE,
       version: APP_VERSION,
+      listenMode,
+      bindAddress,
       startedAt: new Date().toISOString()
     });
 
@@ -673,6 +714,19 @@ async function main() {
     console.log('  客户管理系统 · 服务已启动');
     console.log('  ----------------------------------------');
     console.log(`  访问地址 : ${url}`);
+    console.log(`  监听范围 : ${authService.listenModeLabel(listenMode)}（${bindAddress}:${port}）`);
+    if (listenMode === 'local') {
+      console.log('           其他设备无法访问（默认设置，最安全）');
+    } else {
+      console.log('  ⚠ 已开放局域网 / 异地访问：');
+      console.log('     · 请确认登录已启用、密码足够复杂，并妥善保管；');
+      console.log('     · 建议只通过 Tailscale 等虚拟内网访问，不要直接把端口暴露到公网；');
+      console.log('     · 可用「IP 白名单」把来源限制在可信网段（例如 100.64.0.0/10）。');
+      if (settings.auth_enabled !== '1') {
+        console.log('  ⚠⚠ 当前【未启用登录】：任何能连上本机的人都能读写全部客户资料！');
+      }
+    }
+    console.log(`  登录状态 : ${settings.auth_enabled === '1' ? '已启用（' + (settings.auth_user || 'admin') + '）' : '未启用（默认）'}`);
     console.log(`  数据目录 : ${DATA_DIR}`);
     console.log(`  数据库   : ${DB_FILE}`);
     console.log(`  数据表   : ${info.tables} 张`);

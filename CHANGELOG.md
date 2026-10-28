@@ -8,6 +8,168 @@
 
 ---
 
+## [1.25] — 2026-10-28
+
+本次归档：**登录 + 异地访问**（可选、默认关闭）+ **全站联动测试与视觉统一**。
+数据库结构 **v13 → v14**（17 张表不变；v14 只做一次数据修正，无新表 / 无新列），
+默认行为与 1.24 完全一致：**不启用登录、只监听 `127.0.0.1`**。
+
+### 一、为什么做
+
+1.24 的现状是"服务只监听 `127.0.0.1`、没有任何登录"：手机和异地完全连不上。
+一旦为了异地访问把监听改成 `0.0.0.0`，等于把客户库裸奔在局域网 / 公网。
+
+所以按 `docs/方案/登录与异地访问_实施规格.md` 补一层**可选**能力：
+**登录 + 监听范围 + 隧道**三件套，缺一不可；不引入云数据库，数据仍在 `data/crm.db`。
+
+### 二、安全模型（实测项）
+
+| 边界 | 实现 |
+|---|---|
+| 密码 | `node:crypto` 的 scrypt：salt 16 字节随机、N=16384 r=8 p=1、keylen=64；存 `scrypt$N$r$p$<saltHex>$<hashHex>`；校验用 `timingSafeEqual`；明文不落库、不回传、不写日志 |
+| 会话 | 手写 `crm_session` Cookie，值 = `<base64url(payload)>.<hmacSHA256 hex>`，payload `{u, exp}`；`HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000`（30 天） |
+| 会话密钥 | `auth_session_secret`（32 字节 hex），首次启用登录时生成并持久化；重启不掉线；改密 / 改用户名后轮换 |
+| 防爆破 | `auth_fail_state` 按 IP 存 JSON；同一 IP 连续 **5 次**失败锁 **15 分钟**；锁定期间**正确密码也返回 423**；登录成功清零 |
+| IP 白名单 | `auth_ip_allow`，逗号分隔 IP / CIDR（IPv4 与 IPv6，支持 `100.64.0.0/10`），空 = 不限制；名单外 `/api/*` 一律 **403**，且正确/错误密码响应完全一致（不泄漏密码对错） |
+| 改密 | 需已登录 + 旧密码；新密码 ≥ 6 位；成功后**轮换会话密钥 → 所有旧会话立即失效** |
+| 审计 | `activity_logs`，`entity_type='auth'`，action = `login` / `login_failed` / `logout` / `password_change` / `listen_mode`；摘要含 IP 与结果，detail 记录 IP / UA / 结果；**绝不写密码、哈希、密钥、Cookie** |
+| 默认安全 | 未启用登录时 `/api/*` 全部放行（与 1.24 一致）；启用后除 `/api/health`、`/api/auth/login`、`/api/auth/status`、`/api/auth/logout` 外全部要有效会话，否则 401 JSON；**静态文件不拦**（登录页要能加载） |
+
+> **无状态会话的取舍**：不建会话表，退出登录只清本机 Cookie（审计照写）。
+> 要让所有设备立即掉线，请改密码（会换密钥）。这是为了"不新增表 + 30 天免登录"。
+
+### 三、设置项（8 个，默认值）
+
+| key | 默认 | 说明 |
+|---|---|---|
+| `auth_enabled` | `0` | 是否启用登录 |
+| `auth_user` | `admin` | 登录用户名 |
+| `auth_pass_hash` | 空 | scrypt 哈希（**只写不回传**） |
+| `auth_session_secret` | 空 | 会话签名密钥（32 字节 hex） |
+| `auth_fail_state` | `{}` | 防爆破状态（按 IP：`{"1.2.3.4":{"n":5,"until":<epoch秒>}}`） |
+| `auth_ip_allow` | 空 | IP / CIDR 白名单，空 = 不限制 |
+| `listen_mode` | `local` | `local` / `lan` / `all` |
+| `auth_totp_secret` | 空 | 预留（本版不做 TOTP） |
+
+老库启动时由 `seedSettings` 自动补齐，**不触发迁移**。
+
+### 四、接口
+
+| 接口 | 说明 |
+|---|---|
+| `GET /api/auth/status` | `auth_enabled` / `logged_in` / `username` / `has_password` / `listen_mode` / `bind_address` / `can_remote` / `restart_required` / `last_login{ip,at,ua}` / `lock{locked,remaining_sec,until}`；不含哈希与密钥 |
+| `POST /api/auth/login` | `{username,password}` → 成功下发 Cookie；失败 401 并累计；第 5 次与锁定期间 423 |
+| `POST /api/auth/logout` | 清 Cookie + 审计 |
+| `POST /api/auth/password` | 无密码时只接受本机请求（首次设置）；已有密码时必须已登录 + `{old_password,new_password}`；成功返回 `relogin:true` |
+| `PUT /api/settings` | 允许写 `auth_enabled` / `auth_user` / `listen_mode` / `auth_ip_allow`；**拒绝**写哈希、密钥、失败状态、TOTP；切非 local 或启用登录前必须已设密码（否则 400 `NO_PASSWORD`）；监听范围变更返回 `restart_required:true` 并单独审计 |
+| 中间件 | `auth_enabled=1` 时除上述豁免外全部校验会话；IP 白名单先于会话校验 |
+
+> `GET /api/settings`、`GET /api/status`、`GET /api/auth/status` 均**过滤敏感设置项**，
+> 页面上看不到哈希 / 密钥 / 锁定 JSON。
+
+### 五、监听范围与启动日志
+
+- `listen_mode=local` → `server.listen(port, '127.0.0.1')`（默认）
+- `listen_mode=lan` / `all` → `server.listen(port, '0.0.0.0')`
+- 切非 local 前必须已设密码；启动时若发现"库里是非 local 但没密码"，**强制退回本机**并打印警告
+- 启动日志打印：访问地址、监听范围与绑定地址、"其他设备无法访问（默认）"或醒目的开放风险提示、
+  登录状态、数据目录 / 数据库 / 表数 / 结构版本；非 local 且未启用登录时额外打 `⚠⚠` 警告
+- `.run.json` 与 `/api/health` 带上 `listenMode` / `bindAddress`，便于启动器与排查
+
+### 六、界面
+
+- **登录页** `web/login.html` + `web/js/login.js` + `web/css/login.css`：完全自包含、无外链；
+  显示用户名 / 密码 / 错误提示 / 锁定倒计时 / IP 白名单 403 原因；成功 `location.replace('/index.html')`
+- **首页启动**：`app.js` 先 `GET /api/auth/status`，启用且未登录 → 跳登录页；登录页自身不会再跳，避免循环
+- **顶栏**：仅在启用登录时显示「当前用户 + 退出登录」
+- **设置页**新增「**登录与异地访问**」标签：
+  - 当前状态（登录 / 监听范围 / 实际绑定 / 最近登录 IP 与时间 / 锁定剩余 / 重启后生效提示）
+  - 启用登录开关、登录用户名、设置 / 修改密码（改密后提示重新登录）
+  - 监听范围三档（切换前确认 + 提示必须重启）
+  - IP 白名单（保存前二次确认，避免把自己挡在外面）
+  - **Tailscale / Cloudflare Tunnel / 公网 IPv6** 三套免费方案，各 ≤5 步，注明
+    "Tailscale 免费版 6 个用户、设备不限"、"数据仍在本机"
+- **`api.js`**：auth 系列方法 + 全局 `CRM.auth` 响应式状态；受保护接口返回 401 时统一跳登录页
+  （登录 / 改密 / 退出三个表单接口的 401 交给调用方提示，不跳转）
+- 新增 3 个图标（lock / globe / shield），顶栏登录信息样式追加到 `app.css`（未改 vendor）
+
+### 七、忘记密码
+
+`tools/reset-password.js`（本机执行，**不开任何网络后门**）：
+清空 `auth_pass_hash`、`auth_enabled=0`、作废 `auth_session_secret`、清空 `auth_fail_state`，
+并写一条 `password_change` 审计；README / 登录页 / 设置面板都写明了用法。
+
+### 八、联动测试与修复（1.25 追加）
+
+1.25 上线前做了一轮**跨模块联动测试**（隔离实例 + 真实流程），发现并修掉一个"数据进去了但哪儿都看不到"的坑：
+
+| 问题 | 现象 | 根因 | 修复 |
+|---|---|---|---|
+| 待办状态不校验 | 通过接口或导入写入 `status='待处理'` 的待办，在待办中心、首页「今日待办」、项目待办计数里**全部消失** | 所有视图与统计只认 `status='待办'`，接口却把任意字符串原样入库 | ① `saveTask` 归一化 + 校验（待处理/未完成/进行中 → 待办，完成 → 已完成，取消 → 已取消；其它值 400）② 迁移 **v14** 把历史脏状态一次性改正（本次真实库修正 4 条）③ 优先级同样校验（高/中/低） |
+
+联动覆盖（临时目录独立实例，33 项断言全过）：
+
+默认无登录可直接用 → 首设密码 → 开启登录 → 未登录 401 → 错误密码计数 → **连错 5 次锁定 423、锁定期间正确密码也 423**
+→ 登录拿 Cookie → 带 Cookie 建客户 / 1:1 项目档案 / 实收 / 采购成本 → **财务汇总毛利 = 已收 − 成本**
+→ 产品分类必填校验 → 首页 v2 统计口径一致 → 监听范围切 lan（`restart_required`）→ IP 白名单 403、health 豁免、本机改库恢复
+→ 审计含登录/失败/改密/监听且**不含密码** → 退出清 Cookie（旧 Cookie 重放属无状态会话的已知取舍）。
+
+> 说明：无状态签名会话下，"退出"只能清浏览器 Cookie，已复制的旧 Cookie 仍然有效；
+> 要让所有设备立即失效请**改密码**（会轮换密钥）。这一点已写进设置页提示与 README。
+
+### 九、界面优化（简约有格调）
+
+全站做了一轮视觉收敛，**不改结构、不改类名**，只统一令牌与组件细节：
+
+- **配色与层次**：背景改中性灰白、边框更淡、阴影减到"几乎看不见"；主色仍是一个蓝，功能色只用于状态
+- **指标卡**：去掉彩色顶条，靠 24px 数字 + 12px 标签拉开层次；hover 才轻微上浮
+- **表格**：表头 12px 灰字 + 浅底、行高与内边距统一、数字右对齐等宽、hover 淡灰；**行内「删除」从整块红按钮改为红色文字按钮**（危险动作不再满屏红）
+- **逾期行**：从整行粉底改为"极浅底色 + 左侧 2px 标记 + 日期红字"
+- **标签**：从描边改为**软底色**（11.5px），一行里多个标签不再互相打架
+- **按钮 / 输入**：统一 32px 高、8px 圆角、focus 光圈；分页、抽屉、弹窗的圆角与内边距同步
+- **侧栏**：深色底 + 半透明选中态 + 左侧细高亮条，分组标题字距拉开
+- **登录页**：居中卡片 + 极淡径向渐变底，自包含无外链
+- **首页**：回访提醒与收入报表各按内容高度（不再被拉齐留大白块）；回访副标题改为"逾期 X · 今天 Y · 未来 3 天 Z"；最近动态限高滚动；收入小卡改为「收入合计 / 成本合计 / 利润合计」
+- **客户详情**：财务汇总 9 格一行排开（预计毛利不再单独掉到第二行），文字过长省略号
+
+### 十、测试
+
+
+- 新增 `tools/test-auth-125.js`（**66 项断言**）：**自带隔离实例**——
+  `fs.mkdtempSync` 临时目录 + 只复制后端与登录页所需静态文件 + `CRM_ROOT=<tmp>` +
+  `CRM_PORT=8898` + spawn `node server/server.js`，等 health 就绪后开跑，结束 kill 进程并删临时目录；
+  若 8898 端口段已有其他本软件实例（如使用者的 8899），自动换 8908/8918，**不依赖 8899 / 8955**
+- 覆盖：默认无需登录 / 只听本机；8 项设置默认值；未设密码切 lan/all 与启用登录被 400；
+  拒绝写敏感设置；scrypt 格式与明文不落库；启用登录与密钥生成；未登录 401（读/写/设置）；
+  登录 Set-Cookie 属性与 payload；错误密码计数；连错 5 次 423、锁定期间正确密码仍 423；
+  退出后 401；改密旧 Cookie / 旧密码全部失效、密钥轮换；IP 白名单 403 且不泄漏密码对错；
+  监听范围落库与 `restart_required`；审计五类动作与脱敏；`reset-password.js` 生效
+- 既有套件只改 1 处：`tools/test-products-124.js` 的版本断言由「= 1.24.x」改为「≥ 1.24」
+- 全量回归：**28 个套件 / 805 项断言全部通过**（沙箱空库起跑，真实 `data/` 未读写）
+- 另有 1.25 联动测试脚本（临时实例、33 项，未计入套件）：登录开启后的全链路 + 跨模块数据一致性
+
+### 十一、兼容性与回退
+
+- 老库升级：补 8 个设置项（默认关闭）+ 迁移 **v14** 修正历史待办状态；客户 / 项目 / 回款 / 成本 / 字典 / 产品一条不动，
+  迁移前自动整库备份（当前真实库实测：v13 → v14，修正 4 条待办状态）
+- 关闭登录：设置页关掉开关即回到 1.24 的"打开即用"，监听范围需再改回「仅本机」并重启
+- 回退到 1.24：代码回退即可；多出的 8 个设置项 1.24 不读取，不影响运行
+- 忘记密码：`node tools/reset-password.js`（本机、停止服务后执行）
+- 安全边界：不做云同步 / 多租户 / 无密码监听 `0.0.0.0`；不把密码写入日志；未做 TOTP（仅预留）
+
+### 十二、影响文件
+
+`server/services/auth.js`（新）、`server/routes/auth.js`（新）、`server/server.js`、
+`server/db.js`、`server/routes/system.js`、`web/login.html`（新）、`web/css/login.css`（新）、
+`web/js/login.js`（新）、`web/js/settings-auth.js`（新）、`web/index.html`、`web/js/app.js`、
+`web/js/api.js`、`web/js/components.js`、`web/js/pages/settings.js`、`web/css/app.css`、
+`tools/test-auth-125.js`（新）、`tools/reset-password.js`（新）、`tools/run-all-tests.js`、
+`tools/test-products-124.js`、`README.md`、`CHANGELOG.md`、`docs/README.md`、
+`docs/方案/登录与异地访问_实施规格.md`、`docs/方案/客户管理系统_实施方案.md`、
+`docs/方案/精简版改造_技术方案_1.22-1.25.md`、`docs/方案/后续功能_技术方案.md`
+
+---
+
 ## [1.24.2] — 2026-10-27
 
 本次归档：**产品分类从"一级 + 二级"扩为三级**（一级＝阀门大类 / 二级＝按结构 / 三级＝按连接或法兰安装方式），

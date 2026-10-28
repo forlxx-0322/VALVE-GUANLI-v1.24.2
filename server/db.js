@@ -16,7 +16,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
 
-const SCHEMA_VERSION = 13;
+const SCHEMA_VERSION = 14;
 
 /* ------------------------------------------------------------------ */
 /* 17 张表结构                                                          */
@@ -1265,6 +1265,24 @@ const MIGRATIONS = [
       parts.push(`当前存活分类 ${total} 个`);
       return parts.join('、');
     }
+  },
+
+  /* v13 → v14：待办状态归一
+   * 1.25 之前接口不校验 status，传「待处理」也能写库；而所有视图与首页统计只认「待办」，
+   * 这类待办会彻底消失（列表、今日待办、项目计数都看不到）。这里把历史脏状态改成标准值。 */
+  {
+    version: 14,
+    note: '待办状态归一（待处理/未完成/进行中 → 待办），修正状态不合法导致待办不可见',
+    run(db) {
+      const rows = db.prepare(`SELECT id, status FROM tasks
+        WHERE status IS NULL OR status NOT IN ('待办', '已完成', '已取消')`).all();
+      if (!rows.length) return '没有需要修正的待办状态';
+      const alias = { 待处理: '待办', 未完成: '待办', 进行中: '待办', 完成: '已完成', 取消: '已取消' };
+      const upd = db.prepare('UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?');
+      const ts = now();
+      for (const r of rows) upd.run(alias[String(r.status || '').trim()] || '待办', ts, r.id);
+      return `修正待办状态 ${rows.length} 条`;
+    }
   }
 ];
 
@@ -1395,7 +1413,17 @@ const SETTINGS_SEED = [
   ['backup_keep', '30', '主备份保留份数'],
   ['backup_mirror_keep', '7', '镜像备份保留份数'],
   ['backup_auto', '1', '是否启用每日自动备份'],
-  ['attachment_max_mb', '50', '单个附件大小上限(MB)']
+  ['attachment_max_mb', '50', '单个附件大小上限(MB)'],
+
+  /* 1.25 登录与异地访问（默认关闭；不改表结构，全部走设置项） */
+  ['auth_enabled', '0', '是否启用登录（默认关闭）'],
+  ['auth_user', 'admin', '登录用户名'],
+  ['auth_pass_hash', '', '登录密码 scrypt 哈希（只写不回传）'],
+  ['auth_session_secret', '', '会话签名密钥（32 字节 hex，首次启用时生成）'],
+  ['auth_fail_state', '{}', '防爆破状态（按 IP 记失败次数与锁定时间）'],
+  ['auth_ip_allow', '', 'IP / CIDR 白名单（逗号分隔，空=不限制）'],
+  ['listen_mode', 'local', '监听范围：local 仅本机 / lan 局域网 / all 全部网卡'],
+  ['auth_totp_secret', '', '预留：二次验证 TOTP 密钥（本版不做）']
 ];
 
 /* ------------------------------------------------------------------ */

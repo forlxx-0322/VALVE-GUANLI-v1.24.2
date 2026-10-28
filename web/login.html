@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="light dark">
+  <meta name="robots" content="noindex, nofollow">
+  <title>登录 · 客户管理系统</title>
+  <link rel="icon" type="image/svg+xml" href="assets/logo.svg">
+  <link rel="stylesheet" href="css/login.css">
+</head>
+<body>
+  <main class="login-wrap">
+    <form class="login-card" id="login-form" autocomplete="on" novalidate>
+      <div class="brand">
+        <img class="brand-logo" src="assets/logo.svg" alt="" width="44" height="44">
+        <div>
+          <div class="brand-title">客户管理系统</div>
+          <div class="brand-sub">阀门行业版 · 数据保存在本机</div>
+        </div>
+      </div>
+
+      <h1 class="login-title">登录</h1>
+      <p class="login-sub">本机已启用登录保护，请输入账号密码后继续。</p>
+
+      <label class="field">
+        <span class="field-label">用户名</span>
+        <input class="input" id="username" name="username" type="text" value="admin"
+               autocomplete="username" autocapitalize="off" spellcheck="false" maxlength="64">
+      </label>
+
+      <label class="field">
+        <span class="field-label">密码</span>
+        <input class="input" id="password" name="password" type="password"
+               autocomplete="current-password" maxlength="200" autofocus>
+      </label>
+
+      <div class="msg" id="error" hidden></div>
+
+      <button class="btn" id="submit" type="submit">登录</button>
+
+      <p class="hint">
+        登录状态会保持 30 天；公共电脑上用完请点右上角「退出登录」。<br>
+        忘记密码？请在本机停止服务后运行 <code>node tools/reset-password.js</code>，再用新密码登录。
+      </p>
+    </form>
+
+    <footer class="login-foot">断网可用 · 不引用任何在线资源 · 客户资料不出本机</footer>
+  </main>
+
+  <script src="js/login.js"></script>
+</body>
+</html>

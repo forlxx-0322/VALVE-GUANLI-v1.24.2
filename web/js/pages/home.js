@@ -64,6 +64,15 @@ window.CRM = window.CRM || {};
     computed: {
       cards() { return (this.d && this.d.cards) || {}; },
       followList() { return (this.d && this.d.follow_customers) || []; },
+      /* 回访提醒卡片的副标题：分开说清楚逾期/今天/未来 3 天，避免"共 N 家"把逾期也算进去造成误解 */
+      followSummary() {
+        const list = this.followList;
+        const over = list.filter((x) => x.days_left < 0).length;
+        const todayN = list.filter((x) => x.days_left === 0).length;
+        const soon = list.filter((x) => x.days_left > 0).length;
+        if (!list.length) return '近期没有要回访的客户';
+        return `逾期 ${over} 家 · 今天 ${todayN} 家 · 未来 3 天 ${soon} 家`;
+      },
       todayTasks() { return (this.d && this.d.today_tasks) || []; },
       recentLogs() { return (this.d && this.d.recent_logs) || []; },
       cardItems() {
@@ -246,9 +255,9 @@ window.CRM = window.CRM || {};
             </div>
           </div>
 
-          <div class="grid-2" style="margin-bottom:14px">
+          <div class="grid-2" style="margin-bottom:14px;align-items:start">
             <!-- ============ 回访提醒 ============ -->
-            <c-card title="回访提醒" :sub="'逾期 ' + (cards.follow_overdue || 0) + ' 家 · 今日及 3 天内 ' + followList.length + ' 家'" icon="clock">
+            <c-card title="回访提醒" :sub="followSummary" icon="clock">
               <c-empty v-if="!followList.length" icon="check" title="近期没有要回访的客户"
                        desc="在客户资料里填「下次回访」后会自动出现在这里。" />
               <div v-else class="table-wrap">
@@ -295,9 +304,9 @@ window.CRM = window.CRM || {};
               <div v-if="incomeLoading" class="muted" style="padding:12px">加载中…</div>
               <template v-else-if="income">
                 <div class="stat-grid" style="grid-template-columns:repeat(4,1fr);margin-bottom:8px">
-                  <div class="stat"><div class="n">{{ money(income.totals.income) }}</div><div class="l">收入</div></div>
+                  <div class="stat"><div class="n">{{ money(income.totals.income) }}</div><div class="l">收入合计</div></div>
                   <div class="stat"><div class="n">{{ money(income.totals.cost) }}</div><div class="l">成本合计</div></div>
-                  <div class="stat"><div class="n" :class="income.totals.profit < 0 ? 'danger' : 'success'">{{ money(income.totals.profit) }}</div><div class="l">利润</div></div>
+                  <div class="stat"><div class="n" :class="income.totals.profit < 0 ? 'danger' : 'success'">{{ money(income.totals.profit) }}</div><div class="l">利润合计</div></div>
                   <div class="stat"><div class="n">{{ income.totals.margin == null ? '—' : income.totals.margin + '%' }}</div><div class="l">毛利率</div></div>
                 </div>
                 <c-chart :option="incomeOption" height="240px" />
@@ -377,10 +386,10 @@ window.CRM = window.CRM || {};
             <!-- ============ 最近动态 ============ -->
             <c-card title="最近动态" sub="最近 10 条操作记录" icon="list">
               <c-empty v-if="!recentLogs.length" icon="list" title="还没有操作记录" />
-              <div v-else>
-                <div v-for="l in recentLogs" :key="l.id" style="padding:6px 0;border-bottom:1px solid var(--c-border)">
-                  <div style="font-size:var(--fs-sm)">{{ l.summary }}</div>
-                  <div class="muted" style="font-size:var(--fs-xs)">{{ fmtDate(l.created_at, true) }}</div>
+              <div v-else class="log-list">
+                <div v-for="l in recentLogs" :key="l.id" class="log-row">
+                  <div class="log-text">{{ l.summary }}</div>
+                  <div class="log-time">{{ fmtDate(l.created_at, true) }}</div>
                 </div>
               </div>
             </c-card>

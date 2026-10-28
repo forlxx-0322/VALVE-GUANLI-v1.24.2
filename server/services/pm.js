@@ -39,6 +39,10 @@ const TASK_FIELDS = [
   'done_at', 'source', 'remark'
 ];
 
+/* 待办状态与优先级只允许这几个值（视图/首页统计都按「待办」过滤） */
+const TASK_STATUSES = ['待办', '已完成', '已取消'];
+const TASK_PRIORITIES = ['高', '中', '低'];
+
 const NUMERIC_FIELDS = new Set(['contract_amount', 'amount', 'quantity', 'progress']);
 const INT_FIELDS = new Set(['customer_id', 'project_id', 'plan_id']);
 
@@ -1009,6 +1013,28 @@ function saveTask(db, payload) {
   const data = pick(payload, TASK_FIELDS);
   const id = payload.id ? Number(payload.id) : null;
   const ts = now();
+
+  /* 状态/优先级只允许约定值：以前接口不校验，传个「待处理」也能写库，
+     结果这条待办在所有视图里都查不到（视图只认「待办」），排查半天。
+     这里做一次归一化 + 校验：
+       · 常见别名（待处理/未完成/进行中 → 待办，完成 → 已完成，取消 → 已取消）自动纠正
+       · 其余非法值直接 400，让调用方立刻发现问题，而不是静默丢数据 */
+  if (Object.prototype.hasOwnProperty.call(data, 'status')) {
+    const raw = String(data.status || '').trim();
+    const alias = { 待处理: '待办', 未完成: '待办', 进行中: '待办', 完成: '已完成', 取消: '已取消' };
+    const norm = alias[raw] || raw;
+    if (!TASK_STATUSES.includes(norm)) {
+      throw badRequest(`待办状态不合法（只能是：${TASK_STATUSES.join(' / ')}）`, 'STATUS_INVALID');
+    }
+    data.status = norm;
+  }
+  if (Object.prototype.hasOwnProperty.call(data, 'priority')) {
+    const p = String(data.priority || '').trim();
+    if (p && !TASK_PRIORITIES.includes(p)) {
+      throw badRequest(`优先级不合法（只能是：${TASK_PRIORITIES.join(' / ')}）`, 'PRIORITY_INVALID');
+    }
+    data.priority = p || '中';
+  }
 
   /* 待办可以不关联客户/项目，用 NULL 表示"未关联"。
      表单清空选择时会传来 0 或空串，若原样入库，按 customer_id IS NULL 查询就找不到这些待办，

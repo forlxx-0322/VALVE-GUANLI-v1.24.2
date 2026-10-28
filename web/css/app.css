@@ -2244,3 +2244,328 @@ body {
   .prod-tree { width: 100%; flex: 1 1 auto; }
   .prod-tree-body { max-height: 320px; }
 }
+/* ---------------- 1.25 顶栏登录信息与退出登录 ---------------- */
+.auth-box { display: flex; align-items: center; gap: 8px; margin-right: 4px; }
+.auth-user {
+  max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: var(--fs-sm); color: var(--c-text-2);
+}
+
+/* ==================================================================
+   1.25 视觉统一 · 简约有格调
+   目标：减少彩色噪音、统一间距与圆角、弱化阴影、表格更清爽。
+   只覆盖视觉令牌与组件细节，不改结构与类名。
+   ================================================================== */
+
+:root {
+  --c-bg: #f5f6f8;
+  --c-surface-2: #f7f8fa;
+  --c-border: #e7eaf0;
+  --c-border-strong: #d8dde6;
+  --c-text: #1b2230;
+  --c-text-2: #55607a;
+  --c-text-3: #8b94a6;
+  --c-sidebar: #171e29;
+  --c-sidebar-hover: #232b38;
+  --c-sidebar-active: #2f6fed;
+  --grad-sidebar: linear-gradient(180deg, #1a222e 0%, #151c26 100%);
+  --c-sidebar-line: rgba(255, 255, 255, .06);
+  --radius-sm: 7px;
+  --radius: 9px;
+  --radius-lg: 13px;
+  --shadow-sm: 0 1px 2px rgba(16, 24, 40, .04);
+  --shadow: 0 6px 20px rgba(16, 24, 40, .07), 0 1px 2px rgba(16, 24, 40, .04);
+  --shadow-lg: 0 24px 56px rgba(16, 24, 40, .18), 0 2px 6px rgba(16, 24, 40, .06);
+  --ring-focus: 0 0 0 3px rgba(47, 111, 237, .14);
+}
+
+/* 基础排版：更克制的字重与行高 */
+body {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  letter-spacing: .01em;
+  background: var(--c-bg);
+}
+
+::selection { background: rgba(47, 111, 237, .16); }
+
+/* 细滚动条 */
+* { scrollbar-width: thin; scrollbar-color: #cfd5e0 transparent; }
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-thumb { background: #d3d8e2; border-radius: 999px; }
+*::-webkit-scrollbar-thumb:hover { background: #c2c8d4; }
+*::-webkit-scrollbar-track { background: transparent; }
+
+/* ---------- 页头 ---------- */
+.c-page-header,
+.content > h2 {
+  margin-bottom: 18px;
+}
+h2 { font-size: 21px; font-weight: 620; letter-spacing: -.01em; }
+.c-page-header p,
+.content > p.muted {
+  margin-top: 6px !important;
+  font-size: 12.5px !important;
+  color: var(--c-text-3) !important;
+}
+
+/* ---------- 卡片 ---------- */
+.card {
+  border-color: var(--c-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+  background: #fff;
+}
+.card-head {
+  padding: 14px 20px;
+  border-bottom: 1px solid #eef1f5;
+  gap: 10px;
+}
+.card-title { font-size: 14.5px; font-weight: 600; letter-spacing: -.005em; }
+.card-sub { font-size: 12px; color: var(--c-text-3); margin-top: 2px; }
+.card-body { padding: 20px; }
+.card-head .c-icon, .card-head svg { color: var(--c-text-3); }
+
+/* ---------- 指标卡：去掉彩色顶条，靠数字与留白 ---------- */
+.stat {
+  background: #fff;
+  border: 1px solid var(--c-border);
+  border-radius: 12px;
+  box-shadow: none;
+  padding: 16px 18px;
+  transition: border-color .18s ease, box-shadow .18s ease, transform .18s ease;
+}
+.stat::before { display: none !important; }
+.stat.clickable:hover {
+  border-color: #cfdcf5;
+  box-shadow: 0 6px 18px rgba(16, 24, 40, .06);
+  transform: translateY(-1px);
+}
+.stat .n {
+  font-size: 24px;
+  font-weight: 640;
+  letter-spacing: -.015em;
+  font-variant-numeric: tabular-nums;
+  color: var(--c-text);
+}
+.stat .l { font-size: 12px; color: var(--c-text-3); margin-top: 4px; }
+.stat .n.warn { color: var(--c-warning); }
+.stat .n.success { color: var(--c-success); }
+.stat .n.danger { color: var(--c-danger); }
+
+/* ---------- 按钮 ---------- */
+.btn {
+  height: 32px;
+  padding: 0 12px;
+  font-size: 13px;
+  border-radius: 8px;
+  border-color: var(--c-border-strong);
+  box-shadow: 0 1px 1px rgba(16, 24, 40, .03);
+  transition: background .15s, border-color .15s, color .15s, box-shadow .15s;
+}
+.btn:hover:not(:disabled) {
+  border-color: #b9c8e6;
+  color: var(--c-primary);
+  background: #fbfcff;
+}
+.btn-primary {
+  background: var(--c-primary);
+  border-color: var(--c-primary);
+  box-shadow: 0 1px 2px rgba(47, 111, 237, .22);
+}
+.btn-primary:hover:not(:disabled) {
+  background: var(--c-primary-hover);
+  border-color: var(--c-primary-hover);
+  color: #fff;
+  box-shadow: 0 4px 12px rgba(47, 111, 237, .22);
+}
+.btn-sm { height: 26px; padding: 0 9px; font-size: 12px; border-radius: 7px; }
+.btn-danger { background: var(--c-danger); border-color: var(--c-danger); color: #fff; box-shadow: none; }
+.btn-danger:hover:not(:disabled) { background: #c02a39; border-color: #c02a39; color: #fff; }
+.btn.active, .btn-primary.active { box-shadow: 0 0 0 3px rgba(47, 111, 237, .12); }
+.btn:focus-visible, .input:focus-visible, select:focus-visible {
+  outline: none;
+  box-shadow: var(--ring-focus);
+}
+
+/* 表格里的按钮降噪：删除不再整块红 */
+.data-table .btn-danger {
+  background: transparent;
+  border-color: transparent;
+  color: var(--c-danger);
+  box-shadow: none;
+}
+.data-table .btn-danger:hover:not(:disabled) {
+  background: var(--c-danger-soft);
+  border-color: transparent;
+  color: #b91c2c;
+}
+.data-table .btn { color: var(--c-text-2); }
+.data-table .btn:hover:not(:disabled) { color: var(--c-primary); }
+.data-table .btn-danger:hover:not(:disabled) { color: #b91c2c; }
+
+/* ---------- 表格 ---------- */
+.data-table { font-size: 13px; border-collapse: separate; border-spacing: 0; }
+.data-table thead th {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--c-text-3);
+  background: #fafbfd;
+  border-bottom: 1px solid #eef1f5;
+  padding: 9px 12px;
+  letter-spacing: .01em;
+  white-space: nowrap;
+}
+.data-table tbody td {
+  padding: 11px 12px;
+  border-bottom: 1px solid #f2f4f8;
+  color: var(--c-text);
+  vertical-align: middle;
+}
+.data-table tbody tr:last-child td { border-bottom: 0; }
+.data-table tbody tr:hover { background: #f9fafc; }
+.data-table tbody tr.row-overdue { background: #fffdfd; }
+.data-table tbody tr.row-overdue:hover { background: #fff7f8; }
+.data-table tbody tr.row-overdue td:first-child { box-shadow: inset 2px 0 0 #f0aab3; }
+.data-table .num, .data-table td.num { font-variant-numeric: tabular-nums; text-align: right; }
+.table-wrap { border-radius: 10px; }
+
+/* ---------- 标签：软底色、无描边 ---------- */
+.tag {
+  border: 0;
+  border-radius: 6px;
+  padding: 1px 7px;
+  height: 20px;
+  font-size: 11.5px;
+  line-height: 18px;
+  background: #f2f4f8;
+  color: var(--c-text-2);
+  font-weight: 500;
+}
+.tag.success { background: var(--c-success-soft); color: #0f7a4b; }
+.tag.warning { background: var(--c-warning-soft); color: #a8620a; }
+.tag.danger  { background: var(--c-danger-soft);  color: #bf2434; }
+.tag.muted   { background: #f2f4f8; color: var(--c-text-3); }
+.tag.primary { background: var(--c-primary-soft); color: var(--c-primary); }
+
+/* ---------- 侧栏 ---------- */
+.nav-item {
+  border-radius: 8px;
+  margin: 2px 8px;
+  padding: 8px 10px;
+  color: rgba(255, 255, 255, .72);
+  transition: background .15s, color .15s;
+  position: relative;
+}
+.nav-item:hover { background: rgba(255, 255, 255, .05); color: #fff; }
+.nav-item.active {
+  background: rgba(47, 111, 237, .18);
+  color: #eaf1ff;
+  font-weight: 500;
+}
+.nav-item.active::before {
+  content: '';
+  position: absolute;
+  left: -8px;
+  top: 8px;
+  bottom: 8px;
+  width: 2px;
+  border-radius: 2px;
+  background: #6f9bff;
+}
+.nav-group-label {
+  font-size: 11px;
+  letter-spacing: .1em;
+  color: rgba(255, 255, 255, .32);
+  padding: 14px 18px 6px;
+}
+
+/* ---------- 顶栏 ---------- */
+.topbar { border-bottom: 1px solid var(--c-border); background: rgba(255, 255, 255, .92); backdrop-filter: blur(8px); }
+.topbar .search input { border-radius: 8px; }
+
+/* ---------- 输入 ---------- */
+.input, select.input, textarea.input {
+  border-radius: 8px;
+  border-color: var(--c-border-strong);
+  height: 34px;
+  font-size: 13px;
+  transition: border-color .15s, box-shadow .15s;
+}
+.input:hover { border-color: #c3ccdc; }
+.input:focus { border-color: var(--c-primary); box-shadow: var(--ring-focus); }
+textarea.input { height: auto; min-height: 76px; }
+.field-label { font-size: 12px; color: var(--c-text-2); font-weight: 500; }
+.field-hint { font-size: 11.5px; color: var(--c-text-3); }
+
+/* ---------- 空状态：小图标 + 留白 ---------- */
+.empty { padding: 34px 16px; }
+.empty .empty-icon, .empty svg { color: #b9c2d2; }
+.empty-title { font-size: 13.5px; font-weight: 600; color: var(--c-text-2); }
+.empty-desc { font-size: 12px; color: var(--c-text-3); }
+
+/* ---------- 抽屉 / 弹窗 ---------- */
+.drawer { border-radius: 14px 0 0 14px; box-shadow: -18px 0 60px rgba(16, 24, 40, .16); }
+.drawer-head { padding: 16px 22px; border-bottom: 1px solid #eef1f5; }
+.drawer-body { padding: 20px 22px; }
+.drawer-foot { padding: 14px 22px; border-top: 1px solid #eef1f5; background: #fbfcfe; }
+.modal { border-radius: 14px; box-shadow: var(--shadow-lg); }
+.modal-head { padding: 16px 20px; border-bottom: 1px solid #eef1f5; }
+.modal-body { padding: 18px 20px; }
+.modal-foot { padding: 14px 20px; border-top: 1px solid #eef1f5; background: #fbfcfe; }
+
+/* ---------- 分页 ---------- */
+.pager { gap: 6px; }
+.pager button {
+  border-radius: 7px;
+  min-width: 28px;
+  height: 28px;
+  font-size: 12.5px;
+}
+
+/* ---------- 迷你列表 / 时间线 ---------- */
+.tl-item { padding-left: 14px; }
+.tl-head { gap: 8px; }
+.tl-time { font-size: 11.5px; color: var(--c-text-3); }
+
+/* ---------- 图表卡片内的统计小条 ---------- */
+.card .stat-grid .stat { padding: 12px 14px; border-radius: 10px; }
+.card .stat-grid .stat .n { font-size: 19px; }
+.card .stat-grid .stat .l { font-size: 11.5px; }
+
+/* ---------- 客户详情 · 财务汇总：一行 9 格，不折行 ---------- */
+.fin-grid {
+  grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+  gap: 10px;
+}
+.fin-grid .stat { padding: 12px 14px; }
+.fin-grid .stat .n { font-size: 18px; letter-spacing: -.01em; }
+.fin-grid .stat .l {
+  font-size: 11.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---------- 最近动态：限高可滚动 ---------- */
+.log-list { max-height: 296px; overflow: auto; }
+.log-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid #f2f4f8;
+}
+.log-row:last-child { border-bottom: 0; }
+.log-text { font-size: 12.5px; color: var(--c-text-2); line-height: 1.55; }
+.log-time { font-size: 11.5px; color: var(--c-text-3); white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+/* ---------- 登录页 ---------- */
+.login-page { background: radial-gradient(1200px 600px at 20% 0%, #eef3fd 0%, #f6f7f9 55%, #f6f7f9 100%); }
+.login-card { border-radius: 16px; box-shadow: 0 30px 80px rgba(16, 24, 40, .12); border: 1px solid #e7eaf0; }
+
+/* ---------- 打印：去掉阴影 ---------- */
+@media print {
+  .card, .stat { box-shadow: none !important; }
+}

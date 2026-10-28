@@ -489,7 +489,8 @@ function insertProduct(db, categoryId, name, code, ts) {
         WHERE c.deleted_at IS NULL
       ) SELECT MAX(depth) AS m FROM d`).get().m;
     check('v13 从 v12 纯种子库升级：执行 1 步迁移，分类 74 个 / 系统 6 / 深度 3',
-      mig.fromVersion === 12 && mig.schemaVersion === 13 && mig.migrations.length === 1
+      mig.fromVersion === 12 && mig.schemaVersion === dbMod.SCHEMA_VERSION
+        && mig.migrations.length === dbMod.SCHEMA_VERSION - 12
         && live === 74 && roots === 6 && second === 22 && third === 46
         && sys === 6 && sysChildren === 0 && maxDepth === 3,
       `v${mig.fromVersion} → v${mig.schemaVersion}（${mig.migrations.length} 步）；`
@@ -569,7 +570,7 @@ function insertProduct(db, categoryId, name, code, ts) {
     const oldOnlyLeft = OLD_ONLY_PATHS.filter((p) => livePairs.has(p));
 
     check('v13 用户改过名 / 已挂产品 / 自建分类的库：分类与产品都不丢',
-      mig.schemaVersion === 13 && live === 78 && roots === 7 && second === 25 && third === 46
+      mig.schemaVersion === dbMod.SCHEMA_VERSION && live === 78 && roots === 7 && second === 25 && third === 46
         && sys === 6 && tomb === 20
         && products === 2 && customers === 1
         && renamedKept === 1 && productCatKept === 1 && userKept === 2

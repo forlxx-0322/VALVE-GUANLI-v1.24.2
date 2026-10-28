@@ -1,0 +1,161 @@
+/**
+ * 登录页样式 —— 1.25
+ *
+ * 完全自包含：不引用任何在线字体 / 图片 / 脚本，断网与内网环境都能正常显示。
+ * 颜色与主应用（web/css/app.css）保持同一套蓝色基调。
+ */
+
+:root {
+  --primary: #2f6fed;
+  --primary-dark: #1f57c8;
+  --text: #1f2937;
+  --text-2: #59647a;
+  --text-3: #8a95a8;
+  --border: #e4e9f2;
+  --surface: #ffffff;
+  --danger: #dc2626;
+  --danger-soft: #fdedee;
+  --warning: #b45309;
+  --warning-soft: #fff7ed;
+  color-scheme: light dark;
+}
+
+* { box-sizing: border-box; }
+
+html, body { height: 100%; }
+
+body {
+  margin: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px 16px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+  color: var(--text);
+  background:
+    radial-gradient(1100px 500px at 15% -10%, #dbe7ff 0%, transparent 60%),
+    radial-gradient(900px 460px at 110% 10%, #e8f0ff 0%, transparent 55%),
+    #f4f7fc;
+  -webkit-font-smoothing: antialiased;
+}
+
+.login-wrap { width: 100%; max-width: 392px; }
+
+.login-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 28px 26px 22px;
+  box-shadow: 0 24px 60px rgba(15, 23, 42, .12), 0 2px 6px rgba(15, 23, 42, .04);
+}
+
+.brand { display: flex; align-items: center; gap: 12px; margin-bottom: 22px; }
+.brand-logo { border-radius: 10px; display: block; }
+.brand-title { font-size: 16px; font-weight: 600; letter-spacing: .01em; }
+.brand-sub { margin-top: 3px; font-size: 12px; color: var(--text-3); }
+
+.login-title { margin: 0; font-size: 22px; font-weight: 650; letter-spacing: .01em; }
+.login-sub { margin: 6px 0 20px; font-size: 13px; color: var(--text-2); line-height: 1.6; }
+
+.field { display: block; margin-bottom: 14px; }
+.field-label { display: block; margin-bottom: 6px; font-size: 13px; color: var(--text-2); }
+
+.input {
+  width: 100%;
+  height: 40px;
+  padding: 0 12px;
+  font-size: 14px;
+  color: var(--text);
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  outline: none;
+  transition: border-color .15s, box-shadow .15s;
+}
+.input:focus {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(47, 111, 237, .14);
+}
+
+.btn {
+  width: 100%;
+  height: 42px;
+  margin-top: 6px;
+  border: none;
+  border-radius: 10px;
+  background: var(--primary);
+  color: #fff;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: .02em;
+  cursor: pointer;
+  transition: background .15s, transform .06s;
+}
+.btn:hover:not(:disabled) { background: var(--primary-dark); }
+.btn:active:not(:disabled) { transform: translateY(1px); }
+.btn:disabled { opacity: .62; cursor: not-allowed; }
+
+.msg {
+  margin: 2px 0 10px;
+  padding: 9px 11px;
+  font-size: 13px;
+  line-height: 1.55;
+  border-radius: 8px;
+  border: 1px solid #f6c9cf;
+  background: var(--danger-soft);
+  color: var(--danger);
+  word-break: break-word;
+}
+.msg.warn {
+  border-color: #f4dcb4;
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+.msg.info {
+  border-color: #c9dcff;
+  background: #eef4ff;
+  color: var(--primary-dark);
+}
+
+.hint {
+  margin: 16px 0 0;
+  font-size: 12px;
+  line-height: 1.8;
+  color: var(--text-3);
+}
+.hint code {
+  padding: 1px 5px;
+  font-size: 11.5px;
+  background: #f1f4f9;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+}
+
+.login-foot {
+  margin-top: 16px;
+  text-align: center;
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+
+@media (max-width: 420px) {
+  .login-card { padding: 24px 20px 18px; border-radius: 14px; }
+  body { padding: 16px 12px; }
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --text: #e6ebf4;
+    --text-2: #a8b2c1;
+    --text-3: #78828f;
+    --border: #2c333e;
+    --surface: #1b2029;
+  }
+  body {
+    background:
+      radial-gradient(1000px 480px at 10% -10%, #1d3157 0%, transparent 60%),
+      radial-gradient(900px 460px at 110% 10%, #1a2740 0%, transparent 55%),
+      #12161d;
+  }
+  .input { background: #12161d; color: var(--text); }
+  .hint code { background: #12161d; }
+}

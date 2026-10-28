@@ -1,5 +1,6 @@
 /**
  * 产品分类模块 / 产品价目表专项（1.24 新增，结构 v11；1.24.1 起 v12；1.24.2 起 v13）
+ * 注：1.25 起本套件的版本断言改为「≥ 1.24」，避免每次升版本都要跟着改。
  *
  * 覆盖：
  *   · 结构：product_categories / products 两张表与 5 个索引、schema_version = 13
@@ -101,7 +102,11 @@ function findNode(nodes, id) {
 
   /* ---------------- 0. 健康检查与预清理 ---------------- */
   const health = await api('GET', '/api/health');
-  check('服务可访问且版本为 1.24.x', health.ok === true && /^1\.24(\.\d+)?$/.test(health.data.version || ''),
+  check('服务可访问且版本 ≥ 1.24（产品模块随 1.24 上线）',
+    (() => {
+      const v = String(health.data.version || '').split('.').map(Number);
+      return health.ok === true && v[0] === 1 && (v[1] || 0) >= 24;
+    })(),
     health.ok ? `v${health.data.version}` : (health.message || '无响应'));
   if (!health.ok) {
     console.error('服务未启动，请先运行 启动.bat 或 node server/server.js');
@@ -122,7 +127,9 @@ function findNode(nodes, id) {
     return { tables, catCols, prodCols, indexes, ver };
   });
 
-  check('结构版本已升到 v13', struct.ver === 13, `schema_version = ${struct.ver}`);
+  const SCHEMA_VERSION = require('../server/db').SCHEMA_VERSION;
+  check('结构版本已升到最新（v' + SCHEMA_VERSION + '）',
+    struct.ver === SCHEMA_VERSION, `schema_version = ${struct.ver}（代码 v${SCHEMA_VERSION}）`);
   check('product_categories 与 products 两张表已建',
     struct.tables.includes('product_categories') && struct.tables.includes('products'),
     `当前 ${struct.tables.length} 张表（含 schema_version）`);

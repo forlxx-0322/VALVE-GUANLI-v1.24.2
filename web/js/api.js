@@ -11,6 +11,19 @@ window.CRM = window.CRM || {};
 
   const { reactive } = Vue;
 
+  /** 当前是否在登录页（登录页自身不再跳转，避免重定向循环） */
+  function onLoginPage() {
+    return /\/login\.html$/i.test(String(window.location.pathname || ''));
+  }
+
+  let redirecting = false;
+  /** 会话失效时统一跳登录页；只跳一次 */
+  function redirectToLogin() {
+    if (redirecting || onLoginPage()) return;
+    redirecting = true;
+    window.location.replace('/login.html');
+  }
+
   function toQuery(params) {
     const sp = new URLSearchParams();
     for (const [k, v] of Object.entries(params || {})) {
@@ -45,6 +58,9 @@ window.CRM = window.CRM || {};
       const e = new Error(message);
       e.code = (payload && payload.code) || `HTTP_${res.status}`;
       e.status = res.status;
+      /* 登录已启用但会话失效：统一回登录页。
+         登录 / 改密 / 退出这三个接口的 401 属于表单校验，不跳转，交给调用方提示。 */
+      if (res.status === 401 && !/^\/api\/auth\//.test(String(url))) redirectToLogin();
       throw e;
     }
     return payload.data;
@@ -116,6 +132,68 @@ window.CRM = window.CRM || {};
     cache.customersLoaded = true;
     return cache.customers;
   }
+
+  /* ------------------------------------------------------------------ */
+  /* 登录与异地访问（1.25）                                               */
+  /* ------------------------------------------------------------------ */
+
+  const authState = reactive({
+    enabled: false,
+    loggedIn: false,
+    username: '',
+    hasPassword: false,
+    listenMode: 'local',
+    bindAddress: '127.0.0.1',
+    canRemote: false,
+    restartRequired: false,
+    lastLogin: null,
+    lock: null,
+    ip: '',
+    loaded: false
+  });
+
+  /** 把 /api/auth/status 的结果写进全局状态（顶栏、设置页共用） */
+  function applyAuthStatus(st) {
+    if (!st) return authState;
+    authState.enabled = !!st.auth_enabled;
+    authState.loggedIn = !!st.logged_in;
+    authState.username = st.username || '';
+    authState.hasPassword = !!st.has_password;
+    authState.listenMode = st.listen_mode || 'local';
+    authState.bindAddress = st.bind_address || '127.0.0.1';
+    authState.canRemote = !!st.can_remote;
+    authState.restartRequired = !!st.restart_required;
+    authState.lastLogin = st.last_login || null;
+    authState.lock = st.lock || null;
+    authState.ip = st.ip || '';
+    authState.loaded = true;
+    return authState;
+  }
+
+  async function fetchAuthStatus() {
+    const d = await request('GET', '/api/auth/status');
+    applyAuthStatus(d);
+    return d;
+  }
+
+  async function login(username, password) {
+    const d = await request('POST', '/api/auth/login', { username, password });
+    authState.enabled = true;
+    authState.loggedIn = true;
+    authState.username = d.username || username;
+    return d;
+  }
+
+  async function logout() {
+    try {
+      await request('POST', '/api/auth/logout');
+    } finally {
+      authState.loggedIn = false;
+      authState.username = '';
+    }
+  }
+
+  const changePassword = (payload) => request('POST', '/api/auth/password', payload);
 
   CRM.api = {
     get:   (url) => request('GET', url),
@@ -265,8 +343,25 @@ window.CRM = window.CRM || {};
     deleteProduct: (id) => request('DELETE', `/api/products/${id}`),
     productsExport: (params) => request('GET', '/api/products/export-data?' + toQuery(params || {})),
 
+    /* 登录与异地访问（1.25） */
+    authStatus: fetchAuthStatus,
+    authLogin: login,
+    authLogout: logout,
+    authChangePassword: changePassword,
+
     /* 缓存工具 */
     loadDict, loadTags, options, items, applyDictAdded, loadCustomerOptions, customerOptions, cache
+  };
+
+  /* 顶栏「退出登录」、启动鉴权、设置页面板共用同一个响应式状态 */
+  CRM.auth = {
+    state: authState,
+    applyStatus: applyAuthStatus,
+    status: fetchAuthStatus,
+    login,
+    logout,
+    changePassword,
+    onLoginPage
   };
 
 })(window.CRM);

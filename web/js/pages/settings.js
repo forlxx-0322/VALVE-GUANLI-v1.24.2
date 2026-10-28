@@ -17,6 +17,7 @@ window.CRM = window.CRM || {};
           { key: 'dict', label: '字典管理' },
           { key: 'tags', label: '标签管理' },
           { key: 'prefs', label: '提醒与偏好' },
+          { key: 'auth', label: '登录与异地访问' },
           { key: 'backup', label: '备份与恢复' },
           { key: 'data', label: '导入导出' },
           { key: 'storage', label: '附件与存储' },
@@ -50,6 +51,7 @@ window.CRM = window.CRM || {};
         <c-dict-manager v-if="tab === 'dict'" />
         <c-tag-panel v-else-if="tab === 'tags'" />
         <c-prefs-panel v-else-if="tab === 'prefs'" />
+        <c-auth-panel v-else-if="tab === 'auth'" />
         <c-backup-panel v-else-if="tab === 'backup'" />
         <c-data-panel v-else-if="tab === 'data'" @imported="onImported" />
         <c-attachment-store v-else-if="tab === 'storage'" />

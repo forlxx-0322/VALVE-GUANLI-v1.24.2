@@ -40,6 +40,12 @@
     methods: {
       async boot() {
         try {
+          /* 1.25：先查登录状态。启用登录且未登录 → 直接去登录页（登录页自身不会再跳） */
+          const st = await CRM.api.authStatus();
+          if (st && st.auth_enabled && !st.logged_in) {
+            window.location.replace('/login.html');
+            return;
+          }
           const h = await CRM.api.health();
           this.health = h;
           this.version = h.version || '';
@@ -122,6 +128,7 @@
   app.component('c-attachment-store', CRM.settings.AttachmentStorePanel);
   app.component('c-trash-panel', CRM.settings.TrashPanel);
   app.component('c-log-panel', CRM.settings.LogPanel);
+  app.component('c-auth-panel', CRM.settings.AuthPanel);
   CRM.app = app;
   app.mount('#app');
 
