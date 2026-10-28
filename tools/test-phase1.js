@@ -254,8 +254,9 @@ async function get(pathname, init) {
   /* --- 17. 前端 JS 文件全部可加载 --- */
   try {
     const files = [
-      '/js/util.js', '/js/api.js', '/js/router.js', '/js/components.js', '/js/app.js',
-      '/js/customer-fields.js', '/js/customer-edit.js', '/js/project-edit.js',
+      '/js/core/util.js', '/js/core/api.js', '/js/core/router.js',
+      '/js/ui/components.js', '/js/app.js',
+      '/js/forms/customer-fields.js', '/js/forms/customer-edit.js', '/js/forms/project-edit.js',
       '/js/pages/home.js', '/js/pages/customers.js', '/js/pages/customer-detail.js',
       '/js/pages/tasks.js', '/js/pages/settings.js',
       '/vendor/vue.global.prod.js', '/vendor/echarts.min.js', '/vendor/xlsx.full.min.js'

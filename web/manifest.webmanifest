@@ -1,6 +1,6 @@
 {
-  "name": "客户管理系统 · 阀门行业版",
-  "short_name": "客户管理",
+  "name": "CRM管理系统",
+  "short_name": "CRM",
   "description": "阀门行业客户与项目管理系统（单机运行，数据留在本机）",
   "lang": "zh-CN",
   "start_url": "/index.html",
@@ -12,19 +12,19 @@
   "theme_color": "#2f6fed",
   "icons": [
     {
-      "src": "assets/icon-192.png",
+      "src": "assets/crm-192.png",
       "sizes": "192x192",
       "type": "image/png",
       "purpose": "any"
     },
     {
-      "src": "assets/icon-512.png",
+      "src": "assets/crm-512.png",
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "any"
     },
     {
-      "src": "assets/icon-512.png",
+      "src": "assets/crm-512.png",
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "maskable"

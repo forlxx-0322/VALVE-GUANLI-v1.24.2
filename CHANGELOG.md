@@ -8,6 +8,48 @@
 
 ---
 
+## [1.25.3] — 2026-10-28
+
+本次归档：**桌面快捷方式（订制 Q 版女仆图标）+ 文件夹分区整理**。数据库结构不变（**v14**）。
+
+### 一、安装为桌面应用 + 快捷方式
+
+| 产出 | 说明 |
+|---|---|
+| `启动CRM.vbs` | 快捷方式实际调用它：**隐藏窗口**检查服务（MSXML health 探测），没跑就静默拉起 `启动.bat` 并等最多 30 秒，然后用 Edge/Chrome 的 `--app` 打开独立窗口（无地址栏、独立任务栏图标） |
+| `创建快捷方式.ps1` | 一键创建桌面 + 开始菜单「**CRM管理系统**」快捷方式；目标 `wscript.exe 启动CRM.vbs`，工作目录 `D:\BJXT`，图标 `web/assets/crm2.ico` |
+| `web/assets/crm-maid-original.png` | 用户提供的原始 Q 版女仆图（妥善保存） |
+| `web/assets/crm-{16,24,32,48,64,128,192,256,512}.png` + `crm.ico` / `crm2.ico` | 从原图生成：**白底抠成透明**（四边泛洪，遇到描边停）+ 圆角渐变蓝底 + 等比留边；ICO 内嵌 9 个尺寸 |
+| `manifest.webmanifest` / `icon-192/512` / `favicon-32` / `apple-touch-icon` | 同步换成这套图，PWA 安装出来也是同一个人物 |
+
+> `crm2.ico` 是新文件名：Windows 会缓存旧图标，换名能立刻刷新；以后再换图也照这个办法。
+
+### 二、文件夹分区整理（"各个功能分区清晰"）
+
+`web/js/` 原先 24 个文件平铺，现按职责分四个区（**加载顺序保持不变**）：
+
+| 目录 | 内容 |
+|---|---|
+| `js/core/` | `util.js` `theme.js` `api.js` `router.js`（基础设施） |
+| `js/ui/` | `components.js` `components2.js` `components-chart.js` `components-attachment.js` `reminders.js`（通用组件） |
+| `js/forms/` | 客户字段/编辑、跟进、项目档案、回款、成本（业务录入） |
+| `js/settings/` | 字典/备份/导入导出/附件/偏好/登录（设置面板） |
+| `js/pages/` | 六个页面（不变） |
+
+同时：
+- 新增 `web/README.md`、`server/README.md`、`tools/README.md`：每个目录"放什么、怎么加新功能、加载顺序/约定"
+- 根 `README.md` 的目录树按新结构重写（含启动器、快捷方式、图标、测试工具）
+- 删除项目里误留的 `.npm-cache/`（24 MB，npx 缓存，可再生）；`.gitignore` 已覆盖 `.npm-cache` / `.idea` / `.fixtures` / `.shots`
+
+### 三、验证
+
+- 全量回归 **805 / 805 通过**（28 个套件，沙箱空库；分区后 `index.html` 脚本顺序与资产路径已同步，`test-phase1` 资产清单已更新）
+- 新图标：256/512 目视核对（白底已抠掉、整幅画完整不切边）；PWA 图标与 favicon 同步
+- 快捷方式：桌面与开始菜单均已生成，目标/参数/工作目录/图标逐项核对；双击实测能拉起服务并打开应用窗口
+- 原文图保存在 `web/assets/crm-maid-original.png`
+
+---
+
 ## [1.25.2] — 2026-10-28
 
 本次归档：**安装为桌面应用（0 安装包的 PWA 方案）**。数据库结构不变（**v14**）。
