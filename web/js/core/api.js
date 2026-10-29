@@ -241,10 +241,16 @@ window.CRM = window.CRM || {};
     checkDuplicate: (name, phone, excludeId) =>
       request('GET', '/api/customers/check-duplicate?' + toQuery({ name, phone, excludeId })),
 
-    /* 客户的项目档案（1:1，1.23）与财务汇总 */
+    /* 客户的项目列表（1:N，1.27）与财务汇总 */
     customerProject: (id) => request('GET', `/api/customers/${id}/project`),
+    customerProjects: (id) => request('GET', `/api/customers/${id}/projects`),
+    createCustomerProject: (id, data) => request('POST', `/api/customers/${id}/projects`, data),
     saveCustomerProject: (id, data) => request('PUT', `/api/customers/${id}/project`, data),
-    archiveCustomerProject: (id) => request('POST', `/api/customers/${id}/project/archive`),
+    archiveCustomerProject: (id, projectId) => request('POST',
+      projectId
+        ? `/api/customers/${id}/projects/${projectId}/archive`
+        : `/api/customers/${id}/project/archive`),
+    unarchiveProject: (projectId) => request('POST', `/api/projects/${projectId}/unarchive`),
     customerHistoryProjects: (id) => request('GET', `/api/customers/${id}/history-projects`),
     customerFinance: (id) => request('GET', `/api/customers/${id}/finance`),
 

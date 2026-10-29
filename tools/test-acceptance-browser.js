@@ -1,11 +1,11 @@
 /**
- * 阶段七 · 最终验收测试（浏览器部分，1.23 一客户一项目）
+ * 阶段七 · 最终验收测试（浏览器部分，1.27 一个客户多个项目）
  *
  * 在真实浏览器（Chrome，另可选 Edge）里做端到端验收：
  *   10 首页 v2（6 指标卡 / 回访提醒 / 收入报表按月按年 / 两张环形图）
  *   8  客户精简模型（4 区块表单、主联系人、编号、标签、回访周期）
  *   9  筛选与排序（行业 / 来源 / 地州 / 关键词 / 快捷筛选）
- *   11 客户详情里的项目档案（建立 / 回款 / 成本 / 财务栏 / 转为历史）
+ *   11 客户详情里的项目列表（新增 / 回款 / 成本 / 财务栏 / 归档）
  *   12 软删除与还原（关联数据完整恢复）
  *   13 操作日志
  *   14 表单校验（名称必填 / 金额 / 日期 / 超收）
@@ -365,11 +365,11 @@ const created = { customers: [], projects: [], tags: [], dict: [] };
       && detail.tabs.some((t) => t.includes('项目与财务'))
       && detail.tabs.some((t) => t.includes('附件与日志')),
     detail.tabs.join(' / '));
-  check('8j', '资料页财务汇总栏显示合同额/已收/应收/采购成本/毛利/毛利率',
+  check('8j', '资料页财务汇总栏显示进行中项目合计（合同额/已回款/应收/成本/毛利/毛利率）',
     String(statOf('合同额')).includes('660,000')
-      && String(statOf('已收')).includes('260,000')
+      && String(statOf('已回款')).includes('260,000')
       && String(statOf('应收')).includes('140,000')
-      && String(statOf('采购成本')).includes('120,000')
+      && String(statOf('成本')).includes('120,000')
       && String(statOf('毛利')).includes('140,000'),
     detail.stats.map((s) => s.l + '=' + s.n).join(' / '));
   check('8k', '资料页显示编号/主联系人/附加联系人折叠区',
@@ -423,9 +423,9 @@ const created = { customers: [], projects: [], tags: [], dict: [] };
     filterUi.selects.join(' | '));
 
   /* ================================================================ */
-  /* 11. 客户详情里的项目档案（1:1）                                    */
+  /* 11. 客户详情里的项目列表（1:N）                                   */
   /* ================================================================ */
-  console.log('\n--- 验收 11：客户详情项目档案 + 财务 ---');
+  console.log('\n--- 验收 11：客户详情多个项目 + 财务 ---');
   await goto('#/customers/' + customerId, 3400);
   const projectPane = await cdp.js(`(async () => {
     const t = [...document.querySelectorAll('.tabs .tab')].find(x => x.textContent.includes('项目与财务'));
@@ -440,8 +440,8 @@ const created = { customers: [], projects: [], tags: [], dict: [] };
     return {
       kv, titles,
       planRows: [...document.querySelectorAll('.data-table tbody tr')].length,
-      hasEdit: [...document.querySelectorAll('button')].some(b => b.textContent.includes('编辑档案')),
-      hasArchive: [...document.querySelectorAll('button')].some(b => b.textContent.includes('转为历史'))
+      hasEdit: [...document.querySelectorAll('button')].some(b => b.textContent.includes('编辑项目')),
+      hasArchive: [...document.querySelectorAll('button')].some(b => b.textContent.includes('归档'))
     };
   })()`);
   check('11a', '项目档案完整显示名称/阶段/合同额/投标结果/交货期',
@@ -490,10 +490,10 @@ const created = { customers: [], projects: [], tags: [], dict: [] };
       && finAfter.data.profit === 190000,
     receiptUi.err || `已收=${finAfter.data.received_amount}，应收=${finAfter.data.receivable_amount}，毛利=${finAfter.data.profit}`);
 
-  /* 转为历史 → 新建当前项目 */
+  /* 归档项目 → 再新增项目 */
   const archUi = await cdp.js(`(async () => {
-    const btn = [...document.querySelectorAll('button')].find(b => b.textContent.includes('转为历史'));
-    if (!btn) return { err: '未找到转为历史按钮' };
+    const btn = [...document.querySelectorAll('button')].find(b => b.textContent.includes('归档'));
+    if (!btn) return { err: '未找到归档按钮' };
     btn.click();
     await new Promise(r => setTimeout(r, 600));
     const modal = document.querySelector('.modal');
@@ -502,20 +502,20 @@ const created = { customers: [], projects: [], tags: [], dict: [] };
     ok.click();
     await new Promise(r => setTimeout(r, 2200));
     return {
-      isEmpty: document.body.innerText.includes('还没有项目档案'),
+      isEmpty: document.body.innerText.includes('还没有进行中的项目'),
       hasHistory: document.body.innerText.includes('历史项目（1）'),
       toasts: [...document.querySelectorAll('.toast')].map(t => t.textContent.trim())
     };
   })()`);
   const hist = await api('GET', `/api/customers/${customerId}/history-projects`);
-  check('11d', '当前项目可「转为历史」，历史项目 archived=1 只读',
+  check('11d', '项目可「归档」，历史项目 archived=1 只读',
     !archUi.err && archUi.isEmpty && archUi.hasHistory
       && hist.data.length === 1 && hist.data[0].archived === 1,
-    archUi.err || `历史 ${hist.data.length} 条，空档案=${archUi.isEmpty}`);
+    archUi.err || `历史 ${hist.data.length} 条，空列表=${archUi.isEmpty}`);
 
   const rebuilt = await cdp.js(`(async () => {
-    const btn = [...document.querySelectorAll('button')].find(b => b.textContent.includes('建立项目档案'));
-    if (!btn) return { err: '未找到建立项目档案按钮' };
+    const btn = [...document.querySelectorAll('button')].find(b => b.textContent.includes('新增项目'));
+    if (!btn) return { err: '未找到新增项目按钮' };
     btn.click();
     await new Promise(r => setTimeout(r, 900));
     const d = document.querySelector('.drawer');
@@ -534,11 +534,11 @@ const created = { customers: [], projects: [], tags: [], dict: [] };
   })()`);
   const current = await api('GET', `/api/customers/${customerId}/project`);
   if (current.data.project) created.projects.push(current.data.project.id);
-  check('11e', '归档后可再建新的当前项目（一客户一项目）',
+  check('11e', '归档后可再新增项目（一个客户多个项目）',
     !rebuilt.err && current.data.project
       && current.data.project.name === `验收归档后的新项目${ts}`
       && current.data.history.length === 1,
-    rebuilt.err || `新当前项目=${current.data.project && current.data.project.name}`);
+    rebuilt.err || `新进行中项目=${current.data.project && current.data.project.name}`);
 
   /* 回访周期：界面记录跟进后自动排下次 */
   const followUi = await cdp.js(`(async () => {

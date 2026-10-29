@@ -1,13 +1,14 @@
 /**
- * 客户详情页（1.23 一客户一项目版）
+ * 客户详情页（1.27 多项目版）
  *
  * 4 个标签页：
- *   资料            —— 客户字段 + 财务汇总栏 + 标签 + 附加联系人（折叠）
+ *   资料            —— 客户字段 + 财务汇总栏（进行中项目合计） + 标签 + 附加联系人（折叠）
  *   回访与跟进      —— 跟进记录 + 下次回访 + 定期提醒
- *   项目与财务      —— 当前项目档案 + 回款计划/实收 + 成本台账 + 历史项目（折叠只读）
+ *   项目与财务      —— 进行中项目列表（可多个） + 选中项目的回款/实收/成本 + 历史项目（折叠只读）
  *   附件与日志      —— 附件 + 变更记录
  *
- * 没有独立的「项目管理」入口：项目档案、回款、成本都在本页维护。
+ * 一个客户可以同时管理多个进行中项目：上面列表逐个项目维护，
+ * 财务汇总栏的数字 = 进行中项目逐行相加；归档项目只读、可恢复。
  */
 'use strict';
 
@@ -29,6 +30,14 @@ window.CRM = window.CRM || {};
     data() {
       return {
         customer: null,
+        /* 进行中项目列表（summary.active）与历史项目（summary.archived） */
+        projects: [],
+        archivedProjects: [],
+        projectSummary: null,
+        selectedProjectId: null,
+        /* 选中项目的完整详情（含回款计划 / 实收 / 待办 / 汇总） */
+        projectDetail: null,
+        /* 兼容旧字段：最近创建的一个进行中项目（部分旧逻辑/模板仍会读它） */
         project: null,
         history: [],
         finance: null,
@@ -40,13 +49,17 @@ window.CRM = window.CRM || {};
         contactOpen: false,
         contact: null,
         savingContact: false,
-        /* 项目档案抽屉 */
+        /* 项目抽屉：projectEditing=null 表示新增 */
         projectOpen: false,
+        projectEditing: null,
+        /* 历史项目只读查看 */
+        historyProjectOpen: false,
+        historyProject: null,
         /* 回款 */
         paymentOpen: false,
         paymentType: '计划',
         paymentEditing: null,
-        /* 成本台账 */
+        /* 成本台账（只针对选中项目） */
         costs: [],
         costByCategory: [],
         costTotal: 0,
@@ -64,29 +77,30 @@ window.CRM = window.CRM || {};
         return [
           { key: 'basic', label: '资料' },
           { key: 'followups', label: '回访与跟进', badge: c ? c.followups.length : 0 },
-          { key: 'project', label: '项目与财务' },
+          { key: 'project', label: '项目与财务', badge: this.projects.length || 0 },
           { key: 'files', label: '附件与日志' }
         ];
       },
       extraContacts() {
         return (this.customer && this.customer.contacts || []).filter((x) => !x.is_primary);
       },
-      /* 财务汇总栏（8 个数字 + 预计毛利） */
+      /* 财务汇总栏：进行中项目合计（合同额 / 已回款 / 应收 / 成本 / 毛利 / 毛利率） */
       financeCards() {
         const f = this.finance || {};
         return [
           { key: 'contract_amount', label: '合同额', value: f.contract_amount, money: true },
-          { key: 'received_amount', label: '已收', value: f.received_amount, money: true },
+          { key: 'received_amount', label: '已回款', value: f.received_amount, money: true },
           { key: 'receivable_amount', label: '应收', value: f.receivable_amount, money: true, danger: f.receivable_amount > 0 },
-          { key: 'purchase_cost', label: '采购成本', value: f.purchase_cost, money: true },
-          { key: 'maintain_cost', label: '维护成本', value: f.maintain_cost, money: true },
-          { key: 'other_cost', label: '其他成本', value: f.other_cost, money: true },
-          { key: 'profit', label: '毛利（实收−成本）', value: f.profit, money: true, signed: true },
+          { key: 'cost_amount', label: '成本', value: f.cost_amount !== undefined ? f.cost_amount : f.total_cost, money: true },
+          { key: 'profit', label: '毛利（已回款−成本）', value: f.profit, money: true, signed: true },
           { key: 'margin', label: '毛利率', value: f.margin, percent: true }
         ];
       },
-      plans() { return (this.project && this.project.plans) || []; },
-      receipts() { return (this.project && this.project.receipts) || []; }
+      plans() { return (this.projectDetail && this.projectDetail.plans) || []; },
+      receipts() { return (this.projectDetail && this.projectDetail.receipts) || []; },
+      selectedProject() {
+        return this.projects.find((p) => p.id === this.selectedProjectId) || null;
+      }
     },
     watch: {
       id() { this.load(); }
@@ -102,8 +116,13 @@ window.CRM = window.CRM || {};
         try {
           await CRM.api.loadDict();
           this.customer = await CRM.api.getCustomer(this.id);
+          this.finance = this.customer.finance || null;
           this.extraOpen = this.extraContacts.length > 0;
-          await Promise.all([this.loadProject(), this.loadCosts()]);
+          /* 路由参数：#/customers/12?tab=project&project=34（待办里点项目名跳过来） */
+          const q = (CRM.router.state.route.query) || {};
+          if (q.tab === 'project' || q.tab === 'followups' || q.tab === 'files') this.tab = q.tab;
+          if (q.project) this.selectedProjectId = Number(q.project);
+          await this.loadProject();
         } catch (e) {
           this.error = e.message || '加载失败';
         } finally {
@@ -111,23 +130,68 @@ window.CRM = window.CRM || {};
         }
       },
 
+      /** 拉客户的项目汇总（进行中 + 归档 + 合计），并选中一个项目 */
       async loadProject() {
         try {
-          const r = await CRM.api.customerProject(this.id);
-          this.project = r.project || null;
-          this.history = r.history || [];
-          this.finance = r.finance || null;
+          const [r, fin] = await Promise.all([
+            CRM.api.customerProjects(this.id),
+            CRM.api.customerFinance(this.id).catch(() => null)
+          ]);
+          this.projects = r.active || [];
+          this.archivedProjects = r.archived || [];
+          this.history = r.archived || [];
+          this.projectSummary = r.totals || null;
+          if (fin) this.finance = fin;
+          /* 旧字段兼容：最近创建的一个进行中项目 */
+          this.project = this.projects[0] || null;
+
+          const keep = this.projects.find((p) => p.id === this.selectedProjectId);
+          if (!keep) this.selectedProjectId = this.projects.length ? this.projects[0].id : null;
+          await this.loadProjectDetail();
+          await this.loadCosts();
         } catch (_) {
-          this.project = null;
+          this.projects = [];
+          this.archivedProjects = [];
           this.history = [];
-          this.finance = null;
+          this.projectSummary = null;
+          this.project = null;
+          this.projectDetail = null;
+          this.costs = [];
+          this.costByCategory = [];
+          this.costTotal = 0;
         }
       },
 
+      /** 选中项目的完整详情（回款计划 / 实收 / 待办 / 汇总） */
+      async loadProjectDetail() {
+        if (!this.selectedProjectId) {
+          this.projectDetail = null;
+          return;
+        }
+        try {
+          this.projectDetail = await CRM.api.getProject(this.selectedProjectId);
+        } catch (_) {
+          this.projectDetail = null;
+          this.selectedProjectId = null;
+        }
+      },
+
+      /** 切换选中项目：只刷新该项目下的回款与成本 */
+      async selectProject(p) {
+        if (!p || !p.id || p.id === this.selectedProjectId) return;
+        this.selectedProjectId = p.id;
+        await this.loadProjectDetail();
+        await this.loadCosts();
+      },
+
+      /** 成本台账按「选中项目」查，互不影响 */
       async loadCosts() {
         this.costsLoading = true;
         try {
-          const r = await CRM.api.listCosts({ customer_id: this.id, pageSize: 100 });
+          const params = { pageSize: 100 };
+          if (this.selectedProjectId) params.project_id = this.selectedProjectId;
+          else params.customer_id = this.id;
+          const r = await CRM.api.listCosts(params);
           this.costs = r.list || [];
           this.costByCategory = r.by_category || [];
           this.costTotal = r.amount || 0;
@@ -217,54 +281,104 @@ window.CRM = window.CRM || {};
         }
       },
 
-      /* ---------------- 项目档案 ---------------- */
-      openProject() { this.projectOpen = true; },
-      async onProjectSaved() { await this.load(); },
-      async archiveProject() {
+      /* ---------------- 项目（一个客户可多个） ---------------- */
+      /** 打开项目抽屉：不传 = 新增；传项目 = 编辑（先取完整详情，避免只带列表行丢字段） */
+      async openProject(p) {
+        if (p && p.id) {
+          try {
+            this.projectEditing = await CRM.api.getProject(p.id);
+          } catch (e) {
+            CRM.toast(e.message || '项目详情加载失败', 'error');
+            return;
+          }
+        } else {
+          this.projectEditing = null;
+        }
+        this.projectOpen = true;
+      },
+      async onProjectSaved(r) {
+        this.projectOpen = false;
+        if (r && r.id) this.selectedProjectId = Number(r.id);
+        await this.load();
+      },
+      async archiveProject(p) {
+        const row = p || this.selectedProject || this.projects[0];
+        if (!row || !row.id) return;
         const ok = await CRM.confirm({
-          title: '把当前项目转为历史',
-          message: '转为历史后这条项目只读，之后可以再建立新的当前项目。回款与成本记录都会保留。',
+          title: '把项目归档为历史',
+          message: `「${row.name || '（未命名项目）'}」归档后只读，不计入客户财务合计；回款与成本记录都会保留，可随时恢复归档。`,
           okText: '转为历史'
         });
         if (!ok) return;
         try {
-          await CRM.api.archiveCustomerProject(this.id);
-          CRM.toast('已转为历史项目', 'success');
+          await CRM.api.archiveCustomerProject(this.id, row.id);
+          CRM.toast('已归档为历史项目', 'success');
           await this.load();
         } catch (e) {
           CRM.toast(e.message || '操作失败', 'error');
         }
       },
-      /** 第一次登记回款前先保证有项目档案（1:1） */
-      async ensureProject() {
-        if (this.project && this.project.id) return true;
+      async unarchiveProject(p) {
+        if (!p || !p.id) return;
+        const ok = await CRM.confirm({
+          title: '恢复归档',
+          message: `把「${p.name || '（未命名项目）'}」恢复为进行中项目？恢复后会重新计入客户财务合计。`,
+          okText: '恢复归档'
+        });
+        if (!ok) return;
         try {
-          await CRM.api.saveCustomerProject(this.id, {});
-          await this.loadProject();
-          return true;
+          await CRM.api.unarchiveProject(p.id);
+          CRM.toast('已恢复为进行中项目', 'success');
+          this.historyProjectOpen = false;
+          this.selectedProjectId = p.id;
+          await this.load();
         } catch (e) {
-          CRM.toast(e.message || '建立项目档案失败', 'error');
-          return false;
+          CRM.toast(e.message || '操作失败', 'error');
         }
+      },
+      async removeProject(p) {
+        if (!p || !p.id) return;
+        const ok = await CRM.confirm({
+          title: '删除项目',
+          message: `删除「${p.name || '（未命名项目）'}」？该项目的回款与成本会一起移入回收站，其它项目不受影响。`,
+          danger: true
+        });
+        if (!ok) return;
+        try {
+          await CRM.api.deleteProjects([p.id]);
+          CRM.toast('项目已删除', 'success');
+          if (this.selectedProjectId === p.id) this.selectedProjectId = null;
+          await this.load();
+        } catch (e) {
+          CRM.toast(e.message || '删除失败', 'error');
+        }
+      },
+      /** 历史项目只读查看（含回款计划与实收流水） */
+      async viewHistoryProject(p) {
+        try {
+          this.historyProject = await CRM.api.getProject(p.id);
+          this.historyProjectOpen = true;
+        } catch (e) {
+          CRM.toast(e.message || '历史项目加载失败', 'error');
+        }
+      },
+      /** 登记回款/成本前必须有选中的进行中项目 */
+      requireProject() {
+        if (this.projectDetail && this.projectDetail.id) return true;
+        CRM.toast('请先在上方新增或选择一个进行中项目', 'warn');
+        return false;
       },
 
       /* ---------------- 回款 ---------------- */
       async openPayment(type, row) {
+        if (!this.requireProject()) return;
         this.paymentType = type;
         this.paymentEditing = row || null;
-        if (!row) {
-          const ok = await this.ensureProject();
-          if (!ok) return;
-        }
-        if (type === '实收' && !this.project) {
-          CRM.toast('请先建立项目档案', 'error');
-          return;
-        }
         this.paymentOpen = true;
       },
       async onPaymentSaved() {
         this.paymentOpen = false;
-        await this.load();
+        await this.loadProject();
       },
       async removePayment(row) {
         const ok = await CRM.confirm({
@@ -276,20 +390,20 @@ window.CRM = window.CRM || {};
         try {
           await CRM.api.deletePayment(row.id);
           CRM.toast('已删除', 'success');
-          await this.load();
+          await this.loadProject();
         } catch (e) {
           CRM.toast(e.message || '删除失败', 'error');
         }
       },
 
-      /* ---------------- 成本台账 ---------------- */
+      /* ---------------- 成本台账（只针对选中项目） ---------------- */
       openCost(row) {
+        if (!row && !this.requireProject()) return;
         this.costEditing = row || null;
         this.costOpen = true;
       },
       async onCostSaved() {
         this.costOpen = false;
-        await this.loadCosts();
         await this.loadProject();
       },
       async removeCost(row) {
@@ -302,7 +416,6 @@ window.CRM = window.CRM || {};
         try {
           await CRM.api.deleteCost(row.id);
           CRM.toast('已删除', 'success');
-          await this.loadCosts();
           await this.loadProject();
         } catch (e) {
           CRM.toast(e.message || '删除失败', 'error');
@@ -380,7 +493,7 @@ window.CRM = window.CRM || {};
               <div class="card-head">
                 <div>
                   <div class="card-title">财务汇总</div>
-                  <div class="card-sub">毛利 = 已收 − 采购成本 − 维护成本 − 其他成本；全部自动算，明细在「项目与财务」</div>
+                  <div class="card-sub">进行中项目合计（{{ projects.length }} 个项目）：毛利 = 已回款 − 成本；全部自动算，明细在「项目与财务」</div>
                 </div>
                 <div class="spacer"></div>
                 <button class="btn btn-sm" @click="tab = 'project'">查看明细</button>
@@ -551,38 +664,119 @@ window.CRM = window.CRM || {};
 
           <!-- ==================== 项目与财务 ==================== -->
           <div v-show="tab === 'project'">
-            <!-- 当前项目档案 -->
+            <!-- 客户级财务汇总（进行中项目合计） -->
             <div class="card" style="margin-bottom:12px">
               <div class="card-head">
                 <div>
-                  <div class="card-title">当前项目档案</div>
-                  <div class="card-sub">一客户一项目：历史项目会归档只读，回款与成本都挂在这条档案上</div>
+                  <div class="card-title">进行中项目合计</div>
+                  <div class="card-sub">
+                    进行中 {{ projects.length }} 个 · 历史归档 {{ archivedProjects.length }} 个；
+                    下面的数字是进行中项目逐行相加，与列表一致
+                  </div>
                 </div>
                 <div class="spacer"></div>
-                <button class="btn btn-sm btn-primary" @click="openProject">
-                  {{ project ? '编辑档案' : '+ 建立项目档案' }}
+                <button class="btn btn-sm btn-primary" @click="openProject(null)">
+                  <c-icon name="plus" :size="14" /> 新增项目
                 </button>
-                <button v-if="project" class="btn btn-sm" @click="archiveProject">转为历史</button>
               </div>
               <div class="card-body">
-                <c-empty v-if="!project" icon="projects" title="还没有项目档案"
-                         desc="客户可以暂时没有项目；第一次登记回款或成本时会自动建立一条空档案。" />
+                <div class="stat-grid fin-grid">
+                  <div class="stat" v-for="c in financeCards" :key="'p-' + c.key">
+                    <div class="n" :style="c.danger ? 'color:var(--c-danger)' :
+                         (c.signed ? (c.value < 0 ? 'color:var(--c-danger)' : 'color:var(--c-success)') : '')">
+                      <template v-if="c.percent">{{ c.value === null ? '—' : c.value + '%' }}</template>
+                      <template v-else>{{ fmtMoney(c.value) }}</template>
+                    </div>
+                    <div class="l">{{ c.label }}</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- 进行中项目列表（一个客户可多个） -->
+            <div class="card" style="margin-bottom:12px">
+              <div class="card-head">
+                <div>
+                  <div class="card-title">进行中项目（{{ projects.length }}）</div>
+                  <div class="card-sub">点某一行选中项目，下方回款 / 实收 / 成本只作用于选中项目</div>
+                </div>
+                <div class="spacer"></div>
+                <button class="btn btn-sm btn-primary" @click="openProject(null)">+ 新增项目</button>
+              </div>
+              <div class="card-body">
+                <c-empty v-if="!projects.length" icon="projects" title="还没有进行中的项目"
+                         desc="一个客户可以同时管理多个项目，点右上角「+ 新增项目」开始。" />
+                <div v-else class="table-wrap">
+                  <table class="data-table">
+                    <thead>
+                      <tr>
+                        <th>项目名称</th>
+                        <th style="width:110px">阶段</th>
+                        <th style="width:80px">进度</th>
+                        <th style="width:120px;text-align:right">合同额</th>
+                        <th style="width:120px;text-align:right">已回款</th>
+                        <th style="width:110px;text-align:right">成本</th>
+                        <th style="width:110px;text-align:right">毛利</th>
+                        <th style="width:180px">操作</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="p in projects" :key="p.id" style="cursor:pointer"
+                          :style="p.id === selectedProjectId ? 'background:var(--c-primary-soft)' : ''"
+                          @click="selectProject(p)">
+                        <td>
+                          {{ p.name || '（未命名）' }}
+                          <span v-if="p.id === selectedProjectId" class="tag" style="margin-left:6px">选中</span>
+                        </td>
+                        <td><span class="tag muted">{{ p.stage }}</span></td>
+                        <td>{{ p.progress }}%</td>
+                        <td class="num">{{ fmtMoney(p.contract_amount) }}</td>
+                        <td class="num">{{ fmtMoney(p.received_amount) }}</td>
+                        <td class="num">{{ fmtMoney(p.cost_amount) }}</td>
+                        <td class="num" :style="p.profit < 0 ? 'color:var(--c-danger)' : ''">{{ fmtMoney(p.profit) }}</td>
+                        <td @click.stop>
+                          <button class="btn btn-sm" @click="openProject(p)">编辑</button>
+                          <button class="btn btn-sm" @click="archiveProject(p)">归档</button>
+                          <button class="btn btn-sm btn-danger" @click="removeProject(p)">删</button>
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+
+            <!-- 选中项目档案 -->
+            <div class="card" style="margin-bottom:12px">
+              <div class="card-head">
+                <div>
+                  <div class="card-title">{{ projectDetail ? (projectDetail.name || '（未命名项目）') : '项目档案' }}</div>
+                  <div class="card-sub">
+                    {{ projectDetail ? '选中项目的档案；回款与成本只挂在这一个项目上' : '先在列表里选择一个项目' }}
+                  </div>
+                </div>
+                <div class="spacer"></div>
+                <button v-if="projectDetail" class="btn btn-sm" @click="openProject(projectDetail)">编辑项目</button>
+              </div>
+              <div class="card-body">
+                <c-empty v-if="!projectDetail" icon="projects" title="还没有进行中的项目"
+                         desc="新增项目后，就能在这里维护它的回款计划、实收与成本。" />
                 <div v-else class="kv">
-                  <div class="k">项目名称</div><div class="v">{{ project.name || '（未命名）' }}</div>
-                  <div class="k">项目阶段</div><div class="v"><span class="tag">{{ project.stage }}</span></div>
-                  <div class="k">进度</div><div class="v">{{ project.progress }}%</div>
-                  <div class="k">合同额</div><div class="v">{{ fmtMoney(project.contract_amount) }} 元</div>
-                  <div class="k">签约日期</div><div class="v">{{ project.signed_at || '—' }}</div>
-                  <div class="k">投标日期</div><div class="v">{{ project.bid_date || '—' }}</div>
-                  <div class="k">投标结果</div><div class="v">{{ project.bid_result || '—' }}</div>
-                  <div class="k">交货期</div><div class="v">{{ project.delivery_date || '—' }}</div>
+                  <div class="k">项目名称</div><div class="v">{{ projectDetail.name || '（未命名）' }}</div>
+                  <div class="k">项目阶段</div><div class="v"><span class="tag">{{ projectDetail.stage }}</span></div>
+                  <div class="k">进度</div><div class="v">{{ projectDetail.progress }}%</div>
+                  <div class="k">合同额</div><div class="v">{{ fmtMoney(projectDetail.contract_amount) }} 元</div>
+                  <div class="k">签约日期</div><div class="v">{{ projectDetail.signed_at || '—' }}</div>
+                  <div class="k">投标日期</div><div class="v">{{ projectDetail.bid_date || '—' }}</div>
+                  <div class="k">投标结果</div><div class="v">{{ projectDetail.bid_result || '—' }}</div>
+                  <div class="k">交货期</div><div class="v">{{ projectDetail.delivery_date || '—' }}</div>
                   <div class="k">已收 / 欠款</div>
                   <div class="v">
-                    {{ fmtMoney(project.received_amount) }} 元
-                    <span :style="project.debt_amount > 0 ? 'color:var(--c-danger)' : ''">
-                      / 欠 {{ fmtMoney(project.debt_amount) }} 元
+                    {{ fmtMoney(projectDetail.received_amount) }} 元
+                    <span :style="projectDetail.debt_amount > 0 ? 'color:var(--c-danger)' : ''">
+                      / 欠 {{ fmtMoney(projectDetail.debt_amount) }} 元
                     </span>
-                    <span class="muted">（回款率 {{ project.payment_rate }}%）</span>
+                    <span class="muted">（回款率 {{ projectDetail.payment_rate }}%）</span>
                   </div>
                 </div>
               </div>
@@ -593,7 +787,10 @@ window.CRM = window.CRM || {};
               <div class="card-head">
                 <div>
                   <div class="card-title">回款计划</div>
-                  <div class="card-sub">保存计划会按设置里的提前天数自动生成待办</div>
+                  <div class="card-sub">
+                    {{ projectDetail ? '项目：' + (projectDetail.name || '（未命名项目）') + ' · ' : '' }}
+                    保存计划会按设置里的提前天数自动生成待办
+                  </div>
                 </div>
                 <div class="spacer"></div>
                 <button class="btn btn-sm btn-primary" @click="openPayment('计划', null)">+ 新增计划</button>
@@ -639,7 +836,10 @@ window.CRM = window.CRM || {};
               <div class="card-head">
                 <div>
                   <div class="card-title">实收流水</div>
-                  <div class="card-sub">登记后自动重算欠款、回款率与毛利</div>
+                  <div class="card-sub">
+                    {{ projectDetail ? '项目：' + (projectDetail.name || '（未命名项目）') + ' · ' : '' }}
+                    登记后自动重算欠款、回款率与毛利
+                  </div>
                 </div>
                 <div class="spacer"></div>
                 <button class="btn btn-sm btn-primary" @click="openPayment('实收', null)">+ 登记实收</button>
@@ -679,7 +879,10 @@ window.CRM = window.CRM || {};
               <div class="card-head">
                 <div>
                   <div class="card-title">成本台账</div>
-                  <div class="card-sub">采购成本 / 维护成本 / 差旅 / 其他；毛利 = 已收 − 这些成本</div>
+                  <div class="card-sub">
+                    {{ projectDetail ? '项目：' + (projectDetail.name || '（未命名项目）') + ' · ' : '' }}
+                    采购成本 / 维护成本 / 差旅 / 其他；毛利 = 已回款 − 这些成本
+                  </div>
                 </div>
                 <div class="spacer"></div>
                 <button class="btn btn-sm btn-primary" @click="openCost(null)">+ 登记成本</button>
@@ -719,31 +922,46 @@ window.CRM = window.CRM || {};
               </div>
             </div>
 
-            <!-- 历史项目（折叠只读） -->
+            <!-- 历史项目（折叠：只读查看 / 恢复归档） -->
             <div class="card">
               <div class="card-head" style="cursor:pointer" @click="historyOpen = !historyOpen">
                 <div>
-                  <div class="card-title">历史项目（{{ history.length }}）</div>
-                  <div class="card-sub">已归档的旧项目只读保留，回款与成本记录仍在</div>
+                  <div class="card-title">历史项目（{{ archivedProjects.length }}）</div>
+                  <div class="card-sub">已归档的项目只读保留，可随时「恢复归档」重新计入进行中</div>
                 </div>
                 <div class="spacer"></div>
                 <button class="icon-btn" @click.stop="historyOpen = !historyOpen">{{ historyOpen ? '▾' : '▸' }}</button>
               </div>
               <div v-show="historyOpen" class="card-body">
-                <c-empty v-if="!history.length" icon="projects" title="没有历史项目" />
+                <c-empty v-if="!archivedProjects.length" icon="projects" title="没有历史项目"
+                         desc="把进行中的项目「归档」后会出现在这里，随时可以恢复。" />
                 <div v-else class="table-wrap">
                   <table class="data-table">
                     <thead>
-                      <tr><th>项目名称</th><th style="width:110px">阶段</th><th style="width:90px">进度</th><th style="width:130px;text-align:right">合同额</th><th style="width:130px;text-align:right">已收</th><th style="width:90px">归档</th></tr>
+                      <tr>
+                        <th>项目名称</th>
+                        <th style="width:110px">阶段</th>
+                        <th style="width:80px">进度</th>
+                        <th style="width:120px;text-align:right">合同额</th>
+                        <th style="width:120px;text-align:right">已回款</th>
+                        <th style="width:110px;text-align:right">成本</th>
+                        <th style="width:110px;text-align:right">毛利</th>
+                        <th style="width:150px">操作</th>
+                      </tr>
                     </thead>
                     <tbody>
-                      <tr v-for="h in history" :key="h.id">
-                        <td>{{ h.name || '（未命名）' }}</td>
+                      <tr v-for="h in archivedProjects" :key="h.id">
+                        <td>{{ h.name || '（未命名）' }} <span class="tag muted">只读</span></td>
                         <td><span class="tag muted">{{ h.stage }}</span></td>
                         <td>{{ h.progress }}%</td>
                         <td class="num">{{ fmtMoney(h.contract_amount) }}</td>
                         <td class="num">{{ fmtMoney(h.received_amount) }}</td>
-                        <td><span class="tag">只读</span></td>
+                        <td class="num">{{ fmtMoney(h.cost_amount) }}</td>
+                        <td class="num" :style="h.profit < 0 ? 'color:var(--c-danger)' : ''">{{ fmtMoney(h.profit) }}</td>
+                        <td>
+                          <button class="btn btn-sm" @click="viewHistoryProject(h)">查看</button>
+                          <button class="btn btn-sm" @click="unarchiveProject(h)">恢复归档</button>
+                        </td>
                       </tr>
                     </tbody>
                   </table>
@@ -788,25 +1006,72 @@ window.CRM = window.CRM || {};
                            :customer-name="customer ? customer.name : ''"
                            @saved="onFollowSaved" />
 
-        <!-- 项目档案 -->
+        <!-- 项目抽屉：projectEditing=null 为新增，否则编辑指定项目 -->
         <c-project-edit v-model="projectOpen" :customer-id="id"
                         :customer-name="customer ? customer.name : ''"
-                        :project="project" @saved="onProjectSaved" />
+                        :project="projectEditing"
+                        :index="projects.length + 1" @saved="onProjectSaved" />
 
-        <!-- 回款 -->
+        <!-- 回款（作用于选中项目） -->
         <c-payment-drawer v-model="paymentOpen" :type="paymentType"
-                          :project-id="project ? project.id : ''"
-                          :project-name="project ? (project.name || '（未命名项目）') : ''"
-                          :contract-amount="project ? project.contract_amount : 0"
-                          :debt-amount="project ? project.debt_amount : 0"
+                          :project-id="projectDetail ? projectDetail.id : ''"
+                          :project-name="projectDetail ? (projectDetail.name || '（未命名项目）') : ''"
+                          :contract-amount="projectDetail ? projectDetail.contract_amount : 0"
+                          :debt-amount="projectDetail ? projectDetail.debt_amount : 0"
                           :plans="plans"
                           :payment="paymentEditing" @saved="onPaymentSaved" />
 
-        <!-- 成本登记 -->
+        <!-- 成本登记（作用于选中项目） -->
         <c-cost-drawer v-model="costOpen" :customer-id="id"
-                       :project-id="project ? project.id : ''"
+                       :project-id="projectDetail ? projectDetail.id : ''"
                        :customer-name="customer ? customer.name : ''"
                        :cost="costEditing" @saved="onCostSaved" />
+
+        <!-- 历史项目只读查看 -->
+        <c-drawer v-model="historyProjectOpen"
+                  :title="historyProject ? (historyProject.name || '历史项目') : '历史项目'"
+                  sub="历史项目只读；回款与成本记录仍保留" width="720px">
+          <template v-if="historyProject">
+            <div class="note warn" style="margin-bottom:14px">
+              <c-icon name="alert" :size="16" />
+              <div style="font-size:var(--fs-sm)">
+                该项目已归档（历史项目），不能修改与登记新回款；如需继续维护请点「恢复归档」。
+              </div>
+            </div>
+            <div class="kv">
+              <div class="k">项目名称</div><div class="v">{{ historyProject.name || '（未命名）' }}</div>
+              <div class="k">项目阶段</div><div class="v"><span class="tag muted">{{ historyProject.stage }}</span></div>
+              <div class="k">进度</div><div class="v">{{ historyProject.progress }}%</div>
+              <div class="k">合同额</div><div class="v">{{ fmtMoney(historyProject.contract_amount) }} 元</div>
+              <div class="k">已回款</div><div class="v">{{ fmtMoney(historyProject.received_amount) }} 元</div>
+              <div class="k">成本</div>
+              <div class="v">{{ fmtMoney(historyProject.cost_amount) }} 元</div>
+              <div class="k">签约日期</div><div class="v">{{ historyProject.signed_at || '—' }}</div>
+              <div class="k">回款计划</div>
+              <div class="v">{{ (historyProject.plans || []).length }} 条 · 实收 {{ (historyProject.receipts || []).length }} 条</div>
+            </div>
+            <div class="table-wrap mt-4" v-if="(historyProject.plans || []).length">
+              <table class="data-table">
+                <thead><tr><th>计划日期</th><th>计划金额</th><th>已核销</th><th>状态</th></tr></thead>
+                <tbody>
+                  <tr v-for="p in historyProject.plans" :key="p.id">
+                    <td>{{ p.plan_date || '—' }}</td>
+                    <td class="num">{{ fmtMoney(p.amount) }}</td>
+                    <td class="num">{{ fmtMoney(p.settled_amount) }}</td>
+                    <td><span class="tag" :class="p.is_settled ? 'success' : 'muted'">{{ p.is_settled ? '已核销' : '待收' }}</span></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </template>
+          <template #footer>
+            <div style="flex:1"></div>
+            <button class="btn" @click="historyProjectOpen = false">关闭</button>
+            <button v-if="historyProject" class="btn btn-primary" @click="unarchiveProject(historyProject)">
+              恢复归档
+            </button>
+          </template>
+        </c-drawer>
 
         <!-- 附加联系人编辑 -->
         <c-drawer v-model="contactOpen"

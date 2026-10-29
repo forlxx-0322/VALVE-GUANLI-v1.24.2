@@ -1248,32 +1248,36 @@ function insertContact(db, d, ts) {
 }
 
 /**
- * 导入项目：1.23 起一客户一项目。
- * 已有当前项目时，导入的这条直接落成「历史项目」（archived=1），不阻断导入。
+ * 导入项目：1.27 起一个客户可以同时有多个进行中项目。
+ * 导入的项目默认落成「进行中」（archived=0）；同一客户内与已在进行中的项目重名时报错，
+ * 由导入报告把该行标为失败（不静默改成历史项目）。
  */
 function insertProject(db, d, ts) {
   const cust = db.prepare('SELECT id FROM customers WHERE name = ? AND deleted_at IS NULL').get(d.customer_name);
   if (!cust) throw new Error(`找不到客户「${d.customer_name}」`);
-  const current = db.prepare(
-    'SELECT id FROM projects WHERE customer_id = ? AND deleted_at IS NULL AND archived = 0'
-  ).get(cust.id);
+  const active = db.prepare(
+    'SELECT id, name FROM projects WHERE customer_id = ? AND deleted_at IS NULL AND archived = 0'
+  ).all(cust.id);
+  const norm = (s) => String(s || '').trim().toLowerCase();
+  const dup = active.find((p) => norm(p.name) === norm(d.name));
+  if (dup) throw new Error(`同一客户下已有进行中项目「${dup.name}」，项目名不能重复`);
   const info = db.prepare(`
     INSERT INTO projects (name, customer_id, stage, progress, end_user, design_institute,
       valve_needs, quantity, contract_amount, signed_at, bid_date, bid_result, win_rate_note,
       start_date, end_date, delivery_date, owner, remark, archived, data_origin, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Excel 导入', ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'Excel 导入', ?, ?)
   `).run(
     d.name, cust.id, d.stage || '信息收集', Number(d.progress) || 0,
     d.end_user || '', d.design_institute || '', d.valve_needs || '', Number(d.quantity) || 0,
     Number(d.contract_amount) || 0, d.signed_at || null, d.bid_date || null,
     d.bid_result || '', d.win_rate_note || '', d.start_date || null, d.end_date || null,
-    d.delivery_date || null, d.owner || '', d.remark || '', current ? 1 : 0, ts, ts
+    d.delivery_date || null, d.owner || '', d.remark || '', ts, ts
   );
   const id = Number(info.lastInsertRowid);
   db.prepare(
     `INSERT INTO activity_logs (entity_type, entity_id, action, summary, detail, created_at)
      VALUES ('project', ?, 'create', ?, '', ?)`
-  ).run(id, `Excel 导入新建项目：${d.name}${current ? '（该客户已有当前项目，本条转为历史）' : ''}`, ts);
+  ).run(id, `Excel 导入新建项目：${d.name}`, ts);
   return id;
 }
 

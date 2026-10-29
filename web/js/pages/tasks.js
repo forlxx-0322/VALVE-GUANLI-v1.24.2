@@ -27,7 +27,8 @@ window.CRM = window.CRM || {};
         filterPriority: '',
         filterSource: '',
         keyword: '',
-        form: { title: '', due_at: '', priority: '中', customer_id: '', remark: '' },
+        form: { title: '', due_at: '', priority: '中', customer_id: '', project_id: '', remark: '' },
+        projectOptions: [],
         saving: false,
         showMore: false
       };
@@ -37,8 +38,30 @@ window.CRM = window.CRM || {};
       sources() { return ['手动', '跟进计划', '回款计划']; },
       currentView() { return this.views.find((v) => v.key === this.view) || this.views[0]; }
     },
+    watch: {
+      /* 关联客户变化后，只列该客户「进行中」项目供选择（可空） */
+      'form.customer_id'(v) {
+        this.form.project_id = '';
+        this.loadProjectsForCustomer(v);
+      }
+    },
     methods: {
       fmtDate: CRM.util.fmtDate,
+
+      async loadProjectsForCustomer(customerId) {
+        if (!customerId) { this.projectOptions = []; return; }
+        try {
+          const d = await CRM.api.listProjects({
+            customer_id: customerId, status: 'active', pageSize: 200
+          });
+          this.projectOptions = (d.list || []).map((p) => ({
+            value: p.id,
+            label: p.name || ('（未命名项目 #' + p.id + '）')
+          }));
+        } catch (_) {
+          this.projectOptions = [];
+        }
+      },
 
       async load() {
         this.loading = true;
@@ -70,6 +93,7 @@ window.CRM = window.CRM || {};
             due_at: this.form.due_at ? this.form.due_at.replace('T', ' ') + ':00' : null,
             priority: this.form.priority,
             customer_id: this.form.customer_id ? Number(this.form.customer_id) : null,
+            project_id: this.form.project_id ? Number(this.form.project_id) : null,
             remark: this.form.remark,
             source: '手动'
           });
@@ -77,6 +101,7 @@ window.CRM = window.CRM || {};
           this.form.due_at = '';
           this.form.priority = '中';
           this.form.remark = '';
+          this.form.project_id = '';
           CRM.toast('待办已添加', 'success');
           this.load();
         } catch (e) {
@@ -147,8 +172,14 @@ window.CRM = window.CRM || {};
       },
 
       goCustomer(t) { if (t.customer_id) CRM.router.navigate(`/customers/${t.customer_id}`); },
-      /* 1.23：没有独立项目页了，项目档案挂在客户详情里 */
-      goProject(t) { if (t.customer_id) CRM.router.navigate(`/customers/${t.customer_id}`); },
+      /* 项目挂在客户详情「项目与财务」里；带上项目 id 让详情页直接选中 */
+      goProject(t) {
+        if (!t.customer_id) return;
+        const suffix = t.project_id
+          ? `?tab=project&project=${t.project_id}`
+          : '?tab=project';
+        CRM.router.navigate(`/customers/${t.customer_id}${suffix}`);
+      },
 
       dueText(t) {
         if (!t.due_at) return '无截止时间';
@@ -196,6 +227,13 @@ window.CRM = window.CRM || {};
             <div class="form-grid">
               <c-ref-select v-model="form.customer_id" label="关联客户"
                             :options="customers.map(c => ({ value: c.id, label: c.label }))" />
+              <c-ref-select v-model="form.project_id" label="关联项目"
+                            :options="projectOptions"
+                            :disabled="!form.customer_id"
+                            empty-label="（不关联项目）"
+                            :hint="form.customer_id
+                              ? (projectOptions.length ? '只列该客户进行中的项目，可不选' : '该客户还没有进行中的项目')
+                              : '先选客户，再选项目'" />
               <c-field v-model="form.remark" label="备注" />
             </div>
           </div>

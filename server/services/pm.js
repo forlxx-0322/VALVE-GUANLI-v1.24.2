@@ -1,10 +1,12 @@
 /**
- * 业务服务层 —— 项目档案（1:1） / 回款 / 待办
+ * 业务服务层 —— 项目（1:N） / 回款 / 待办
  *
- * 1.23 起「项目」不再是一个独立模块，而是客户详情里的**项目档案**：
- *   - 一个客户最多一条「当前项目」（projects.archived = 0），有部分唯一索引兜底
- *   - 历史项目 archived = 1，只读
- *   - 回款 / 成本 / 待办 / 附件仍挂 project_id（内部保留，不搬表）
+ * 1.27 起「项目」是客户详情里的**项目列表**：一个客户可以同时有多个进行中项目。
+ *   - 进行中项目：projects.deleted_at IS NULL AND archived = 0
+ *   - 历史项目：archived = 1，只读、可恢复归档，不计入客户财务汇总
+ *   - 同一客户内、未删除且未归档的项目名不能重复（去空格、忽略大小写）；
+ *     跨客户允许同名。数据库层不再有唯一索引，由本文件 saveProject 校验。
+ *   - 回款 / 成本 / 待办 / 附件仍挂 project_id，各项目互不影响
  *
  * 核心设计（方案第 2.5–2.7 节）：
  *   1. 欠款、回款率、回款状态**全部实时算出**，不接受人工填写的「已回款」
@@ -124,6 +126,43 @@ function addDays(dateStr, days) {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
+/** 项目名归一化：去首尾空格、忽略大小写（用于同客户内查重） */
+function normalizeProjectName(name) {
+  return String(name === null || name === undefined ? '' : name).trim().toLowerCase();
+}
+
+/**
+ * 同一客户内、未删除且未归档的项目名不能重复。
+ * 跨客户允许同名；历史（已归档）项目不参与查重，空名称不校验。
+ * @param {number} excludeId 编辑时排除自身
+ */
+function assertProjectNameUnique(db, customerId, name, excludeId) {
+  const target = normalizeProjectName(name);
+  if (!target) return;
+  const rows = db.prepare(
+    `SELECT id, name FROM projects
+     WHERE customer_id = ? AND deleted_at IS NULL AND archived = 0`
+  ).all(Number(customerId));
+  const dup = rows.find((r) => Number(r.id) !== Number(excludeId || 0)
+    && normalizeProjectName(r.name) === target);
+  if (dup) {
+    throw badRequest(
+      `同一客户下已有进行中项目「${String(dup.name).trim()}」，项目名不能重复`,
+      'NAME_DUPLICATE'
+    );
+  }
+}
+
+/** 解析项目列表的归档筛选：支持 status=active|archived|all 与 include_archived */
+function resolveArchiveFilter(q) {
+  const status = String(q.status || '').trim();
+  if (status === 'active' || status === 'archived' || status === 'all') return status;
+  if (String(q.include_archived) === '1' || String(q.include_archived) === 'true') return 'all';
+  if (String(q.archived) === '1') return 'archived';
+  if (String(q.archived) === 'all') return 'all';
+  return 'active';
+}
+
 /* ------------------------------------------------------------------ */
 /* 项目：列表                                                          */
 /* ------------------------------------------------------------------ */
@@ -132,9 +171,8 @@ function listProjects(db, q) {
   const where = ['p.deleted_at IS NULL'];
   const params = [];
 
-  /* 默认只看「当前项目」；archived=1 查历史归档，archived=all 查全部 */
-  if (String(q.archived) === '1') where.push('p.archived = 1');
-  else if (String(q.archived) !== 'all') where.push('p.archived = 0');
+  /* 归档筛选：默认只看「进行中」；status=active|archived|all，兼容 archived=1/all */
+  const archiveFilter = resolveArchiveFilter(q);
 
   if (q.q) {
     const kw = `%${String(q.q).trim()}%`;
@@ -193,7 +231,13 @@ function listProjects(db, q) {
     where.push(`p.contract_amount = 0 AND p.stage NOT IN ('已终止','已暂停')`);
   }
 
+  /* 归档条件最后拼，统计字段要用「不含归档条件」的过滤集算 active/archived 分布 */
+  const scopeWhere = where.slice();
+  if (archiveFilter === 'archived') where.push('p.archived = 1');
+  else if (archiveFilter === 'active') where.push('p.archived = 0');
+
   const whereSql = `WHERE ${where.join(' AND ')}`;
+  const scopeSql = `WHERE ${scopeWhere.join(' AND ')}`;
 
   const total = db.prepare(
     `SELECT COUNT(*) AS n FROM projects p LEFT JOIN customers c ON c.id = p.customer_id ${whereSql}`
@@ -248,8 +292,19 @@ function listProjects(db, q) {
   const sumRow = db.prepare(`
     SELECT COALESCE(SUM(p.contract_amount), 0) AS contract_total,
            COALESCE(SUM(COALESCE((SELECT SUM(pm.amount) FROM payments pm
-             WHERE pm.project_id = p.id AND pm.type = '实收'), 0)), 0) AS received_total
+             WHERE pm.project_id = p.id AND pm.type = '实收'), 0)), 0) AS received_total,
+           COALESCE(SUM(COALESCE((SELECT SUM(ct.amount) FROM costs ct
+             WHERE ct.project_id = p.id AND ct.deleted_at IS NULL), 0)), 0) AS cost_total
     FROM projects p LEFT JOIN customers c ON c.id = p.customer_id ${whereSql}
+  `).get(...params);
+
+  /* 统计字段：同一筛选条件下进行中 / 已归档各多少（不受分页影响） */
+  const statRow = db.prepare(`
+    SELECT COALESCE(SUM(CASE WHEN p.archived = 0 THEN 1 ELSE 0 END), 0) AS active_count,
+           COALESCE(SUM(CASE WHEN p.archived = 1 THEN 1 ELSE 0 END), 0) AS archived_count,
+           COALESCE(SUM(CASE WHEN p.archived = 0 THEN p.contract_amount ELSE 0 END), 0) AS active_contract_total,
+           COALESCE(SUM(CASE WHEN p.archived = 1 THEN p.contract_amount ELSE 0 END), 0) AS archived_contract_total
+    FROM projects p LEFT JOIN customers c ON c.id = p.customer_id ${scopeSql}
   `).get(...params);
 
   return {
@@ -258,10 +313,20 @@ function listProjects(db, q) {
     page,
     pageSize,
     pages: Math.max(1, Math.ceil(total / pageSize)),
+    status: archiveFilter,
     summary: {
       contract_total: Math.round(sumRow.contract_total * 100) / 100,
       received_total: Math.round(sumRow.received_total * 100) / 100,
-      debt_total: Math.round((sumRow.contract_total - sumRow.received_total) * 100) / 100
+      cost_total: Math.round(sumRow.cost_total * 100) / 100,
+      debt_total: Math.round((sumRow.contract_total - sumRow.received_total) * 100) / 100,
+      profit_total: Math.round((sumRow.received_total - sumRow.cost_total) * 100) / 100
+    },
+    stats: {
+      active_count: Number(statRow.active_count) || 0,
+      archived_count: Number(statRow.archived_count) || 0,
+      total_count: (Number(statRow.active_count) || 0) + (Number(statRow.archived_count) || 0),
+      active_contract_total: Math.round(statRow.active_contract_total * 100) / 100,
+      archived_contract_total: Math.round(statRow.archived_contract_total * 100) / 100
     }
   };
 }
@@ -366,9 +431,15 @@ function getProject(db, id) {
   /* 汇总 */
   const contract = Number(project.contract_amount) || 0;
   const received = project.receipts.reduce((s, r) => s + (Number(r.amount) || 0), 0);
+  const cost = Number(db.prepare(
+    'SELECT COALESCE(SUM(amount), 0) AS s FROM costs WHERE project_id = ? AND deleted_at IS NULL'
+  ).get(project.id).s) || 0;
   const planned = project.plans.reduce((s, p) => s + (Number(p.amount) || 0), 0);
   const settled = project.plans.reduce((s, p) => s + (Number(p.settled_amount) || 0), 0);
   project.received_amount = Math.round(received * 100) / 100;
+  project.cost_amount = Math.round(cost * 100) / 100;
+  project.costs = project.cost_amount;
+  project.profit = Math.round((received - cost) * 100) / 100;
   project.debt_amount = Math.round((contract - received) * 100) / 100;
   project.payment_rate = contract > 0 ? Math.round((received / contract) * 1000) / 10 : 0;
   project.payment_status = contract <= 0 ? '未签约'
@@ -376,6 +447,8 @@ function getProject(db, id) {
   project.summary = {
     contract_amount: contract,
     received_amount: project.received_amount,
+    cost_amount: project.cost_amount,
+    profit: project.profit,
     debt_amount: project.debt_amount,
     payment_rate: project.payment_rate,
     planned_amount: Math.round(planned * 100) / 100,
@@ -391,21 +464,26 @@ function getProject(db, id) {
 }
 
 /* ------------------------------------------------------------------ */
-/* 项目：客户的项目档案（1:1，1.23）                                    */
+/* 项目：客户的项目列表（1:N，1.27）                                    */
 /* ------------------------------------------------------------------ */
 
-/** 该客户的「当前项目」（archived = 0），没有则 null */
+/**
+ * 该客户「最近创建的进行中项目」（archived = 0）。
+ * 保留给旧接口 GET /api/customers/:id/project 兼容：一个客户有多个项目时
+ * 旧前端至少还能拿到最近一条，不至于整页崩掉。
+ */
 function getCurrentProjectRow(db, customerId) {
   return db.prepare(
     `SELECT * FROM projects
      WHERE customer_id = ? AND deleted_at IS NULL AND archived = 0
-     ORDER BY id DESC LIMIT 1`
+     ORDER BY created_at DESC, id DESC LIMIT 1`
   ).get(Number(customerId)) || null;
 }
 
 /**
- * 保证客户有一条当前项目档案（没有就建一条空的），返回 project id。
- * 用于：第一次登记回款 / 成本时，保证财务数据有归属。
+ * 保证客户有一条进行中项目（没有就建一条空的），返回 project id。
+ * 用于：只传了客户、没传项目的旧调用（第一次登记回款 / 成本时），
+ * 保证财务数据有项目归属。多项目时取「最近创建的进行中项目」。
  */
 function ensureProjectForCustomer(db, customerId) {
   const cid = Number(customerId);
@@ -424,34 +502,128 @@ function ensureProjectForCustomer(db, customerId) {
   return pid;
 }
 
-/** 取客户的当前项目档案（含回款计划/实收/待办/汇总）；没有返回 null */
+/**
+ * 取客户最近创建的进行中项目（含回款计划/实收/待办/汇总）；没有返回 null。
+ * 旧接口兼容用；新界面用 projectsSummary 拿完整项目列表。
+ */
 function getProjectForCustomer(db, customerId) {
   const row = getCurrentProjectRow(db, customerId);
   return row ? getProject(db, row.id) : null;
 }
 
-/** 客户的历史项目（archived = 1，只读） */
+/** 客户的历史项目（archived = 1，只读，字段精简） */
 function historyProjects(db, customerId) {
   return plainAll(db.prepare(`
     SELECT p.id, p.name, p.stage, p.progress, p.contract_amount, p.signed_at,
-           p.bid_date, p.bid_result, p.delivery_date, p.archived, p.updated_at,
+           p.bid_date, p.bid_result, p.delivery_date, p.archived, p.created_at, p.updated_at,
            COALESCE((SELECT SUM(pm.amount) FROM payments pm
-                     WHERE pm.project_id = p.id AND pm.type = '实收'), 0) AS received_amount
+                     WHERE pm.project_id = p.id AND pm.type = '实收'), 0) AS received_amount,
+           COALESCE((SELECT SUM(ct.amount) FROM costs ct
+                     WHERE ct.project_id = p.id AND ct.deleted_at IS NULL), 0) AS cost_amount
     FROM projects p
     WHERE p.customer_id = ? AND p.deleted_at IS NULL AND p.archived = 1
     ORDER BY p.updated_at DESC, p.id DESC
   `).all(Number(customerId))).map((r) => Object.assign(r, {
+    contract_amount: Math.round((Number(r.contract_amount) || 0) * 100) / 100,
     received_amount: Math.round((Number(r.received_amount) || 0) * 100) / 100,
+    cost_amount: Math.round((Number(r.cost_amount) || 0) * 100) / 100,
+    profit: Math.round(((Number(r.received_amount) || 0) - (Number(r.cost_amount) || 0)) * 100) / 100,
     debt_amount: Math.round(((Number(r.contract_amount) || 0) - (Number(r.received_amount) || 0)) * 100) / 100
   }));
 }
 
+/** 按合同额与实收算回款状态（与 finalizeProjectRow 口径一致） */
+function paymentStatusOf(contract, received) {
+  const c = Number(contract) || 0;
+  const r = Number(received) || 0;
+  if (c <= 0) return '未签约';
+  if (r <= 0) return '未开始';
+  return r >= c ? '已结清' : '部分回款';
+}
+
 /**
- * 保存客户的项目档案（1:1）：
- *   - 已有当前项目 → 更新它
+ * 客户的项目汇总（1.27 新增）：
+ *   active   —— 进行中项目数组（含合同额 / 已回款 / 成本 / 毛利 / 回款状态）
+ *   archived —— 已归档项目数组（精简字段，只读）
+ *   totals   —— 进行中项目的 合同额 / 已回款 / 成本 / 毛利 合计（客户财务口径）
+ *
+ * 说明：客户级财务数字一律取 totals，与列表逐行相加一致；
+ *       历史（归档）项目仍可查看，但不计入进行中合计。
+ */
+function projectsSummary(db, customerId) {
+  const cid = Number(customerId);
+  const cust = db.prepare('SELECT id, name FROM customers WHERE id = ? AND deleted_at IS NULL').get(cid);
+  if (!cust) throw notFound('客户不存在或已删除');
+
+  const rows = plainAll(db.prepare(`
+    SELECT p.id, p.name, p.stage, p.progress, p.contract_amount, p.signed_at,
+           p.bid_date, p.bid_result, p.delivery_date, p.owner, p.archived,
+           p.created_at, p.updated_at,
+           COALESCE((SELECT SUM(pm.amount) FROM payments pm
+                     WHERE pm.project_id = p.id AND pm.type = '实收'), 0) AS received_amount,
+           COALESCE((SELECT SUM(ct.amount) FROM costs ct
+                     WHERE ct.project_id = p.id AND ct.deleted_at IS NULL), 0) AS cost_amount,
+           (SELECT COUNT(*) FROM tasks t
+             WHERE t.project_id = p.id AND t.status = '待办' AND t.deleted_at IS NULL) AS task_count
+    FROM projects p
+    WHERE p.customer_id = ? AND p.deleted_at IS NULL
+    ORDER BY p.archived ASC, p.created_at DESC, p.id DESC
+  `).all(cid));
+
+  const finalize = (r) => {
+    const contract = Math.round((Number(r.contract_amount) || 0) * 100) / 100;
+    const received = Math.round((Number(r.received_amount) || 0) * 100) / 100;
+    const cost = Math.round((Number(r.cost_amount) || 0) * 100) / 100;
+    return Object.assign(r, {
+      contract_amount: contract,
+      received_amount: received,
+      cost_amount: cost,
+      costs: cost,
+      profit: Math.round((received - cost) * 100) / 100,
+      debt_amount: Math.round((contract - received) * 100) / 100,
+      payment_status: paymentStatusOf(contract, received),
+      task_count: Number(r.task_count) || 0
+    });
+  };
+
+  const all = rows.map(finalize);
+  const active = all.filter((r) => Number(r.archived) === 0);
+  const archived = all.filter((r) => Number(r.archived) === 1).map((r) => ({
+    id: r.id, name: r.name, stage: r.stage, progress: r.progress,
+    contract_amount: r.contract_amount, received_amount: r.received_amount,
+    cost_amount: r.cost_amount, profit: r.profit, payment_status: r.payment_status,
+    signed_at: r.signed_at, archived: 1, created_at: r.created_at, updated_at: r.updated_at
+  }));
+
+  const sum = (arr, key) => Math.round(arr.reduce((s, r) => s + (Number(r[key]) || 0), 0) * 100) / 100;
+  const contract = sum(active, 'contract_amount');
+  const received = sum(active, 'received_amount');
+  const cost = sum(active, 'cost_amount');
+  const totals = {
+    active_count: active.length,
+    archived_count: archived.length,
+    project_count: active.length + archived.length,
+    contract_amount: contract,
+    received_amount: received,
+    debt_amount: Math.round((contract - received) * 100) / 100,
+    cost_amount: cost,
+    /* total_cost 是更常见的叫法，和 cost_amount 同值，方便报表/前端直接用 */
+    total_cost: cost,
+    profit: Math.round((received - cost) * 100) / 100,
+    margin: received > 0 ? Math.round(((received - cost) / received) * 1000) / 10 : null,
+    expected_profit: Math.round((contract - cost) * 100) / 100
+  };
+
+  return { customer_id: cid, customer_name: cust.name, active, archived, totals };
+}
+
+/**
+ * 保存客户的「最近一个进行中项目」（旧接口兼容）：
+ *   - 传了 id → 更新指定项目（必须属于该客户，历史项目只读）
+ *   - 已有进行中项目 → 更新最近创建的那一个
  *   - 没有 → 新建
- *   - 传了 archived 项目的 id → 拒绝（历史只读）
- * 项目名称允许为空（客户可以暂时没有项目）。
+ * 新界面「+ 新增项目」走 POST /api/projects（带 customer_id），不会走这里。
+ * 项目名称允许为空（保留旧档案语义）。
  */
 function saveProjectForCustomer(db, customerId, payload) {
   const cid = Number(customerId);
@@ -460,13 +632,17 @@ function saveProjectForCustomer(db, customerId, payload) {
 
   const body = Object.assign({}, payload || {});
   if (body.id) {
-    const target = db.prepare('SELECT id, archived FROM projects WHERE id = ? AND customer_id = ?')
+    const target = db.prepare('SELECT id, archived FROM projects WHERE id = ? AND customer_id = ? AND deleted_at IS NULL')
       .get(Number(body.id), cid);
-    if (target && target.archived) {
-      throw badRequest('历史项目只读，不能修改；如需新建请先把当前项目转为历史', 'ARCHIVED_READONLY');
+    if (!target) throw notFound('项目不存在或不属于该客户');
+    if (target.archived) {
+      throw badRequest('历史项目只读，不能修改；如需修改请先「恢复归档」', 'ARCHIVED_READONLY');
     }
+    delete body.id;
+    const res = saveProject(db, Object.assign({}, body, { id: target.id }),
+      { allowEmptyName: true, customerId: cid });
+    return Object.assign({}, res, { id: target.id, created: false, project: getProject(db, target.id) });
   }
-  delete body.id;
 
   const cur = getCurrentProjectRow(db, cid);
   if (cur) {
@@ -478,18 +654,66 @@ function saveProjectForCustomer(db, customerId, payload) {
   return Object.assign({}, res, { created: true, project: getProject(db, res.id) });
 }
 
-/** 把当前项目转为历史（archived = 1），之后可以再建新的当前项目 */
-function archiveProject(db, customerId) {
-  const cur = getCurrentProjectRow(db, customerId);
-  if (!cur) throw notFound('该客户还没有项目档案');
+/**
+ * 把某个进行中项目转为历史（archived = 1）。
+ * @param {number} customerId 客户 ID
+ * @param {number} [projectId] 项目 ID；不传则取最近创建的进行中项目（旧接口兼容）
+ */
+function archiveProject(db, customerId, projectId) {
+  const cid = Number(customerId);
+  let row = null;
+  if (projectId) {
+    row = db.prepare(
+      'SELECT * FROM projects WHERE id = ? AND customer_id = ? AND deleted_at IS NULL'
+    ).get(Number(projectId), cid) || null;
+    if (!row) throw notFound('项目不存在或不属于该客户');
+    if (row.archived) return { id: row.id, archived: true, changed: false };
+  } else {
+    row = getCurrentProjectRow(db, cid);
+    if (!row) throw notFound('该客户还没有进行中的项目');
+  }
   const ts = now();
   db.exec('BEGIN');
   try {
-    db.prepare('UPDATE projects SET archived = 1, updated_at = ? WHERE id = ?').run(ts, cur.id);
-    logActivity(db, 'project', cur.id, 'update',
-      `项目档案转为历史：${cur.name || '（未命名）'}（客户 #${customerId}）`, null);
+    db.prepare('UPDATE projects SET archived = 1, updated_at = ? WHERE id = ?').run(ts, row.id);
+    logActivity(db, 'project', row.id, 'update',
+      `项目转为历史：${row.name || '（未命名）'}（客户 #${cid}）`, null);
     db.exec('COMMIT');
-    return { id: cur.id, archived: true };
+    return { id: row.id, archived: true, changed: true };
+  } catch (e) {
+    try { db.exec('ROLLBACK'); } catch (_) { /* 忽略 */ }
+    throw e;
+  }
+}
+
+/** 按项目 ID 归档（项目级接口用，内部再取出客户 ID 校验） */
+function archiveProjectById(db, projectId) {
+  const pid = Number(projectId);
+  const row = db.prepare(
+    'SELECT customer_id FROM projects WHERE id = ? AND deleted_at IS NULL'
+  ).get(pid);
+  if (!row) throw notFound('项目不存在或已删除');
+  return archiveProject(db, row.customer_id, pid);
+}
+
+/** 恢复归档：把历史项目重新标为进行中（archived = 0），项目名需满足同客户内不重名 */
+function unarchiveProject(db, projectId) {
+  const pid = Number(projectId);
+  const row = db.prepare(
+    'SELECT * FROM projects WHERE id = ? AND deleted_at IS NULL'
+  ).get(pid);
+  if (!row) throw notFound('项目不存在或已删除');
+  if (!row.archived) return { id: pid, archived: false, changed: false };
+
+  assertProjectNameUnique(db, row.customer_id, row.name, pid);
+  const ts = now();
+  db.exec('BEGIN');
+  try {
+    db.prepare('UPDATE projects SET archived = 0, updated_at = ? WHERE id = ?').run(ts, pid);
+    logActivity(db, 'project', pid, 'update',
+      `恢复归档：${row.name || '（未命名）'}重新回到进行中（客户 #${row.customer_id}）`, null);
+    db.exec('COMMIT');
+    return { id: pid, archived: false, changed: true };
   } catch (e) {
     try { db.exec('ROLLBACK'); } catch (_) { /* 忽略 */ }
     throw e;
@@ -529,6 +753,10 @@ function saveProject(db, payload, opts) {
       if (!o.allowEmptyName && Object.prototype.hasOwnProperty.call(data, 'name')
         && !(data.name || '').trim()) {
         throw badRequest('项目名称为必填项', 'NAME_REQUIRED');
+      }
+      /* 改名时同样校验：同一客户内、未删除且未归档的项目名不能重复 */
+      if (Object.prototype.hasOwnProperty.call(data, 'name')) {
+        assertProjectNameUnique(db, before.customer_id, data.name, id);
       }
       if (Object.prototype.hasOwnProperty.call(data, 'progress')) {
         data.progress = Math.max(0, Math.min(100, Number(data.progress) || 0));
@@ -577,33 +805,16 @@ function saveProject(db, payload, opts) {
     if (!data.stage) data.stage = '信息收集';
     data.progress = Math.max(0, Math.min(100, Number(data.progress) || 0));
 
-    /* 一客户一项目：已有当前项目时拒绝再建（要换项目请先「转为历史」） */
-    const exists = db.prepare(
-      `SELECT id, name FROM projects
-       WHERE customer_id = ? AND deleted_at IS NULL AND archived = 0 LIMIT 1`
-    ).get(customerId);
-    if (exists) {
-      throw badRequest(
-        `客户「${cust.name}」已有当前项目「${exists.name || '未命名'}」；如需新建，请先把当前项目转为历史`,
-        'PROJECT_EXISTS'
-      );
-    }
+    /* 1.27：一个客户允许同时有多个进行中项目；只校验同客户内项目名不重复 */
+    assertProjectNameUnique(db, customerId, data.name, null);
 
     data.archived = 0;
     data.created_at = ts;
     data.updated_at = ts;
     const keys = Object.keys(data);
-    let info;
-    try {
-      info = db.prepare(
-        `INSERT INTO projects (${keys.join(', ')}) VALUES (${keys.map(() => '?').join(', ')})`
-      ).run(...keys.map((k) => data[k]));
-    } catch (e) {
-      if (/UNIQUE|constraint/i.test(String(e.message || ''))) {
-        throw badRequest('该客户已有当前项目档案（一客户一项目）', 'PROJECT_EXISTS');
-      }
-      throw e;
-    }
+    const info = db.prepare(
+      `INSERT INTO projects (${keys.join(', ')}) VALUES (${keys.map(() => '?').join(', ')})`
+    ).run(...keys.map((k) => data[k]));
 
     const newId = Number(info.lastInsertRowid);
     logActivity(db, 'project', newId, 'create',
@@ -617,6 +828,13 @@ function saveProject(db, payload, opts) {
   }
 }
 
+/**
+ * 删除项目（软删除，1.27 多项目版）：
+ *   - 只处理传入的项目，同客户其它项目完全不受影响；
+ *   - 项目下的成本一并软删除（否则客户成本列表会残留「已删项目」的账）；
+ *   - 回款仍挂在 project_id 上，随项目不可见（项目还原后重新可见）；
+ *   - 回收站还原时按删除时间把级联软删的成本一起还原。
+ */
 function deleteProjects(db, ids) {
   const list = (Array.isArray(ids) ? ids : [ids]).map(Number).filter(Number.isInteger);
   if (!list.length) throw badRequest('未指定要删除的项目');
@@ -626,25 +844,41 @@ function deleteProjects(db, ids) {
   try {
     const get = db.prepare('SELECT id, name, customer_id FROM projects WHERE id = ? AND deleted_at IS NULL');
     const upd = db.prepare('UPDATE projects SET deleted_at = ?, updated_at = ? WHERE id = ?');
+    const delCosts = db.prepare(
+      'UPDATE costs SET deleted_at = ?, updated_at = ? WHERE project_id = ? AND deleted_at IS NULL'
+    );
     const names = [];
     const customers = new Set();
+    let costDeleted = 0;
     for (const id of list) {
       const p = get.get(id);
       if (!p) continue;
+      /* 记录本次级联软删的成本 id（还原时按 id 恢复，避免同秒删除的时间戳歧义） */
+      const costIds = db.prepare(
+        'SELECT id FROM costs WHERE project_id = ? AND deleted_at IS NULL'
+      ).all(id).map((r) => Number(r.id));
       upd.run(ts, ts, id);
-      logActivity(db, 'project', id, 'delete', `删除项目：${p.name}（可在回收站还原）`, null);
+      costDeleted += Number(delCosts.run(ts, ts, id).changes || 0);
+      logActivity(db, 'project', id, 'delete',
+        `删除项目：${p.name || '（未命名）'}（成本一并软删除，可在回收站还原）`,
+        { cascade: 'project_delete', cost_ids: costIds });
       names.push(p.name);
       customers.add(p.customer_id);
     }
     for (const cid of customers) syncCustomerDealAmount(db, cid, ts);
     db.exec('COMMIT');
-    return { count: names.length, names };
+    return { count: names.length, names, cost_deleted: costDeleted };
   } catch (e) {
     try { db.exec('ROLLBACK'); } catch (_) { /* 忽略 */ }
     throw e;
   }
 }
 
+/**
+ * 从回收站还原项目。
+ * 保留原 archived 状态；若同客户已有同名进行中项目，则还原为历史项目（只读），
+ * 避免把回收站操作变成一次「重名冲突」；同时还原删除时级联软删的成本。
+ */
 function restoreProjects(db, ids) {
   const list = (Array.isArray(ids) ? ids : [ids]).map(Number).filter(Number.isInteger);
   if (!list.length) throw badRequest('未指定要还原的项目');
@@ -652,30 +886,57 @@ function restoreProjects(db, ids) {
 
   db.exec('BEGIN');
   try {
-    const get = db.prepare('SELECT id, name, customer_id, archived FROM projects WHERE id = ?');
+    const get = db.prepare('SELECT id, name, customer_id, archived, deleted_at FROM projects WHERE id = ?');
     const upd = db.prepare('UPDATE projects SET deleted_at = NULL, updated_at = ? WHERE id = ?');
     const updArchived = db.prepare('UPDATE projects SET deleted_at = NULL, archived = 1, updated_at = ? WHERE id = ?');
+    const restoreCosts = db.prepare(
+      'UPDATE costs SET deleted_at = NULL, updated_at = ? WHERE project_id = ? AND deleted_at = ?'
+    );
+    const restoreCostById = db.prepare(
+      'UPDATE costs SET deleted_at = NULL, updated_at = ? WHERE id = ? AND deleted_at IS NOT NULL'
+    );
     let count = 0;
+    let costRestored = 0;
     const customers = new Set();
     for (const id of list) {
       const p = get.get(id);
       if (!p) continue;
-      /* 还原时若该客户已有当前项目，则把这条直接还原成「历史项目」，避免撞一客户一项目约束 */
-      const current = db.prepare(
-        'SELECT id FROM projects WHERE customer_id = ? AND deleted_at IS NULL AND archived = 0 AND id <> ?'
-      ).get(p.customer_id, p.id);
-      if (current) {
-        updArchived.run(ts, id);
-      } else {
-        upd.run(ts, id);
+      /* 原为历史项目，或同客户已有同名进行中项目 → 还原成历史项目 */
+      let asArchived = !!p.archived;
+      if (!asArchived) {
+        const dup = db.prepare(
+          `SELECT id FROM projects WHERE customer_id = ? AND deleted_at IS NULL AND archived = 0
+             AND id <> ? AND LOWER(TRIM(name)) = ? LIMIT 1`
+        ).get(p.customer_id, p.id, normalizeProjectName(p.name));
+        if (dup) asArchived = true;
       }
-      logActivity(db, 'project', id, 'restore', `还原项目：${p.name || '（未命名）'}`, null);
+      if (asArchived) updArchived.run(ts, id);
+      else upd.run(ts, id);
+      /* 优先按删除日志里记录的级联成本 id 恢复；旧数据没有日志时退回按删除时间恢复 */
+      let costIds = [];
+      try {
+        const log = db.prepare(
+          `SELECT detail FROM activity_logs WHERE entity_type = 'project' AND entity_id = ?
+             AND action = 'delete' ORDER BY id DESC LIMIT 1`
+        ).get(id);
+        const d = log && log.detail ? JSON.parse(log.detail) : null;
+        if (d && Array.isArray(d.cost_ids)) costIds = d.cost_ids.map(Number).filter(Number.isInteger);
+      } catch (_) { costIds = []; }
+      if (costIds.length) {
+        for (const cid of costIds) {
+          costRestored += Number(restoreCostById.run(ts, cid).changes || 0);
+        }
+      } else {
+        costRestored += Number(restoreCosts.run(ts, id, p.deleted_at).changes || 0);
+      }
+      logActivity(db, 'project', id, 'restore',
+        `还原项目：${p.name || '（未命名）'}${asArchived ? '（作为历史项目）' : ''}`, null);
       count++;
       customers.add(p.customer_id);
     }
     for (const cid of customers) syncCustomerDealAmount(db, cid, ts);
     db.exec('COMMIT');
-    return { count };
+    return { count, cost_restored: costRestored };
   } catch (e) {
     try { db.exec('ROLLBACK'); } catch (_) { /* 忽略 */ }
     throw e;
@@ -750,7 +1011,18 @@ function savePayment(db, payload) {
 
   const projectId0 = Number(data.project_id || payload.project_id);
   const customerId0 = Number(data.customer_id || payload.customer_id);
-  /* 1.23：只给了客户时，自动保证该客户有一条项目档案（财务数据要有归属） */
+  /* 同时给了项目和客户时，项目必须属于该客户（1.27 校验收紧，避免串项目） */
+  if (Number.isInteger(projectId0) && projectId0 > 0
+    && Number.isInteger(customerId0) && customerId0 > 0) {
+    const owner = db.prepare(
+      'SELECT customer_id FROM projects WHERE id = ? AND deleted_at IS NULL'
+    ).get(projectId0);
+    if (!owner) throw badRequest('所属项目不存在或已删除', 'PROJECT_NOT_FOUND');
+    if (Number(owner.customer_id) !== customerId0) {
+      throw badRequest('项目不属于该客户，不能登记回款', 'PROJECT_CUSTOMER_MISMATCH');
+    }
+  }
+  /* 只给了客户时，自动落到该客户最近创建的进行中项目（旧调用兼容） */
   let projectId = projectId0;
   if ((!Number.isInteger(projectId) || projectId <= 0)
     && Number.isInteger(customerId0) && customerId0 > 0) {
@@ -759,8 +1031,10 @@ function savePayment(db, payload) {
   if (!Number.isInteger(projectId) || projectId <= 0) throw badRequest('必须选择所属项目', 'PROJECT_REQUIRED');
   data.project_id = projectId;
 
-  const proj = db.prepare('SELECT id, name, customer_id, contract_amount FROM projects WHERE id = ? AND deleted_at IS NULL').get(projectId);
-  if (!proj) throw badRequest('所属项目不存在或已删除');
+  const proj = db.prepare(
+    'SELECT id, name, customer_id, contract_amount, archived FROM projects WHERE id = ? AND deleted_at IS NULL'
+  ).get(projectId);
+  if (!proj) throw badRequest('所属项目不存在或已删除', 'PROJECT_NOT_FOUND');
   data.customer_id = proj.customer_id;
 
   const amount = Number(data.amount) || 0;
@@ -773,6 +1047,11 @@ function savePayment(db, payload) {
   /* 校验：计划必须有计划日期；实收必须有实收日期 */
   if (type === '计划' && !data.plan_date) throw badRequest('计划收款日期为必填项', 'PLAN_DATE_REQUIRED');
   if (type === '实收' && !data.actual_date) data.actual_date = today();
+
+  /* 历史项目只读：金额/日期等基础校验之后再做归档校验（错误提示更贴近用户操作） */
+  if (proj.archived) {
+    throw badRequest('历史项目只读，不能登记回款；如需继续请先「恢复归档」', 'ARCHIVED_READONLY');
+  }
 
   /* 超收提醒：实收累计超过合同额时给出警告（允许，但提示） */
   if (type === '实收') {
@@ -1009,6 +1288,34 @@ function listTasks(db, q) {
   };
 }
 
+/**
+ * 待办关联校验（1.27）：
+ *   - project_id 必须指向存在且未删除的项目；
+ *   - 同时给了 customer_id 时，项目必须属于该客户；
+ *   - 只给项目时自动补齐客户（沿用旧行为）。
+ * 编辑时把库里已有的值与本次提交的值合并后再校验，避免「改客户不换项目」串数据。
+ */
+function validateTaskLinks(db, data, before) {
+  const has = (k) => Object.prototype.hasOwnProperty.call(data, k);
+  const customerId = has('customer_id') ? data.customer_id : (before ? before.customer_id : null);
+  const projectId = has('project_id') ? data.project_id : (before ? before.project_id : null);
+
+  if (projectId) {
+    const p = db.prepare('SELECT id, customer_id FROM projects WHERE id = ? AND deleted_at IS NULL')
+      .get(Number(projectId));
+    if (!p) throw badRequest('关联项目不存在或已删除', 'PROJECT_NOT_FOUND');
+    if (customerId && Number(p.customer_id) !== Number(customerId)) {
+      throw badRequest('关联项目不属于所选客户', 'PROJECT_CUSTOMER_MISMATCH');
+    }
+    if (!customerId) data.customer_id = Number(p.customer_id);
+  }
+  if (data.customer_id) {
+    const c = db.prepare('SELECT id FROM customers WHERE id = ? AND deleted_at IS NULL')
+      .get(Number(data.customer_id));
+    if (!c) throw badRequest('关联客户不存在或已删除', 'CUSTOMER_NOT_FOUND');
+  }
+}
+
 function saveTask(db, payload) {
   const data = pick(payload, TASK_FIELDS);
   const id = payload.id ? Number(payload.id) : null;
@@ -1058,6 +1365,7 @@ function saveTask(db, payload) {
     if (id) {
       const before = db.prepare('SELECT * FROM tasks WHERE id = ? AND deleted_at IS NULL').get(id);
       if (!before) throw notFound('待办不存在或已删除');
+      validateTaskLinks(db, data, before);
       const keys = Object.keys(data);
       if (keys.length) {
         db.prepare(`UPDATE tasks SET ${keys.map((k) => `${k} = ?`).join(', ')}, updated_at = ? WHERE id = ?`)
@@ -1071,12 +1379,7 @@ function saveTask(db, payload) {
     if (!data.source) data.source = '手动';
     if (!data.status) data.status = '待办';
     if (!data.priority) data.priority = '中';
-
-    /* 关联项目时自动带上客户 */
-    if (data.project_id && !data.customer_id) {
-      const p = db.prepare('SELECT customer_id FROM projects WHERE id = ?').get(Number(data.project_id));
-      if (p) data.customer_id = p.customer_id;
-    }
+    validateTaskLinks(db, data, null);
 
     data.created_at = ts;
     data.updated_at = ts;
@@ -1172,13 +1475,18 @@ module.exports = {
   deleteProjects,
   restoreProjects,
   moveStage,
-  /* 1.23：客户的项目档案（1:1） */
+  /* 1.27：客户的项目列表（1:N） */
   getCurrentProjectRow,
   ensureProjectForCustomer,
   getProjectForCustomer,
+  projectsSummary,
   saveProjectForCustomer,
   historyProjects,
   archiveProject,
+  archiveProjectById,
+  unarchiveProject,
+  assertProjectNameUnique,
+  normalizeProjectName,
   syncProjectPayment,
   syncCustomerDealAmount,
   savePayment,

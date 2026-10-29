@@ -20,12 +20,13 @@ node tools\run-all-tests.js
 |---|---|
 | `test-phase1.js` | 环境、目录结构、数据库结构、静态资源、零外链（会停服务，放最后） |
 | `test-phase2-api.js` / `-ui-contract.js` / `-ui-interaction.js` | 客户 CRUD、字段契约、界面交互 |
-| `test-phase3-api.js` / `-ui-interaction.js` | 项目档案、回款、待办 |
+| `test-phase3-api.js` / `-ui-interaction.js` | 项目（多项目）、回款、成本、待办 |
 | `test-phase4-api.js` / `-ui-interaction.js` | 统计、看板、导入导出 |
 | `test-phase5-api.js` / `-ui-interaction.js` | 附件、备份、恢复 |
 | `test-phase*.js`（阶段六已随地图模块删除） | — |
 | `test-migration.js` / `test-migration-full.js` | 结构迁移（v1 → 最新，含数据不丢/幂等） |
-| `test-customer-123.js` | 客户精简、一客户一项目、回款周期、财务口径 |
+| `test-customer-123.js` | 客户精简、多项目规则（1:N）、回款周期、财务口径、客户删除级联 |
+| `test-projects-multi-127.js` | 一个客户多个项目专项（3 项目并列 / 项目汇总 / 归档恢复 / 重名与跨客户同名 / 待办关联 / 删除隔离 / v16 索引删除与旧库升级） |
 | `test-products-124.js` | 产品三级分类、产品 CRUD、折后价、导出、货期按周精确存储 |
 | `test-products-import.js` | 产品批量导入模板 / 校验 / 分类自动创建 / 重名与编号 / 货期按周（1.26） |
 | `test-stats-122.js` | 客户分布、收入报表、成本台账 |

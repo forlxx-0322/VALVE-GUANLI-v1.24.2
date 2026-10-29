@@ -98,6 +98,13 @@ module.exports = async function pmRoutes(ctx) {
       if (sub === 'move-stage' && method === 'POST') {
         return ok(pm.moveStage(db, id, (body || {}).stage));
       }
+      /* 单项目归档 / 恢复归档（1.27 一个客户多个项目） */
+      if (sub === 'archive' && method === 'POST') {
+        return ok(pm.archiveProjectById(db, id));
+      }
+      if (sub === 'unarchive' && method === 'POST') {
+        return ok(pm.unarchiveProject(db, id));
+      }
       if (sub === 'payments' && method === 'POST') {
         return ok(pm.savePayment(db, Object.assign({}, body, { project_id: id })));
       }

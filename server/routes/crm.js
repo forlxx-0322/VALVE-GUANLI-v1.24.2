@@ -154,16 +154,39 @@ module.exports = async function crmRoutes(ctx) {
     if (id) {
       const sub = seg(segments, 3);
 
-      /* ---- 客户内嵌资源（1.23：项目档案 / 历史项目 / 财务汇总） ---- */
+      /* ---- 客户内嵌资源（1.27：项目列表 1:N / 历史项目 / 财务汇总） ---- */
+      if (sub === 'projects') {
+        const pid = tailId(segments, 4);
+        const act = seg(segments, 5);
+        /* GET  /api/customers/:id/projects          客户项目汇总（进行中 + 归档 + 合计） */
+        if (!pid && method === 'GET') return ok(pm.projectsSummary(db, id));
+        /* POST /api/customers/:id/projects          新增第 N 个进行中项目 */
+        if (!pid && method === 'POST') {
+          return ok(pm.saveProject(db, Object.assign({}, body || {}, { customer_id: id })));
+        }
+        /* POST /api/customers/:id/projects/:pid/archive|unarchive  单项目归档 / 恢复 */
+        if (pid && act === 'archive' && method === 'POST') {
+          return ok(pm.archiveProject(db, id, pid));
+        }
+        if (pid && act === 'unarchive' && method === 'POST') {
+          return ok(pm.unarchiveProject(db, pid));
+        }
+        return fail(404, 'API_NOT_FOUND', '接口不存在：' + pathname);
+      }
       if (sub === 'project') {
         const act = seg(segments, 4);
         if (act === 'archive' && method === 'POST') {
-          return ok(pm.archiveProject(db, id));
+          const b = body || {};
+          return ok(pm.archiveProject(db, id, b.id || b.project_id || null));
         }
         if (!act && method === 'GET') {
+          /* 旧接口兼容：project 返回最近创建的一个进行中项目；新增 summary/projects */
+          const summary = pm.projectsSummary(db, id);
           return ok({
             project: pm.getProjectForCustomer(db, id),
-            history: pm.historyProjects(db, id),
+            history: summary.archived,
+            projects: summary.active,
+            summary,
             finance: crm.getCustomerFinance(db, id)
           });
         }

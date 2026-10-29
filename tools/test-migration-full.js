@@ -4,7 +4,7 @@
  * 与 test-migration.js 的区别：
  *   - test-migration.js 专测 v1 → 最新版本的完整升级链路
  *   - 本文件覆盖**迁移到最新版本**的完整链路，且版本无关（目标取自 SCHEMA_VERSION），
- *     并逐版核对各版本的产物（v8 删表、v9 costs、v10 客户精简与一客户一项目、v11 产品价目表、
+ *     并逐版核对各版本的产物（v8 删表、v9 costs、v10 客户精简与多项目改造、v11 产品价目表、
  *     v12 二级分类自定义、v13 三级分类 6 / 22 / 46 = 74）
  *
  * 起点自适应（重要）：
@@ -226,7 +226,7 @@ function insertProduct(db, categoryId, name, code, ts) {
     check('v9 成本表索引已建立', costIdx.length >= 3, costIdx.join('、'));
   }
 
-  /* ---------- v10：客户精简 + 一客户一项目 ---------- */
+  /* ---------- v10：客户精简（1.27 起多项目） ---------- */
   if (TARGET >= 10) {
     const NEW_COLS = ['customer_no', 'contact_name', 'contact_position', 'contact_phone',
       'contact_birthday', 'follow_cycle_days'];
@@ -250,9 +250,9 @@ function insertProduct(db, categoryId, name, code, ts) {
     const uq = after.prepare(
       "SELECT sql FROM sqlite_master WHERE type='index' AND name='uq_projects_customer_current'"
     ).get();
-    check('v10 已建一客户一项目唯一索引（archived=0 的部分唯一索引）',
-      projectsColsAfter.includes('archived') && !!uq && /archived\s*=\s*0/.test(String(uq.sql || '')),
-      uq ? String(uq.sql) : '索引不存在');
+    check('v10 archived 列保留；v16 已删除一客户一项目唯一索引',
+      projectsColsAfter.includes('archived') && !uq,
+      uq ? String(uq.sql) : '索引不存在（v16 已删除）');
 
     const fixed = after.prepare(
       "SELECT name FROM tags WHERE name IN ('重点客户','老客户','待回访','已成交','暂停合作')"
@@ -672,6 +672,137 @@ function insertProduct(db, categoryId, name, code, ts) {
   } finally {
     if (dbV14) { try { dbMod.closeDatabase(dbV14); } catch (_) { /* 忽略 */ } }
     try { fs.rmSync(tmpV14, { recursive: true, force: true }); } catch (_) { /* 忽略 */ }
+  }
+
+  /* ---------- v15 → v16：一个客户多个项目（删除唯一索引） ----------
+   * 构造一个真实 v15 库：
+   *   · 当前代码建库（最新结构），手工重建 v15 的 uq_projects_customer_current；
+   *   · 放 1 个客户 + 1 个进行中项目 + 回款/成本；
+   *   · 简化验证旧索引确实拦住第二个进行中项目；
+   *   · 版本降回 15 后走 initDatabase 自动升级，验证：
+   *       - 自动备份 v15 旧库；
+   *       - 唯一索引被删除（sqlite_master 查不到）；
+   *       - 客户/项目/回款/成本一条不丢；
+   *       - 升级后同一客户能建第二个进行中项目；
+   *       - 再次启动不重复迁移（可重入）。 */
+  const tmpV15 = fs.mkdtempSync(path.join(os.tmpdir(), 'migv16-'));
+  let dbV15 = null;
+  try {
+    const vDataDir = path.join(tmpV15, 'data');
+    const vDbFile = path.join(vDataDir, 'crm.db');
+    const vBackupDir = path.join(vDataDir, 'backups');
+    fs.mkdirSync(vBackupDir, { recursive: true });
+
+    const boot = dbMod.initDatabase({ dataDir: vDataDir, dbFile: vDbFile, backupDir: vBackupDir });
+    dbMod.closeDatabase(boot.db);
+
+    const raw = new DatabaseSync(vDbFile);
+    raw.exec(`CREATE UNIQUE INDEX uq_projects_customer_current
+              ON projects(customer_id) WHERE deleted_at IS NULL AND archived = 0`);
+    const ts = new Date().toISOString();
+    const custId = Number(raw.prepare(`INSERT INTO customers
+      (name, customer_no, created_at, updated_at) VALUES ('v15 老客户', 'KH-2026-9001', ?, ?)`)
+      .run(ts, ts).lastInsertRowid);
+    const projId = Number(raw.prepare(`INSERT INTO projects
+      (name, customer_id, stage, progress, contract_amount, archived, created_at, updated_at)
+      VALUES ('v15 老项目', ?, '投标/议价', 30, 500000, 0, ?, ?)`)
+      .run(custId, ts, ts).lastInsertRowid);
+    raw.prepare(`INSERT INTO payments (project_id, customer_id, type, amount, actual_date, created_at, updated_at)
+      VALUES (?, ?, '实收', 120000, '2026-10-01', ?, ?)`).run(projId, custId, ts, ts);
+    raw.prepare(`INSERT INTO costs (customer_id, project_id, category, amount, spent_at, created_at, updated_at)
+      VALUES (?, ?, '采购成本', 30000, '2026-10-02', ?, ?)`).run(custId, projId, ts, ts);
+    let blocked = false;
+    try {
+      raw.prepare(`INSERT INTO projects (name, customer_id, stage, progress, archived, created_at, updated_at)
+        VALUES ('v15 第二个进行中项目', ?, '信息收集', 0, 0, ?, ?)`).run(custId, ts, ts);
+    } catch (e) {
+      blocked = /UNIQUE/i.test(String(e.message || ''));
+    }
+    raw.prepare('DELETE FROM schema_version WHERE version >= 15').run();
+    raw.prepare(`INSERT OR REPLACE INTO schema_version (version, applied_at, note)
+      VALUES (15, ?, 'v15 fixture')`).run(ts);
+    raw.close();
+
+    check('v15 旧库构造：唯一索引存在且确实拦住同一客户的第二个进行中项目',
+      blocked, `旧索引拦截第二个项目=${blocked}`);
+
+    const mig = dbMod.initDatabase({ dataDir: vDataDir, dbFile: vDbFile, backupDir: vBackupDir });
+    dbV15 = mig.db;
+    const idx = dbV15.prepare(
+      "SELECT name FROM sqlite_master WHERE type='index' AND name='uq_projects_customer_current'"
+    ).get();
+    const projCount = dbV15.prepare('SELECT COUNT(*) AS n FROM projects').get().n;
+    const payCount = dbV15.prepare('SELECT COUNT(*) AS n FROM payments').get().n;
+    const costCount = dbV15.prepare('SELECT COUNT(*) AS n FROM costs').get().n;
+    const oldProj = dbV15.prepare('SELECT name, contract_amount FROM projects WHERE id = ?').get(projId);
+    let secondOk = false;
+    let secondErr = '';
+    try {
+      dbV15.prepare(`INSERT INTO projects (name, customer_id, stage, progress, archived, created_at, updated_at)
+        VALUES ('v16 第二个进行中项目', ?, '技术交流', 10, 0, ?, ?)`).run(custId, ts, ts);
+      secondOk = true;
+    } catch (e) {
+      secondErr = e.message;
+    }
+    check('v15 → v16 自动迁移：执行 1 步、唯一索引已删除、数据不丢、可建第二个进行中项目',
+      mig.fromVersion === 15 && mig.schemaVersion === dbMod.SCHEMA_VERSION
+        && mig.migrations.length === dbMod.SCHEMA_VERSION - 15
+        && !idx && projCount === 1 && payCount === 1 && costCount === 1
+        && oldProj && Number(oldProj.contract_amount) === 500000
+        && secondOk,
+      `v${mig.fromVersion} → v${mig.schemaVersion}（${mig.migrations.length} 步）；`
+        + `索引=${!!idx}（应为 false），项目 ${projCount}/回款 ${payCount}/成本 ${costCount}，`
+        + `第二个项目=${secondOk}${secondErr ? '（' + secondErr + '）' : ''}`);
+
+    let bakIdx = null;
+    let bakProjects = -1;
+    let bakPayments = -1;
+    if (mig.backedUpTo && fs.existsSync(mig.backedUpTo)) {
+      const bak = new DatabaseSync(mig.backedUpTo, { readOnly: true });
+      bakIdx = bak.prepare(
+        "SELECT name FROM sqlite_master WHERE type='index' AND name='uq_projects_customer_current'"
+      ).get();
+      bakProjects = bak.prepare('SELECT COUNT(*) AS n FROM projects').get().n;
+      bakPayments = bak.prepare('SELECT COUNT(*) AS n FROM payments').get().n;
+      bak.close();
+    }
+    check('v15→v16 迁移前自动备份，备份保留旧索引与全部数据（可回滚）',
+      !!mig.backedUpTo && fs.existsSync(mig.backedUpTo)
+        && /before-migrate-v15-/.test(path.basename(mig.backedUpTo))
+        && !!bakIdx && bakProjects === 1 && bakPayments === 1,
+      mig.backedUpTo
+        ? `${path.basename(mig.backedUpTo)}，备份索引=${!!bakIdx}，项目 ${bakProjects}/回款 ${bakPayments}`
+        : '未生成备份');
+    dbMod.closeDatabase(dbV15);
+    dbV15 = null;
+
+    /* 可重入：再次启动不重复迁移，索引仍然不存在 */
+    const again = dbMod.initDatabase({ dataDir: vDataDir, dbFile: vDbFile, backupDir: vBackupDir });
+    const idxAgain = again.db.prepare(
+      "SELECT name FROM sqlite_master WHERE type='index' AND name='uq_projects_customer_current'"
+    ).get();
+    const projAgain = again.db.prepare('SELECT COUNT(*) AS n FROM projects').get().n;
+    check('v16 迁移可重入：重复启动 0 步迁移、索引仍不存在、数据仍在',
+      again.fromVersion === dbMod.SCHEMA_VERSION && again.migrations.length === 0
+        && !idxAgain && projAgain === 2,
+      `v${again.fromVersion}，迁移 ${again.migrations.length} 步，项目 ${projAgain}`);
+
+    /* v16 专项：迁移脚本本身对「索引不存在」的库也应无副作用（可重入） */
+    again.db.prepare('DELETE FROM schema_version WHERE version >= 16').run();
+    again.db.prepare(`INSERT OR REPLACE INTO schema_version (version, applied_at, note)
+      VALUES (15, '2026-10-29T00:00:00', 'reentry')`).run();
+    dbMod.closeDatabase(again.db);
+    const redo = dbMod.initDatabase({ dataDir: vDataDir, dbFile: vDbFile, backupDir: vBackupDir });
+    check('v16 迁移重复执行不报错（索引已不存在时跳过）',
+      redo.fromVersion === 15 && redo.schemaVersion === dbMod.SCHEMA_VERSION
+        && redo.migrations.length === 1,
+      `v${redo.fromVersion} → v${redo.schemaVersion}，${redo.migrations.length} 步`);
+    dbMod.closeDatabase(redo.db);
+  } catch (e) {
+    check('v15 → v16 迁移（专项）', false, e.message);
+  } finally {
+    if (dbV15) { try { dbMod.closeDatabase(dbV15); } catch (_) { /* 忽略 */ } }
+    try { fs.rmSync(tmpV15, { recursive: true, force: true }); } catch (_) { /* 忽略 */ }
   }
 
   try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (_) { /* 忽略 */ }

@@ -45,10 +45,32 @@ function normalize(db, data) {
   if (d.supplier !== undefined) out.supplier = String(d.supplier || '').trim();
   if (d.remark !== undefined) out.remark = String(d.remark || '').trim();
 
-  /* 只给了项目 → 自动带出客户 */
-  if (out.project_id && !out.customer_id) {
-    const p = db.prepare('SELECT customer_id FROM projects WHERE id = ? AND deleted_at IS NULL').get(out.project_id);
-    if (p && p.customer_id) out.customer_id = p.customer_id;
+  /* 项目归属校验（1.27 校验收紧）：
+     项目必须存在且未删除、不能是历史项目；同时给客户时项目必须属于该客户。
+     只给项目时自动带出客户。 */
+  if (out.project_id) {
+    const p = db.prepare(
+      'SELECT id, customer_id, archived FROM projects WHERE id = ? AND deleted_at IS NULL'
+    ).get(out.project_id);
+    if (!p) {
+      const e = new Error('关联项目不存在或已删除');
+      e.status = 400; e.code = 'PROJECT_NOT_FOUND'; throw e;
+    }
+    if (Number(p.archived) === 1) {
+      const e = new Error('历史项目只读，不能登记成本；如需继续请先「恢复归档」');
+      e.status = 400; e.code = 'ARCHIVED_READONLY'; throw e;
+    }
+    if (out.customer_id && Number(out.customer_id) !== Number(p.customer_id)) {
+      const e = new Error('关联项目不属于所选客户');
+      e.status = 400; e.code = 'PROJECT_CUSTOMER_MISMATCH'; throw e;
+    }
+    if (!out.customer_id) out.customer_id = Number(p.customer_id);
+  } else if (out.customer_id) {
+    const c = db.prepare('SELECT id FROM customers WHERE id = ? AND deleted_at IS NULL').get(out.customer_id);
+    if (!c) {
+      const e = new Error('关联客户不存在或已删除');
+      e.status = 400; e.code = 'CUSTOMER_NOT_FOUND'; throw e;
+    }
   }
   return out;
 }

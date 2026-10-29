@@ -103,7 +103,7 @@ window.CRM = window.CRM || {};
           </svg>
           <div class="brand-text">
             <div class="brand-title">{{ appName || '客户管理系统' }}</div>
-            <div class="brand-sub">阀门行业版 · {{ version || '' }}</div>
+            <div class="brand-sub">阀门行业版 · 多项目 · {{ version || '' }}</div>
           </div>
         </div>
 

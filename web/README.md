@@ -27,9 +27,9 @@ web/
    │  ├─ customer-fields.js   客户字段定义（区块/筛选/排序）
    │  ├─ customer-edit.js     客户新增/编辑抽屉
    │  ├─ followup-drawer.js   跟进记录
-   │  ├─ project-edit.js      客户项目档案（1:1 项目）
-   │  ├─ payment-drawer.js    回款计划与实收
-   │  └─ cost-drawer.js       成本台账
+   │  ├─ project-edit.js      项目新增/编辑（1:N，同一客户可多个项目）
+   │  ├─ payment-drawer.js    回款计划与实收（挂 project_id）
+   │  └─ cost-drawer.js       成本台账（挂 project_id）
    ├─ settings/            功能设置各面板
    │  ├─ settings-dict.js      字典管理
    │  ├─ settings-backup.js    备份与恢复
@@ -40,7 +40,7 @@ web/
    ├─ pages/               页面（路由目标）
    │  ├─ home.js           首页总览
    │  ├─ customers.js      客户列表
-   │  ├─ customer-detail.js 客户详情（资料/回访/项目与财务/附件日志）
+   │  ├─ customer-detail.js 客户详情（资料/回访/多项目与财务/附件日志）
    │  ├─ products.js       产品价目表（三级分类、货期按周、Excel 批量导入）
    │  ├─ tasks.js          待办中心
    │  └─ settings.js       功能设置外壳

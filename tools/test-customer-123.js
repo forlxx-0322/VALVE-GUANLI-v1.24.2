@@ -1,14 +1,19 @@
 /**
- * 1.23 客户精简专项验收（API 层，一客户一项目）
+ * 1.23 客户精简专项验收（API 层，1.27 起一个客户多个项目）
  *
- * 覆盖 30 项断言：
+ * 覆盖断言：
  *   1~7   客户编号：自动生成 KH-YYYY-#### / 递增 / 手改 / 唯一校验 / 不可清空
  *   8~13  主联系人：内嵌字段同步 contacts（is_primary=1）/ 修改同步 / 附加联系人不受影响 / 删除主联系人清空内嵌
- *   14~21 一客户一项目：首次建档 / 第二个当前项目被拒 / 1:1 更新 / 转历史 / 历史只读 / 归档后再建 / 历史列表
- *   22~26 回访周期：无周期不自动排 / 有周期自动排 / 填了 next_at 以填的为准 / follow_count 与 last_follow_at 照旧
- *   27~32 财务汇总：合同额 / 已收 / 应收 / 采购 / 维护 / 其他 / 毛利 / 毛利率 / 预计毛利 / 0 收入除零 / 负毛利
- *   33~35 5 个固定标签：存在、sort 10..50、接口带 fixed 标记
- *   36     测试数据自清理
+ *   14~27 多项目（1:N）：首次建档 / 再次 PUT 更新同一条 / 允许第二、第三个进行中项目 /
+ *         同客户重名拒绝（去空格）/ 跨客户同名允许 / 每个项目回款与成本互不影响 /
+ *         归档一个后列表与客户汇总正确 / 恢复归档 / 删除一个项目不影响另一个
+ *   28~32 回访周期：无周期不自动排 / 有周期自动排 / 填了 next_at 以填的为准 / follow_count 与 last_follow_at 照旧
+ *   33~37 财务汇总：进行中项目合计口径 / 成本分类 / 毛利 / 0 收入除零 / 负毛利
+ *   38~41 5 个固定标签：存在、sort 10..50、接口带 fixed 标记、种子幂等
+ *   42    v16：一客户一项目唯一索引已删除
+ *   43    客户删除级联所有项目 / 回款 / 成本，其它客户不受影响
+ *   44    还原客户时项目 / 成本 / 回款整体回来
+ *   45    测试数据自清理
  *
  * 用法：node tools/test-customer-123.js
  */
@@ -43,7 +48,7 @@ async function api(method, p, body) {
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 
 (async () => {
-  console.log('=== 1.23 客户精简专项验收（一客户一项目）===\n');
+  console.log('=== 1.23 客户精简专项验收（1.27：一个客户多个项目）===\n');
 
   const tag = Date.now().toString().slice(-6);
   const ids = [];
@@ -180,64 +185,161 @@ const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
       extraStill.data.contacts.filter((x) => !x.is_primary).length === 1,
       `附加 ${extraStill.data.contacts.filter((x) => !x.is_primary).length} 人`);
 
-    /* ================= 一客户一项目 ================= */
+    /* ================= 一个客户多个项目（1:N） ================= */
     const P1 = await api('PUT', `/api/customers/${A.data.id}/project`, {
       name: `【1.23专项】项目一${tag}`, stage: '投标/议价', progress: 30, contract_amount: 500000
     });
     created.projects.push(P1.data.id);
-    check('14. 客户没有项目时 PUT 会建立一条当前档案',
+    check('14. 客户没有项目时 PUT 会建立一条进行中项目',
       P1.status === 200 && P1.data.created === true && P1.data.project.name === `【1.23专项】项目一${tag}`,
       `project id=${P1.data.id}`);
 
     const P2 = await api('PUT', `/api/customers/${A.data.id}/project`, { contract_amount: 520000 });
     const projList = await api('GET', `/api/projects?customer_id=${A.data.id}&pageSize=10`);
-    check('15. 再次 PUT 更新同一条档案（1:1，不会新建第二条）',
+    check('15. 不带 id 的 PUT 更新最近创建的进行中项目（不会新建第二条）',
       P2.data.created === false && P2.data.id === P1.data.id
         && projList.data.total === 1 && projList.data.list[0].contract_amount === 520000,
       `总数 ${projList.data.total}，合同额=${projList.data.list[0].contract_amount}`);
 
-    const second = await api('POST', '/api/projects', {
-      name: `【1.23专项】第二个当前项目${tag}`, customer_id: A.data.id
+    const P2b = await api('POST', '/api/projects', {
+      name: `【1.23专项】项目二${tag}`, customer_id: A.data.id,
+      stage: '技术交流', contract_amount: 120000
     });
-    check('16. 同一客户再建第二个「当前项目」被拒绝（PROJECT_EXISTS）',
-      second.status === 400 && second.code === 'PROJECT_EXISTS',
-      `HTTP ${second.status} code=${second.code}`);
+    created.projects.push(P2b.data.id);
+    const list2 = await api('GET', `/api/projects?customer_id=${A.data.id}&pageSize=10&status=all`);
+    check('16. 同一客户允许再建第二个、第三个进行中项目（1:N）',
+      P2b.status === 200 && P2b.data.created === true && P2b.data.id !== P1.data.id
+        && list2.data.stats.active_count === 2 && list2.data.total === 2,
+      `新项目 id=${P2b.data.id}，进行中 ${list2.data.stats.active_count} 个`);
 
-    const arch = await api('POST', `/api/customers/${A.data.id}/project/archive`);
+    const dupName = await api('POST', '/api/projects', {
+      name: `  【1.23专项】项目二${tag}  `, customer_id: A.data.id
+    });
+    check('17. 同一客户内项目名重复被拒绝（去空格后比较，NAME_DUPLICATE）',
+      dupName.status === 400 && dupName.code === 'NAME_DUPLICATE',
+      `HTTP ${dupName.status} code=${dupName.code}`);
+
+    const XB = await mkCustomer(`【1.23专项${tag}】跨客户同名客户`, { industry: '化工' });
+    const crossName = await api('POST', '/api/projects', {
+      name: `【1.23专项】项目二${tag}`, customer_id: XB.data.id
+    });
+    created.projects.push(crossName.data.id);
+    check('18. 跨客户允许同名项目',
+      crossName.status === 200 && crossName.data.created === true && crossName.data.id !== P2b.data.id,
+      `客户B 项目 id=${crossName.data.id}`);
+
+    /* 每个项目各自回款 / 成本，互不影响 */
+    await api('POST', '/api/payments', {
+      project_id: P1.data.id, type: '实收', amount: 10000, actual_date: '2026-10-20'
+    });
+    await api('POST', '/api/costs', {
+      project_id: P1.data.id, category: '采购成本', amount: 2000, spent_at: '2026-10-20'
+    });
+    await api('POST', '/api/payments', {
+      project_id: P2b.data.id, type: '实收', amount: 30000, actual_date: '2026-10-21'
+    });
+    await api('POST', '/api/costs', {
+      project_id: P2b.data.id, category: '采购成本', amount: 5000, spent_at: '2026-10-21'
+    });
+    const p1Detail = await api('GET', `/api/projects/${P1.data.id}`);
+    const p2Detail = await api('GET', `/api/projects/${P2b.data.id}`);
+    check('19. 每个项目各自回款 / 成本互不影响',
+      p1Detail.data.received_amount === 10000 && p1Detail.data.cost_amount === 2000
+        && p1Detail.data.profit === 8000
+        && p2Detail.data.received_amount === 30000 && p2Detail.data.cost_amount === 5000
+        && p2Detail.data.profit === 25000
+        && p1Detail.data.debt_amount === 510000 && p2Detail.data.debt_amount === 90000,
+      `P1 已收 ${p1Detail.data.received_amount}/成本 ${p1Detail.data.cost_amount}；`
+        + `P2 已收 ${p2Detail.data.received_amount}/成本 ${p2Detail.data.cost_amount}`);
+
+    /* 归档一个：列表与客户汇总只算剩下的进行中项目 */
+    const beforeArchSum = await api('GET', `/api/customers/${A.data.id}/projects`);
+    const archOne = await api('POST', `/api/projects/${P1.data.id}/archive`);
+    const afterArchSum = await api('GET', `/api/customers/${A.data.id}/projects`);
+    const afterArchFin = await api('GET', `/api/customers/${A.data.id}/finance`);
+    check('20. 归档一个项目后：列表 / 客户汇总只统计进行中项目',
+      archOne.status === 200 && archOne.data.archived === true
+        && afterArchSum.data.totals.active_count === 1
+        && afterArchSum.data.totals.archived_count === 1
+        && afterArchSum.data.totals.contract_amount === 120000
+        && afterArchSum.data.totals.received_amount === 30000
+        && afterArchSum.data.totals.cost_amount === 5000
+        && afterArchSum.data.totals.profit === 25000
+        && afterArchFin.data.contract_amount === 120000
+        && afterArchFin.data.received_amount === 30000
+        && afterArchFin.data.profit === 25000
+        && beforeArchSum.data.totals.contract_amount === 640000,
+      `归档前合同额 ${beforeArchSum.data.totals.contract_amount} → 归档后 ${afterArchSum.data.totals.contract_amount}，`
+        + `财务接口合同额 ${afterArchFin.data.contract_amount}`);
+
+    const unarch = await api('POST', `/api/projects/${P1.data.id}/unarchive`);
+    const afterUnarch = await api('GET', `/api/customers/${A.data.id}/projects`);
+    check('21. 历史项目可「恢复归档」，重新计入进行中合计',
+      unarch.status === 200 && unarch.data.archived === false
+        && afterUnarch.data.totals.active_count === 2
+        && afterUnarch.data.totals.archived_count === 0
+        && afterUnarch.data.totals.contract_amount === 640000
+        && afterUnarch.data.totals.received_amount === 40000,
+      `恢复后进行中 ${afterUnarch.data.totals.active_count} 个，合同额 ${afterUnarch.data.totals.contract_amount}`);
+
+    /* 删除一个项目：只影响自己，另一个与客户汇总照旧 */
+    const delOne = await api('DELETE', `/api/projects/${P2b.data.id}`);
+    const afterDelOne = await api('GET', `/api/customers/${A.data.id}/projects`);
+    const p1Still = await api('GET', `/api/projects/${P1.data.id}`);
+    const delP2 = await api('GET', `/api/projects/${P2b.data.id}`);
+    const costsAfterDel = await api('GET', `/api/costs?project_id=${P2b.data.id}&pageSize=50`);
+    check('22. 删除一个项目不影响另一个（项目/回款/成本各归各的）',
+      delOne.status === 200 && delOne.data.count === 1
+        && delP2.status === 404 && p1Still.status === 200
+        && afterDelOne.data.totals.active_count === 1
+        && afterDelOne.data.totals.contract_amount === 520000
+        && afterDelOne.data.totals.received_amount === 10000
+        && p1Still.data.received_amount === 10000 && p1Still.data.cost_amount === 2000
+        && costsAfterDel.data.total === 0,
+      `删除后进行中 ${afterDelOne.data.totals.active_count} 个，仅剩项目已收 ${p1Still.data.received_amount}，`
+        + `被删项目成本条数 ${costsAfterDel.data.total}`);
+
+    /* 恢复到 1 个进行中项目（P1），继续走旧的归档 / 历史只读流程 */
+    const arch = await api('POST', `/api/customers/${A.data.id}/project/archive`, { id: P1.data.id });
     const afterArch = await api('GET', `/api/customers/${A.data.id}/project`);
     const history = await api('GET', `/api/customers/${A.data.id}/history-projects`);
-    check('17. 当前项目可转为历史（archived=1）',
+    check('23. 当前项目可「归档为历史」，归档后旧接口兼容返回 null + 历史列表',
       arch.status === 200 && arch.data.archived === true
         && afterArch.data.project === null
+        && afterArch.data.history.length === 1 && afterArch.data.history[0].id === P1.data.id
         && history.data.length === 1 && history.data[0].id === P1.data.id
         && history.data[0].archived === 1,
       `历史 ${history.data.length} 条`);
 
     const editArch = await api('PUT', `/api/projects/${P1.data.id}`, { name: '改历史' });
     const editArch2 = await api('PUT', `/api/customers/${A.data.id}/project`, { id: P1.data.id, name: '改历史' });
-    check('18. 历史项目只读（普通接口与客户接口都拒绝）',
+    const payArch = await api('POST', '/api/payments', {
+      project_id: P1.data.id, type: '实收', amount: 1, actual_date: '2026-10-22'
+    });
+    check('24. 历史项目只读（普通接口 / 客户接口 / 登记回款都拒绝）',
       editArch.status === 400 && editArch.code === 'ARCHIVED_READONLY'
-        && editArch2.status === 400 && editArch2.code === 'ARCHIVED_READONLY',
-      `${editArch.code} / ${editArch2.code}`);
+        && editArch2.status === 400 && editArch2.code === 'ARCHIVED_READONLY'
+        && payArch.status === 400 && payArch.code === 'ARCHIVED_READONLY',
+      `${editArch.code} / ${editArch2.code} / ${payArch.code}`);
 
     const P3 = await api('PUT', `/api/customers/${A.data.id}/project`, {
-      name: `【1.23专项】项目二${tag}`, stage: '技术交流', contract_amount: 120000
+      name: `【1.23专项】项目三${tag}`, stage: '技术交流', contract_amount: 120000
     });
     created.projects.push(P3.data.id);
     const cur = await api('GET', `/api/customers/${A.data.id}/project`);
-    check('19. 归档后可再建新的当前项目，历史仍保留',
+    check('25. 归档后可再建新的进行中项目，历史仍保留',
       P3.data.created === true && cur.data.project.id === P3.data.id
         && cur.data.history.length === 1,
       `新项目 id=${P3.data.id}，历史 ${cur.data.history.length} 条`);
 
     const projDetail = await api('GET', `/api/projects/${P3.data.id}`);
-    check('20. 当前项目详情带 archived=0 与关联客户',
+    check('26. 新项目详情带 archived=0 与关联客户',
       projDetail.data.archived === 0 && projDetail.data.customer
         && projDetail.data.customer.id === A.data.id,
       `archived=${projDetail.data.archived}，客户=${projDetail.data.customer && projDetail.data.customer.name}`);
 
     const badProject = await api('POST', '/api/projects', { name: '无客户项目' });
-    check('21. 项目必须归属客户',
+    check('27. 项目必须归属客户',
       badProject.status === 400 && badProject.code === 'CUSTOMER_REQUIRED',
       `HTTP ${badProject.status} code=${badProject.code}`);
 
@@ -247,7 +349,7 @@ const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
       customer_id: D.data.id, followed_at: '2026-10-20 10:00:00', content: '无周期客户跟进'
     });
     const dDetail = await api('GET', `/api/customers/${D.data.id}`);
-    check('22. follow_cycle_days=0 时不自动排下次回访',
+    check('28. follow_cycle_days=0 时不自动排下次回访',
       dDetail.data.follow_count === 1 && !dDetail.data.next_follow_at,
       `next_follow_at=${JSON.stringify(dDetail.data.next_follow_at)}`);
 
@@ -256,7 +358,7 @@ const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
       customer_id: E.data.id, followed_at: '2026-10-20 14:30:00', content: '周期客户跟进'
     });
     const eDetail = await api('GET', `/api/customers/${E.data.id}`);
-    check('23. 记录跟进后按周期自动排下次（2026-10-20 + 15 天 = 2026-11-04）',
+    check('29. 记录跟进后按周期自动排下次（2026-10-20 + 15 天 = 2026-11-04）',
       f1.data.next_follow_at && String(f1.data.next_follow_at).startsWith('2026-11-04')
         && String(eDetail.data.next_follow_at).startsWith('2026-11-04'),
       `next=${f1.data.next_follow_at}`);
@@ -266,7 +368,7 @@ const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
       next_at: '2027-01-15 10:00:00'
     });
     const eDetail2 = await api('GET', `/api/customers/${E.data.id}`);
-    check('24. 填了 next_at 时以填的为准（不被周期覆盖）',
+    check('30. 填了 next_at 时以填的为准（不被周期覆盖）',
       String(f2.data.next_follow_at).startsWith('2027-01-15')
         && String(eDetail2.data.next_follow_at).startsWith('2027-01-15'),
       `next=${eDetail2.data.next_follow_at}`);
@@ -275,16 +377,16 @@ const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
       customer_id: E.data.id, followed_at: '2026-10-26 09:00:00', content: '第三次跟进'
     });
     const eDetail3 = await api('GET', `/api/customers/${E.data.id}`);
-    check('25. 没填 next_at 时按周期重排（2026-10-26 + 15 天 = 2026-11-10）',
+    check('31. 没填 next_at 时按周期重排（2026-10-26 + 15 天 = 2026-11-10）',
       String(f3.data.next_follow_at).startsWith('2026-11-10')
         && String(eDetail3.data.next_follow_at).startsWith('2026-11-10'),
       `next=${f3.data.next_follow_at}`);
 
-    check('26. 跟进次数与最近跟进时间照旧回填',
+    check('32. 跟进次数与最近跟进时间照旧回填',
       eDetail3.data.follow_count === 3 && String(eDetail3.data.last_follow_at).startsWith('2026-10-26'),
       `次数=${eDetail3.data.follow_count}，最近=${eDetail3.data.last_follow_at}`);
 
-    /* ================= 财务汇总 ================= */
+    /* ================= 财务汇总（进行中项目合计） ================= */
     await api('PUT', `/api/customers/${A.data.id}/project`, { contract_amount: 500000 });
     await api('POST', '/api/payments', { customer_id: A.data.id, type: '计划', amount: 320000, plan_date: '2026-11-01' });
     await api('POST', '/api/payments', { customer_id: A.data.id, type: '实收', amount: 210000, actual_date: '2026-10-15' });
@@ -294,21 +396,23 @@ const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
     await api('POST', '/api/costs', { customer_id: A.data.id, category: '其他', amount: 1000, spent_at: '2026-10-13' });
     const fin = await api('GET', `/api/customers/${A.data.id}/finance`);
     const f = fin.data || {};
-    check('27. 财务报表：合同额 / 已收 / 应收口径正确',
+    check('33. 财务报表按进行中项目合计：合同额 / 已收 / 应收口径正确',
       f.contract_amount === 500000 && f.received_amount === 210000
-        && f.planned_amount === 320000 && f.receivable_amount === 110000,
-      `合同额=${f.contract_amount} 已收=${f.received_amount} 计划=${f.planned_amount} 应收=${f.receivable_amount}`);
-    check('28. 成本分类汇总正确（采购 / 维护 / 其他=差旅+其他）',
+        && f.planned_amount === 320000 && f.receivable_amount === 110000
+        && f.active_project_count === 1 && f.archived_project_count === 1,
+      `合同额=${f.contract_amount} 已收=${f.received_amount} 计划=${f.planned_amount} 应收=${f.receivable_amount}`
+        + ` 进行中=${f.active_project_count} 归档=${f.archived_project_count}`);
+    check('34. 成本分类汇总正确（采购 / 维护 / 其他=差旅+其他）',
       f.purchase_cost === 130000 && f.maintain_cost === 12000
         && f.other_cost === 4000 && f.total_cost === 146000,
       `采购=${f.purchase_cost} 维护=${f.maintain_cost} 其他=${f.other_cost} 合计=${f.total_cost}`);
-    check('29. 毛利 = 已收 − 全部成本（含采购成本），毛利率按已收算',
+    check('35. 毛利 = 已收 − 全部成本（含采购成本），毛利率按已收算',
       f.profit === 64000 && f.margin === Math.round((64000 / 210000) * 1000) / 10
         && f.expected_profit === 370000,
       `毛利=${f.profit} 毛利率=${f.margin}% 预计毛利=${f.expected_profit}`);
 
     const Dfin = await api('GET', `/api/customers/${D.data.id}/finance`);
-    check('30. 没有收入时毛利率为 null（不除零）',
+    check('36. 没有收入时毛利率为 null（不除零）',
       Dfin.data.margin === null && Dfin.data.profit === 0,
       `margin=${JSON.stringify(Dfin.data.margin)}`);
 
@@ -316,7 +420,7 @@ const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
     await api('POST', '/api/costs', { customer_id: negCust.data.id, category: '采购成本', amount: 5000, spent_at: '2026-10-01' });
     await api('POST', '/api/payments', { customer_id: negCust.data.id, type: '实收', amount: 2000, actual_date: '2026-10-02' });
     const negFin = await api('GET', `/api/customers/${negCust.data.id}/finance`);
-    check('31. 成本大于收入时毛利为负、毛利率为负',
+    check('37. 成本大于收入时毛利为负、毛利率为负',
       negFin.data.profit === -3000 && negFin.data.margin === -150,
       `毛利=${negFin.data.profit} 毛利率=${negFin.data.margin}%`);
 
@@ -324,40 +428,90 @@ const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
     const tagList = await api('GET', '/api/tags');
     const FIXED = ['重点客户', '老客户', '待回访', '已成交', '暂停合作'];
     const fixedTags = (tagList.data || []).filter((t) => FIXED.includes(t.name));
-    check('32. 5 个固定标签已内置（名称与颜色齐备）',
+    check('38. 5 个固定标签已内置（名称与颜色齐备）',
       fixedTags.length === 5 && fixedTags.every((t) => !!t.color && !!t.name),
       fixedTags.map((t) => t.name).join('、'));
 
     const sorts = fixedTags.map((t) => t.sort).sort((a, b) => a - b);
-    check('33. 固定标签排序为 10 / 20 / 30 / 40 / 50',
+    check('39. 固定标签排序为 10 / 20 / 30 / 40 / 50',
       JSON.stringify(sorts) === JSON.stringify([10, 20, 30, 40, 50]),
       sorts.join(' / '));
 
-    check('34. 标签接口返回 fixed 标记（界面据此禁用删除）',
+    check('40. 标签接口返回 fixed 标记（界面据此禁用删除）',
       fixedTags.every((t) => t.fixed === true),
       fixedTags.map((t) => t.name + (t.fixed ? '(fixed)' : '')).join('、'));
 
     const seedTags = await api('GET', '/api/tags');
-    check('35. 固定标签数量不因重复启动而增加（种子幂等）',
+    check('41. 固定标签数量不因重复启动而增加（种子幂等）',
       seedTags.data.filter((t) => FIXED.includes(t.name)).length === 5,
       `固定标签 ${seedTags.data.filter((t) => FIXED.includes(t.name)).length} 个`);
 
-    /* 数据库层核对：部分唯一索引与 tags 记录 */
+    /* 数据库层核对：v16 已删除一客户一项目唯一索引 + tags 记录 */
     const uq = db.prepare(
       "SELECT name FROM sqlite_master WHERE type='index' AND name='uq_projects_customer_current'"
     ).get();
     const dbTags = db.prepare(
       "SELECT COUNT(*) AS n FROM tags WHERE name IN ('重点客户','老客户','待回访','已成交','暂停合作')"
     ).get().n;
-    check('36. 数据库层：一客户一项目唯一索引与 5 个固定标签都在',
-      !!uq && dbTags === 5,
-      `唯一索引=${!!uq}，固定标签=${dbTags}`);
+    check('42. 数据库层：v16 已删除一客户一项目唯一索引，5 个固定标签都在',
+      !uq && dbTags === 5,
+      `唯一索引=${!!uq}（应为 false），固定标签=${dbTags}`);
+
+    /* ================= 客户删除级联（多项目） ================= */
+    const F = await mkCustomer(`【1.23专项${tag}】级联删除客户`, { industry: '电力' });
+    const F1 = await api('POST', '/api/projects', {
+      name: `【1.23专项】级联项目一${tag}`, customer_id: F.data.id, contract_amount: 100000
+    });
+    const F2 = await api('POST', '/api/projects', {
+      name: `【1.23专项】级联项目二${tag}`, customer_id: F.data.id, contract_amount: 200000
+    });
+    created.projects.push(F1.data.id, F2.data.id);
+    await api('POST', '/api/payments', { project_id: F1.data.id, type: '实收', amount: 10000, actual_date: '2026-10-01' });
+    await api('POST', '/api/payments', { project_id: F2.data.id, type: '实收', amount: 20000, actual_date: '2026-10-02' });
+    await api('POST', '/api/costs', { project_id: F1.data.id, category: '采购成本', amount: 3000, spent_at: '2026-10-01' });
+    await api('POST', '/api/costs', { project_id: F2.data.id, category: '采购成本', amount: 4000, spent_at: '2026-10-02' });
+    const aProjectBefore = await api('GET', `/api/projects/${P3.data.id}`);
+
+    const delCust = await api('DELETE', `/api/customers/${F.data.id}`);
+    const fGone = await api('GET', `/api/customers/${F.data.id}`);
+    const fProjects = await api('GET', `/api/projects?customer_id=${F.data.id}&pageSize=50&status=all`);
+    const fCosts = await api('GET', `/api/costs?customer_id=${F.data.id}&pageSize=50`);
+    const fProjRows = db.prepare(
+      'SELECT COUNT(*) AS n FROM projects WHERE customer_id = ? AND deleted_at IS NULL'
+    ).get(F.data.id).n;
+    const fCostRows = db.prepare(
+      'SELECT COUNT(*) AS n FROM costs WHERE customer_id = ? AND deleted_at IS NULL'
+    ).get(F.data.id).n;
+    const aProjectAfter = await api('GET', `/api/projects/${P3.data.id}`);
+    check('43. 删除客户级联所有项目与回款/成本，其它客户不受影响',
+      delCust.status === 200 && delCust.data.count === 1
+        && delCust.data.project_count === 2 && delCust.data.cost_count === 2
+        && fGone.status === 404 && fProjects.data.total === 0 && fCosts.data.total === 0
+        && fProjRows === 0 && fCostRows === 0
+        && aProjectBefore.status === 200 && aProjectAfter.status === 200
+        && aProjectAfter.data.received_amount === aProjectBefore.data.received_amount,
+      `级联项目 ${delCust.data.project_count} 个 / 成本 ${delCust.data.cost_count} 笔；`
+        + `库内残留项目 ${fProjRows}、成本 ${fCostRows}；其它客户项目已收 ${aProjectAfter.data.received_amount}`);
+
+    const restored = await api('POST', '/api/trash/restore', { ids: [F.data.id], type: 'customer' });
+    const fBack = await api('GET', `/api/customers/${F.data.id}`);
+    const fSummary = await api('GET', `/api/customers/${F.data.id}/projects`);
+    check('44. 还原客户时项目与成本整体回来（回款随之恢复）',
+      restored.status === 200 && restored.data.count === 1
+        && restored.data.project_count === 2
+        && fBack.status === 200
+        && fSummary.data.totals.active_count === 2
+        && fSummary.data.totals.contract_amount === 300000
+        && fSummary.data.totals.received_amount === 30000
+        && fSummary.data.totals.cost_amount === 7000,
+      `还原项目 ${restored.data.project_count} 个，汇总合同额 ${fSummary.data.totals.contract_amount}，`
+        + `已回款 ${fSummary.data.totals.received_amount}`);
   } finally {
     await cleanup();
     const left = db.prepare(
       "SELECT COUNT(*) AS n FROM customers WHERE name LIKE ? AND deleted_at IS NULL"
     ).get(`【1.23专项${tag}】%`).n;
-    check('37. 测试数据已自清理（客户 / 项目 / 回款 / 成本 / 待办）',
+    check('45. 测试数据已自清理（客户 / 项目 / 回款 / 成本 / 待办）',
       left === 0, `残留 ${left} 条客户`);
     db.close();
   }

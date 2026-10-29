@@ -4,7 +4,7 @@
  * 职责：
  *   1. 建立 SQLite 连接（Node 内置 node:sqlite，零依赖）
  *   2. 建全 17 张表与索引
- *   3. 结构版本管理（schema_version）+ 迁移前自动备份
+ *   3. 结构版本管理（schema_version）+ 迁移前自动备份（当前 v16：一个客户可管理多个项目）
  *   4. 写入初始字典数据、系统设置与内置产品分类
  *
  * 编码约定：本文件与所有 .js 文件统一 UTF-8 无 BOM。
@@ -16,7 +16,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
 
-const SCHEMA_VERSION = 15;
+const SCHEMA_VERSION = 16;
 
 /* ------------------------------------------------------------------ */
 /* 17 张表结构                                                          */
@@ -24,8 +24,8 @@ const SCHEMA_VERSION = 15;
 
 const TABLES = [
 
-  /* 1. 客户主表 —— 1.23 精简版：一客户一项目，客户只留 21 个基础列 + 6 个新增列
-   *    项目信息由 projects 表以 1:1 档案承载（界面无独立项目模块）；
+  /* 1. 客户主表 —— 1.23 精简版：客户只留 21 个基础列 + 6 个新增列。
+   *    项目信息由 projects 表承载（1.27 起一个客户可同时有多个进行中项目）；
    *    经纬度保留但界面不显示（以后想接地图不必再迁移）。 */
   `CREATE TABLE IF NOT EXISTS customers (
     id                 INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -113,9 +113,9 @@ const TABLES = [
     deleted_at  TEXT
   )`,
 
-  /* 6. 项目 —— 1.23 起作为「客户的项目档案」（1:1），
-   *    archived=1 表示该客户的历史项目（只读，不再作为当前档案）。
-   *    回款 / 成本 / 待办 / 附件仍挂 project_id（内部保留，界面并入客户详情）。 */
+  /* 6. 项目 —— 1.27 起一个客户可同时有多个进行中项目（1:N）。
+   *    archived=1 表示历史项目（只读，不计入客户财务汇总，可随时恢复归档）。
+   *    回款 / 成本 / 待办 / 附件仍挂 project_id，各项目之间互不影响。 */
   `CREATE TABLE IF NOT EXISTS projects (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
     name              TEXT NOT NULL,
@@ -304,9 +304,12 @@ const INDEXES = [
   'CREATE INDEX IF NOT EXISTS idx_customers_short_name     ON customers(short_name)',
   'CREATE INDEX IF NOT EXISTS idx_customers_industry       ON customers(industry)',
   'CREATE INDEX IF NOT EXISTS idx_customers_next_follow    ON customers(next_follow_at)',
-  /* 注意：customer_no / 1:1 项目索引不放在这里 —— 老库（v9）还没有这些列，
+  /* 注意：customer_no 索引不放在这里 —— 老库（v9）还没有该列，
      而建索引发生在迁移之前，会报 no such column。
      这些索引在 v10 迁移脚本内部创建。 */
+  /* 注意：1.27（v16）已删除「一客户一项目」的部分唯一索引
+     uq_projects_customer_current，一个客户允许同时有多个进行中项目；
+     项目名唯一性改由服务层在「同一客户 + 未归档」范围内校验。 */
   /* 注意：region_code 的索引同样在 v3 迁移脚本内部创建（原因相同）。 */
   'CREATE INDEX IF NOT EXISTS idx_customers_deleted        ON customers(deleted_at)',
   'CREATE INDEX IF NOT EXISTS idx_contacts_customer        ON contacts(customer_id)',
@@ -973,8 +976,8 @@ const MIGRATIONS = [
    *      industry 保留；删列前先删掉旧列上的索引（SQLite 不允许带索引直接删列）
    *   3. projects 加 archived 列；同一客户多条「当前项目」时只保留最新一条，
    *      其余标 archived=1（历史项目，只读）
-   *   4. 建部分唯一索引 uq_projects_customer_current：
-   *      UNIQUE(customer_id) WHERE deleted_at IS NULL AND archived = 0 —— 保证一客户一项目
+   *   4. （1.27 / v16 已撤销）原本在这里建「一客户一项目」部分唯一索引
+   *      uq_projects_customer_current；v16 会删除该索引，新库也不再创建
    *   5. 建 customer_no 索引（新列上的索引不能放在 INDEXES 里，老库迁移前还没有该列）
    *   6. 种入 5 个固定标签（重点客户 / 老客户 / 待回访 / 已成交 / 暂停合作）
    *
@@ -983,7 +986,7 @@ const MIGRATIONS = [
    */
   {
     version: 10,
-    note: '客户精简（一客户一项目）：加 6 列、删 47 个旧列、projects.archived + 1:1 唯一索引、5 个固定标签',
+    note: '客户精简：加 6 列、删 47 个旧列、projects.archived、5 个固定标签（1.27 起不再建一客户一项目唯一索引）',
     run(db) {
       const done = [];
 
@@ -1067,9 +1070,10 @@ const MIGRATIONS = [
       }
       if (toArchive.length) done.push(`归档多余项目 ${toArchive.length} 个`);
 
-      /* ---------- 4. 一客户一项目：部分唯一索引 ---------- */
-      db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_projects_customer_current
-               ON projects(customer_id) WHERE deleted_at IS NULL AND archived = 0`);
+      /* ---------- 4. 一客户一项目唯一索引（1.27 / v16 起撤销，不再创建） ----------
+       * 历史说明：v10 曾在这里建部分唯一索引 uq_projects_customer_current；
+       * 1.27 改成一个客户可同时有多个进行中项目，v16 迁移会 DROP 掉老库里的这个索引。
+       * 新库走到这里时直接跳过，保持与 v16 之后的结构一致。 */
 
       /* ---------- 5. 新列上的索引 ---------- */
       db.exec('CREATE INDEX IF NOT EXISTS idx_customers_customer_no ON customers(customer_no)');
@@ -1307,6 +1311,33 @@ const MIGRATIONS = [
         SET lead_time_weeks = ROUND(lead_time_days / 7.0, 1)
         WHERE lead_time_weeks = 0 AND lead_time_days > 0`).run();
       return `新增列 ${added ? 'lead_time_weeks' : '已存在'}，回填周数 ${Number(info.changes) || 0} 条`;
+    }
+  },
+
+  /* v15 → v16：一个客户可以同时有多个进行中项目（1.27）
+   *
+   * 1.23 的「一客户一项目」是靠部分唯一索引 uq_projects_customer_current 兜底的：
+   *   UNIQUE(customer_id) WHERE deleted_at IS NULL AND archived = 0
+   * 1.27 起一个客户允许有多个进行中项目（1:N），必须删掉这个索引，否则第二次
+   * 新建项目会直接撞唯一约束。除此之外不改表、不动数据：
+   *   · archived 语义保留：archived=1 仍是「历史项目」，不计入进行中，可恢复归档；
+   *   · 回款 / 成本 / 待办仍挂 project_id，各项目互不影响；
+   *   · 项目名唯一性改由服务层按「同一客户 + 未删除 + 未归档」校验。
+   * 迁移可重入：索引不存在时 DROP INDEX IF EXISTS 不报错，重复执行无副作用。 */
+  {
+    version: 16,
+    note: '一个客户多个项目（1:N）：删除一客户一项目唯一索引 uq_projects_customer_current',
+    run(db) {
+      const had = db.prepare(
+        "SELECT name FROM sqlite_master WHERE type='index' AND name='uq_projects_customer_current'"
+      ).get();
+      db.exec('DROP INDEX IF EXISTS uq_projects_customer_current');
+      const left = db.prepare(
+        "SELECT name FROM sqlite_master WHERE type='index' AND name='uq_projects_customer_current'"
+      ).get();
+      if (left) throw new Error('唯一索引 uq_projects_customer_current 删除失败');
+      return had ? '已删除唯一索引 uq_projects_customer_current（项目改为 1:N）'
+        : '唯一索引不存在，跳过（可重入）';
     }
   }
 ];

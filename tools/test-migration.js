@@ -6,7 +6,7 @@
  *         1. 自动备份旧库（备份里仍是旧结构，可回滚）
  *         2. v2 删除 reg_capital、v3 加归属地州、v9 建 costs、v10 客户精简
  *         3. 客户业务数据一条不少、内容不变，客户编号自动回填
- *         4. projects.archived + 一客户一项目唯一索引 + 5 个固定标签
+ *         4. projects.archived + v16 删除一客户一项目唯一索引 + 5 个固定标签
  *         5. 重复执行不会重复迁移（幂等）
  *
  * 用法：node tools/test-migration.js
@@ -128,15 +128,15 @@ const NEW_COLUMNS = ['customer_no', 'contact_name', 'contact_position', 'contact
       && new Set(nos).size === nos.length,
     nos.join('、'));
 
-  check('v10 项目表已加 archived 列并建一客户一项目唯一索引',
+  check('v10 项目表已加 archived 列，v16 已删除一客户一项目唯一索引',
     (() => {
       const projCols = db.prepare('PRAGMA table_info(projects)').all().map((c) => c.name);
       const uq = db.prepare(
         "SELECT sql FROM sqlite_master WHERE type='index' AND name='uq_projects_customer_current'"
       ).get();
-      return projCols.includes('archived') && !!uq && /archived\s*=\s*0/.test(String(uq.sql || ''));
+      return projCols.includes('archived') && !uq;
     })(),
-    'archived 列 + uq_projects_customer_current 均存在');
+    'archived 列存在，uq_projects_customer_current 已不存在');
 
   check('v10 已种入 5 个固定标签（重点客户 / 老客户 / 待回访 / 已成交 / 暂停合作）',
     (() => {
@@ -162,10 +162,16 @@ const NEW_COLUMNS = ['customer_no', 'contact_name', 'contact_position', 'contact
     backupDir: path.join(freshDir, 'backups')
   });
   const freshCols = fresh.db.prepare('PRAGMA table_info(customers)').all().map((c) => c.name);
+  const freshUq = fresh.db.prepare(
+    "SELECT name FROM sqlite_master WHERE type='index' AND name='uq_projects_customer_current'"
+  ).get();
   check('全新数据库直接建为最新结构（不会留下已删除字段）',
     !freshCols.includes('reg_capital') && !freshCols.includes('type') && fresh.created === true
       && fresh.schemaVersion === SCHEMA_VERSION && fresh.backedUpTo === null,
     `全新建库=${fresh.created}，版本 v${fresh.schemaVersion}，列数 ${freshCols.length}，无谓备份=${fresh.backedUpTo === null}`);
+  check('全新建库不再创建一客户一项目唯一索引（v16 多项目）',
+    !freshUq,
+    `uq_projects_customer_current=${!!freshUq}（应为 false）`);
   closeDatabase(fresh.db);
 
   /* 幂等性：再次初始化不应重复迁移 */

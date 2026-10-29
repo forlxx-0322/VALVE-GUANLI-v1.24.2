@@ -498,20 +498,33 @@ const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
       && finNoIncome.data.received_amount === 0 && finNoIncome.data.profit === 0,
     `margin=${JSON.stringify(finNoIncome.data.margin)}，profit=${finNoIncome.data.profit}`);
 
-  /* ---------- 41a / 41b：一客户一项目约束 ---------- */
+  /* ---------- 41a / 41b：一个客户多个项目（1.27） ---------- */
   const secondProject = await api('POST', '/api/projects', {
-    name: '阶段二测试：第二个当前项目', customer_id: created.custA
+    name: '阶段二测试：第二个进行中项目', customer_id: created.custA, contract_amount: 88000
   });
-  check('41a', '同一客户再建第二个「当前项目」被拒绝（一客户一项目）',
-    secondProject.status === 400 && secondProject.json.code === 'PROJECT_EXISTS',
-    `HTTP ${secondProject.status} code=${secondProject.json && secondProject.json.code}`);
+  const twoProjects = await api('GET', `/api/projects?customer_id=${created.custA}&pageSize=10&status=all`);
+  check('41a', '同一客户允许再建第二个进行中项目（1:N，不再报 PROJECT_EXISTS）',
+    secondProject.status === 200 && secondProject.data.created === true
+      && secondProject.data.id !== proj.data.id
+      && twoProjects.data.stats.active_count === 2,
+    `HTTP ${secondProject.status}，进行中 ${twoProjects.data.stats.active_count} 个`);
 
   const projectOf = await api('GET', `/api/customers/${created.custA}/project`);
-  check('41b', '客户项目档案接口返回当前档案 + 历史数组（1:1 结构）',
+  check('41b', '客户项目接口兼容：project=最近进行中项目 + history 数组 + projects 汇总',
     projectOf.status === 200 && projectOf.data.project
-      && projectOf.data.project.id === proj.data.id
-      && Array.isArray(projectOf.data.history),
-    `当前档案 id=${projectOf.data.project && projectOf.data.project.id}，历史 ${projectOf.data.history.length} 条`);
+      && projectOf.data.project.id === secondProject.data.id
+      && Array.isArray(projectOf.data.history)
+      && Array.isArray(projectOf.data.projects) && projectOf.data.projects.length === 2
+      && projectOf.data.summary.totals.contract_amount === 588000,
+    `project=${projectOf.data.project && projectOf.data.project.id}，projects=${projectOf.data.projects.length} 条`);
+
+  const delSecond = await api('DELETE', `/api/projects/${secondProject.data.id}`);
+  const afterDelSecond = await api('GET', `/api/customers/${created.custA}/project`);
+  check('41c', '删除第二个项目后第一个项目仍在（互不影响）',
+    delSecond.data.count === 1 && afterDelSecond.data.project
+      && afterDelSecond.data.project.id === proj.data.id
+      && afterDelSecond.data.projects.length === 1,
+    `剩余项目 id=${afterDelSecond.data.project && afterDelSecond.data.project.id}`);
 
   /* ---------- 42. 软删除客户 ---------- */
   const del = await api('DELETE', `/api/customers/${created.dupCust}`);

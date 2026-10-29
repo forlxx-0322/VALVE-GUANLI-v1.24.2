@@ -8,6 +8,77 @@
 
 ---
 
+## [1.27.0] — 2026-10-29
+
+本次归档：**一个客户可以同时有多个进行中项目（1:N）**，替换 1.23 的「一客户一项目」。
+数据库结构 **v15 → v16**（删除部分唯一索引 `uq_projects_customer_current`，自动迁移 + 迁移前自动备份）。
+
+### 一、数据库（v15 → v16）
+
+| 文件 | 说明 |
+|---|---|
+| `server/db.js` | `SCHEMA_VERSION = 16`；迁移 v16：`DROP INDEX IF EXISTS uq_projects_customer_current`（可重入，索引不存在也不报错），并删掉 v10 里创建该索引的语句（新库不再创建）；其它索引全部保留；**不重建表、不动数据** |
+| 迁移安全 | 沿用现有机制：升级前自动整库备份到 `data/backups/before-migrate-v15-*.db`（备份里仍是 v15 结构 + 旧索引，可回滚） |
+| 语义 | `projects.archived` 保留：`archived=1` 仍是「历史项目」，只读、可恢复归档、不计入客户财务合计 |
+
+### 二、后端（1:N 规则与口径）
+
+- **创建 / 保存项目**：同一客户允许任意多个进行中项目，删除「已有项目」类拦截（不再返回 `PROJECT_EXISTS`）。
+  项目名规则：**同一客户内、未删除且未归档的项目名不重复**（去首尾空格、忽略大小写，重复返回 400 `NAME_DUPLICATE`）；
+  跨客户允许同名；改名同样校验；历史项目不参与查重。
+- **列表**：`listProjects` 支持 `customer_id`、`include_archived` 与 `status=active|archived|all`（兼容旧 `archived=1/all`），
+  返回分页字段、`summary`（合同额 / 已回款 / 成本 / 毛利）与 `stats`（进行中 / 归档数量、各自合同额）；`boardProjects` 不受影响。
+- **客户项目汇总**：新增 `projectsSummary(db, customerId)` → `GET /api/customers/:id/projects`：
+  `active[]`（id/name/stage/progress/contract_amount/received_amount/cost_amount/profit/payment_status/created_at…）、
+  `archived[]`（精简字段）、`totals`（进行中项目的合同额 / 已回款 / 成本 / 毛利）。
+  旧接口 `GET /api/customers/:id/project` 保持兼容：`project` 返回最近创建的进行中项目，另带 `history / projects / summary / finance`。
+- **财务口径**：`getCustomerFinance` 改为「**进行中项目合计**」：合同额 / 已回款 / 应收 / 成本 / 毛利 / 毛利率都由
+  `projectsSummary.totals` 计算，与项目列表逐行相加一致；历史（归档）项目不计入合计但仍可只读查看。
+- **回款 / 成本 / 待办**：仍挂 `project_id`，各项目互不影响；保存时校验项目存在且属于该客户
+  （`PROJECT_NOT_FOUND` / `PROJECT_CUSTOMER_MISMATCH`），历史项目拒绝登记（`ARCHIVED_READONLY`）。
+- **待办**：`project_id` 可空；只给项目时自动带出客户；同时给客户时项目必须属于该客户；不存在的项目直接 400。
+- **归档 / 恢复 / 删除**：新增 `POST /api/projects/:id/archive`、`POST /api/projects/:id/unarchive` 与
+  `/api/customers/:id/projects/:pid/archive|unarchive`；恢复归档时若同客户已有同名进行中项目则 400 `NAME_DUPLICATE`。
+  删除项目只影响自己（项目软删除、该项目成本一并软删除、回款随项目不再计入/可见；其它项目照旧）；
+  客户删除时级联软删该客户**所有**项目与成本，删除日志记录级联 ID，还原时按 ID 精确恢复（不会把单独删过的项目拉回来）。
+- **Excel 导入项目**：同一客户可导入多个进行中项目（不再自动转历史）；同客户进行中重名按行报错。
+
+### 三、前端
+
+- **客户详情「项目与财务」**：顶部「进行中 N 个 + 新增项目」与进行中合计财务栏；
+  项目列表（名称 / 阶段 / 进度 / 合同额 / 已回款 / 成本 / 毛利 / 编辑 · 归档 · 删除），点行选中；
+  选中项目下方维护该项目的回款计划 / 实收 / 成本台账（回款、成本抽屉都传 `project_id`）；
+  默认选中最近创建的进行中项目；历史项目折叠区支持「查看」（只读抽屉）与「恢复归档」。
+- **`web/js/forms/project-edit.js`**：支持新增第 N 个项目（带 `customer_id`，走 POST /api/projects）与编辑指定项目
+  （PUT /api/projects/:id）；字段不变；同客户重名前端提示 + 后端 400。
+- **待办中心**：关联客户后出现「关联项目」下拉（只列该客户进行中项目，可空）；列表项目名可点击跳回客户详情并选中该项目。
+- **文案**：侧边栏副标题 / 客户列表页头 / 设置页关于 / 项目抽屉 / README / 各 README 全部改为「一个客户可管理多个项目」。
+- **样式**：沿用现有卡片 / 表格 / 抽屉组件，无新增大段 CSS；选中行用现有 `--c-primary-soft` 令牌，深色模式不受影响。
+
+### 四、测试
+
+- `tools/test-customer-123.js`：原「第二个项目被拒绝」改为「允许第二个项目」，并补同客户重名拒绝、跨客户同名允许、
+  每个项目独立回款/成本、归档一个后列表与客户汇总正确、恢复归档、删除一个项目不影响另一个、客户删除级联全部项目
+  （37 → 45 项断言）。
+- 新增 `tools/test-projects-multi-127.js`（49 项断言）：3 个项目并列、列表/汇总、逐项目回款/成本/毛利、
+  归档与恢复、重名/跨客户同名、待办关联项目、删除项目隔离、客户删除级联、v16 索引已删除、旧 v15 库自动升级 + 可重入。
+- 更新既有套件里只与「旧 1:1 规则」相关的断言：`test-phase1.js`（索引已删除）、`test-phase2-api.js`（允许第二项目 + 删除互不影响）、
+  `test-phase3-api.js`（允许第二项目、客户财务改为进行中合计）、`test-phase2-ui-interaction.js` / `test-phase3-ui-interaction.js` /
+  `test-acceptance-browser.js`（新增项目 / 归档 / 恢复归档按钮与文案、财务栏 6 项合计）；未删除其它断言。
+- `test-migration.js` / `test-migration-full.js`：补 v16 专项（v15 库 → v16：索引删除、数据不丢、可建第二项目、
+  迁移前备份保留旧索引、重复执行可重入），并更新「唯一索引存在」的旧断言。
+- `tools/run-all-tests.js`：注册新套件。
+
+### 五、验证（全量回归）
+
+- 全量回归：**908 / 908 通过**（30 个套件，沙箱空库起跑，真实 `data/` 未读写）。
+- 迁移证据：v1 库 → v16（15 步）与 v15 库 → v16（1 步）均通过；v16 后 `sqlite_master` 查不到
+  `uq_projects_customer_current`；全新库不再创建该索引；重复启动 0 步迁移。
+- 兼容：旧 `GET /api/customers/:id/project` 仍返回最近进行中项目（前端旧逻辑不崩）；`archived` 语义不变；
+  历史项目可只读查看与恢复归档。
+
+---
+
 ## [1.26.1] — 2026-10-29
 
 本次归档：**货期按周精确存储**，修复 1.26.0「3.5 周 → 25 天 → 回显 3.6 周」的精度瑕疵。

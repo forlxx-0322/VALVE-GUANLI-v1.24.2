@@ -304,7 +304,7 @@ window.CRM = window.CRM || {};
     template: `
       <div>
         <c-page-header title="客户管理"
-          desc="一客户一项目：客户资料 + 主联系人 + 回访周期；项目档案、回款与成本在客户详情里维护。" />
+          desc="一个客户可管理多个项目：客户资料 + 主联系人 + 回访周期；项目、回款与成本在客户详情里维护。" />
 
         <div class="card" style="margin-bottom:16px">
           <div class="card-body" style="padding:14px 16px">

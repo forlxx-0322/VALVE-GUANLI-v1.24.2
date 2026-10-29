@@ -1,12 +1,12 @@
 /**
- * 阶段二 浏览器交互测试（1.23 一客户一项目）
+ * 阶段二 浏览器交互测试（1.27 一个客户多个项目）
  *
  * 通过 Chrome DevTools Protocol 驱动真实浏览器：
  *   - 客户列表：5 项导航（含产品价目表、无项目管理）、新列头、筛选与快捷
  *   - 新增客户抽屉：4 个区块、只有公司名称必填、标签选择器、字典内联新增
  *   - 通过界面真实创建客户（含行业 / 主联系人）
  *   - 客户详情 4 个标签页：资料（财务栏）/ 回访与跟进 / 项目与财务 / 附件与日志
- *   - 项目档案抽屉（8 个字段）保存后回显
+ *   - 项目抽屉（8 个字段）保存后回显
  *   - 记录跟进抽屉
  *   - 全程无未捕获 JS 错误
  *
@@ -380,9 +380,9 @@ class CDP {
       hasExtraFold: cards.some(c => c.includes('附加联系人'))
     };
   })()`);
-  check('「资料」标签页：财务汇总栏 9 个数字（8 项 + 预计毛利）',
-    basicInfo.statCount >= 9
-      && ['合同额', '已收', '应收', '采购成本', '维护成本', '其他成本', '毛利率']
+  check('「资料」标签页：财务汇总栏显示进行中项目合计（合同额/已回款/应收/成本/毛利/毛利率 + 预计毛利）',
+    basicInfo.statCount >= 7
+      && ['合同额', '已回款', '应收', '成本', '毛利', '毛利率', '预计毛利']
         .every((l) => basicInfo.statLabels.some((x) => x.includes(l))),
     `统计卡 ${basicInfo.statCount} 个：${basicInfo.statLabels.join(' / ')}`);
   check('「资料」标签页：客户资料 + 主联系人 + 附加联系人折叠区',
@@ -409,15 +409,15 @@ class CDP {
     tabTests.map((t) => `${t.name}${t.ok ? '✓' : '✗'}（${(t.titles || []).slice(0, 3).join('/')}）`).join(' '));
 
   const projectPane = tabTests.find((t) => t.name === '项目与财务') || {};
-  check('「项目与财务」包含当前项目档案 / 回款计划 / 实收 / 成本台账 / 历史项目',
-    ['当前项目档案', '回款计划', '实收流水', '成本台账', '历史项目']
+  check('「项目与财务」包含进行中项目 / 项目档案 / 回款计划 / 实收 / 成本台账 / 历史项目',
+    ['进行中项目', '项目档案', '回款计划', '实收流水', '成本台账', '历史项目']
       .every((k) => (projectPane.titles || []).some((x) => x.includes(k))),
     `卡片：${(projectPane.titles || []).join(' / ')}`);
 
-  /* ---------- 6. 项目档案抽屉 ---------- */
+  /* ---------- 6. 项目抽屉 ---------- */
   const projectDrawer = await cdp.evalJs(`(async () => {
-    const btn = [...document.querySelectorAll('button')].find(b => b.textContent.includes('建立项目档案'));
-    if (!btn) return { ok: false, why: '未找到「建立项目档案」按钮' };
+    const btn = [...document.querySelectorAll('button')].find(b => b.textContent.includes('新增项目'));
+    if (!btn) return { ok: false, why: '未找到「新增项目」按钮' };
     btn.click();
     await new Promise(r => setTimeout(r, 800));
     const d = document.querySelector('.drawer');
@@ -428,7 +428,7 @@ class CDP {
       labels: [...d.querySelectorAll('.field-label')].map(x => x.textContent.trim())
     };
   })()`);
-  check('客户详情可打开项目档案抽屉（8 个业务字段）',
+  check('客户详情可打开项目抽屉（8 个业务字段）',
     projectDrawer.ok
       && ['项目名称', '项目阶段', '进度（%）', '合同额（元）', '签约日期', '投标日期', '投标结果', '交货期']
         .every((l) => projectDrawer.labels.includes(l)),
@@ -462,9 +462,9 @@ class CDP {
         ? k.nextElementSibling.textContent.trim().slice(0, 30) : ''))
     };
   })()`);
-  check('保存项目档案后详情回显项目名称与合同额',
+  check('保存项目后详情回显项目名称与合同额',
     projectSave.ok
-      && projectSave.toasts.some((t) => t.includes('项目档案'))
+      && projectSave.toasts.some((t) => t.includes('项目已新增'))
       && projectSave.kv.some((x) => x.startsWith('项目名称=交互测试项目'))
       && projectSave.kv.some((x) => x.startsWith('合同额=123,456')),
     projectSave.ok ? `提示=${(projectSave.toasts || []).join(' / ')}` : `失败原因：${projectSave.why}`);

@@ -73,7 +73,7 @@ window.CRM = window.CRM || {};
         <c-log-panel v-else-if="tab === 'logs'" />
 
         <div v-else-if="tab === 'about'">
-          <c-card title="关于本软件" sub="一客户一项目 · 客户 / 回访 / 项目档案 / 财务台账 · 单机版" icon="settings">
+          <c-card title="关于本软件" sub="一个客户可管理多个项目 · 客户 / 回访 / 项目 / 回款 / 成本 · 单机版" icon="settings">
             <div class="kv">
               <div class="k">软件版本</div>
               <div class="v">{{ info ? info.version : '—' }}</div>

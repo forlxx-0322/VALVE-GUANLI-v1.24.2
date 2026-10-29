@@ -1,11 +1,11 @@
 /**
- * 阶段三 浏览器交互测试（1.23 一客户一项目）
+ * 阶段三 浏览器交互测试（1.27 一个客户多个项目）
  *
  * 驱动真实浏览器走一遍客户详情里的「项目与财务」：
  *   - 打开项目档案抽屉并保存（项目名称 / 阶段 / 合同额 / 投标信息）
  *   - 新增回款计划 → 登记实收 → 项目卡与财务汇总当场更新
  *   - 登记成本 → 成本台账出现该笔
- *   - 当前项目「转为历史」→ 项目区变空、历史项目折叠区可查
+ *   - 进行中项目「归档」→ 项目列表变空、历史项目折叠区可查 → 再新增项目
  *   - 归档后再建新当前项目
  *   - 待办中心快速添加
  *   - 全程无未捕获 JS 错误
@@ -105,7 +105,7 @@ class CDP {
 }
 
 (async () => {
-  console.log('=== 阶段三 浏览器交互测试（项目档案 / 回款 / 成本 / 待办）===\n');
+  console.log('=== 阶段三 浏览器交互测试（多项目 / 回款 / 成本 / 待办）===\n');
 
   if (typeof globalThis.WebSocket !== 'function') {
     console.log('当前 Node 无内置 WebSocket，跳过交互测试。');
@@ -169,22 +169,22 @@ class CDP {
     const titles = [...document.querySelectorAll('.card-title')].map(x => x.textContent.trim());
     return {
       ok: true, titles,
-      hasEmpty: document.body.innerText.includes('还没有项目档案'),
-      hasBuildBtn: [...document.querySelectorAll('button')].some(b => b.textContent.includes('建立项目档案'))
+      hasEmpty: document.body.innerText.includes('还没有进行中的项目'),
+      hasBuildBtn: [...document.querySelectorAll('button')].some(b => b.textContent.includes('新增项目'))
     };
   })()`);
-  check('客户详情「项目与财务」初始为空档案状态',
+  check('客户详情「项目与财务」初始为空项目状态（一个客户可多个项目）',
     pane.ok && pane.hasEmpty && pane.hasBuildBtn
-      && pane.titles.some((x) => x.includes('当前项目档案'))
+      && pane.titles.some((x) => x.includes('进行中项目'))
       && pane.titles.some((x) => x.includes('回款计划'))
       && pane.titles.some((x) => x.includes('成本台账')),
     `卡片：${(pane.titles || []).slice(0, 6).join(' / ')}`);
 
-  /* ---------- 2. 建立项目档案 ---------- */
+  /* ---------- 2. 新增项目 ---------- */
   const projectName = `阶段三交互项目${TS}`;
   const projectSaved = await cdp.evalJs(`(async () => {
-    const btn = [...document.querySelectorAll('button')].find(b => b.textContent.includes('建立项目档案'));
-    if (!btn) return { ok: false, why: '未找到建立项目档案按钮' };
+    const btn = [...document.querySelectorAll('button')].find(b => b.textContent.includes('新增项目'));
+    if (!btn) return { ok: false, why: '未找到新增项目按钮' };
     btn.click();
     await new Promise(r => setTimeout(r, 900));
     const d = document.querySelector('.drawer');
@@ -230,9 +230,9 @@ class CDP {
       drawerClosed: !document.querySelector('.drawer')
     };
   })()`);
-  check('项目档案抽屉填写并保存成功',
+  check('项目抽屉填写并保存成功（新增第 1 个项目）',
     projectSaved.ok && Object.values(projectSaved.filled).every(Boolean)
-      && projectSaved.toasts.some((t) => t.includes('项目档案'))
+      && projectSaved.toasts.some((t) => t.includes('项目已新增'))
       && projectSaved.drawerClosed,
     projectSaved.ok ? `提示：${(projectSaved.toasts || []).join(' / ')}` : `失败：${projectSaved.why}`);
 
@@ -383,11 +383,11 @@ class CDP {
     }));
     const get = (label) => (stats.find(s => s.l.includes(label)) || {}).n || '';
     return {
-      contract: get('合同额'), received: get('已收'), receivable: get('应收'),
-      purchase: get('采购成本'), profit: get('毛利')
+      contract: get('合同额'), received: get('已回款'), receivable: get('应收'),
+      purchase: get('成本'), profit: get('毛利')
     };
   })()`);
-  check('「资料」财务汇总栏显示合同额 / 已收 / 应收 / 采购成本 / 毛利',
+  check('「资料」财务汇总栏显示进行中项目合计（合同额 / 已回款 / 应收 / 成本 / 毛利）',
     String(financeBar.contract).includes('500,000')
       && String(financeBar.received).includes('200,000')
       && String(financeBar.receivable).includes('0')
@@ -395,13 +395,13 @@ class CDP {
       && String(financeBar.profit).includes('100,000'),
     JSON.stringify(financeBar));
 
-  /* ---------- 7. 转为历史 ---------- */
+  /* ---------- 7. 归档项目 ---------- */
   const archived = await cdp.evalJs(`(async () => {
     const tab = [...document.querySelectorAll('.tabs .tab')].find(t => t.textContent.includes('项目与财务'));
     if (tab) tab.click();
     await new Promise(r => setTimeout(r, 500));
-    const btn = [...document.querySelectorAll('button')].find(b => b.textContent.includes('转为历史'));
-    if (!btn) return { ok: false, why: '未找到转为历史按钮' };
+    const btn = [...document.querySelectorAll('button')].find(b => b.textContent.includes('归档'));
+    if (!btn) return { ok: false, why: '未找到归档按钮' };
     btn.click();
     await new Promise(r => setTimeout(r, 600));
     const modal = document.querySelector('.modal');
@@ -413,15 +413,15 @@ class CDP {
     return {
       ok: true,
       toasts: [...document.querySelectorAll('.toast')].map(t => t.textContent.trim()),
-      isEmpty: document.body.innerText.includes('还没有项目档案'),
+      isEmpty: document.body.innerText.includes('还没有进行中的项目'),
       hasHistory: document.body.innerText.includes('历史项目（1）')
     };
   })()`);
-  check('当前项目「转为历史」后项目区为空、历史项目计数为 1',
+  check('项目「归档」后列表为空、历史项目计数为 1',
     archived.ok && archived.isEmpty && archived.hasHistory
-      && archived.toasts.some((t) => t.includes('已转为历史项目')),
+      && archived.toasts.some((t) => t.includes('已归档为历史项目')),
     archived.ok
-      ? `提示：${(archived.toasts || []).join(' / ')}，空档案=${archived.isEmpty}，历史计数=${archived.hasHistory}`
+      ? `提示：${(archived.toasts || []).join(' / ')}，空列表=${archived.isEmpty}，历史计数=${archived.hasHistory}`
       : `失败：${archived.why}`);
 
   const historyApi = projectId ? await (await fetch(BASE + `/api/customers/${customerId}/history-projects`)).json() : null;
@@ -432,8 +432,8 @@ class CDP {
   /* ---------- 8. 归档后再建新当前项目 ---------- */
   const newProjectName = `阶段三交互新项目${TS}`;
   const rebuilt = await cdp.evalJs(`(async () => {
-    const btn = [...document.querySelectorAll('button')].find(b => b.textContent.includes('建立项目档案'));
-    if (!btn) return { ok: false, why: '未找到建立项目档案按钮' };
+    const btn = [...document.querySelectorAll('button')].find(b => b.textContent.includes('新增项目'));
+    if (!btn) return { ok: false, why: '未找到新增项目按钮' };
     btn.click();
     await new Promise(r => setTimeout(r, 900));
     const d = document.querySelector('.drawer');
@@ -458,12 +458,12 @@ class CDP {
     return { ok: true, projectName: kv['项目名称'] || '', toasts: [...document.querySelectorAll('.toast')].map(t => t.textContent.trim()) };
   })()`);
   const currentApi = await (await fetch(BASE + `/api/customers/${customerId}/project`)).json();
-  check('归档后可以再建新的当前项目（仍然一客户一项目）',
+  check('归档后可再建新的进行中项目（一个客户多个项目）',
     rebuilt.ok && rebuilt.projectName === newProjectName
       && currentApi.data.project && currentApi.data.project.name === newProjectName
       && currentApi.data.history.length === 1,
     rebuilt.ok
-      ? `新当前项目=${rebuilt.projectName}，历史=${currentApi.data.history.length} 条`
+      ? `新进行中项目=${rebuilt.projectName}，历史=${currentApi.data.history.length} 条`
       : `失败：${rebuilt.why}`);
 
   /* ---------- 9. 待办中心快速添加 ---------- */

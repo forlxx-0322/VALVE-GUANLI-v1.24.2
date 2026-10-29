@@ -7,7 +7,7 @@ server/
 ├─ data/           region.json（新疆行政区划，客户分布与地址归属用）
 ├─ services/       业务逻辑（无 HTTP 概念，纯函数 + db）
 │  ├─ crm.js          客户 / 联系人 / 标签 / 跟进 / 查重 / 客户编号 / 财务汇总
-│  ├─ pm.js           客户 1:1 项目档案、回款、待办、看板
+│  ├─ pm.js           客户项目 1:N（多进行中项目 / 项目汇总 / 归档恢复）、回款、待办、看板
 │  ├─ costs.js        成本台账（采购 / 维护 / 差旅 / 其他）
 │  ├─ products.js     产品分类树与产品、折后价、货期（周精确存储 + 天兼容）、导出
 │  ├─ stats.js        客户分布、收入报表（月/年）、明细下钻、首页 v2
@@ -40,7 +40,7 @@ server/
 - 业务错误统一 `fail(res, status, code, message)`；成功 `ok(res, data)`
 - 会改数据的地方都写 `activity_logs`（`entity_type` / `action` / `summary`）
 
-## 数据库结构（当前 v15）
+## 数据库结构（当前 v16）
 
 表：`customers / contacts / tags / customer_tags / followups / projects / payments /
 costs / tasks / attachments / activity_logs / dict / settings / region /
@@ -48,6 +48,11 @@ product_categories / products`（17 张）
 
 > `products` 自 v15 起同时存 `lead_time_weeks`（周，界面/导入按此精确读写）与
 > `lead_time_days`（天，旧字段/导出兼容，`Math.round(周×7)`）。
+>
+> `projects` 自 v16 起为**一个客户多个进行中项目（1:N）**：删除了 v10 建的
+> `uq_projects_customer_current` 部分唯一索引；`archived=1` 仍是历史项目（只读、可恢复、
+> 不计入客户财务合计）。项目名唯一性改由 `services/pm.js` 在
+> 「同一客户 + 未删除 + 未归档」范围内校验（`NAME_DUPLICATE`）。
 
 升级方式：`db.js` 里 `MIGRATIONS` 追加一段（`version` = 目标版本），
 启动时自动按版本逐级执行，**执行前自动整库备份**到 `data/backups/before-migrate-v*-*.db`。

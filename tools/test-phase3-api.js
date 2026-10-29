@@ -3,7 +3,7 @@
  *
  * 1.23 起没有独立「项目管理」模块：项目是客户详情里的 1:1 档案。
  * 本套件验证：
- *   - 一客户一项目约束（第二个当前项目被拒 / 转历史后可再建）
+ *   - 一个客户多个项目（允许第二个进行中项目 / 归档后可再建 / 单项目开关不影响另一个）
  *   - 历史项目只读
  *   - 回款计划与实收：欠款、回款率、回款状态、核销、逾期、超收提醒
  *   - 成本台账：分类 / 金额校验 / 自动挂项目 / 增删改查
@@ -115,13 +115,18 @@ const created = {};
     d1.data.payment_status === '未签约' && d1.data.debt_amount === 0,
     `回款状态=${d1.data.payment_status}，欠款=${d1.data.debt_amount}`);
 
-  /* ---------- 7. 一客户一项目：第二个当前项目被拒 ---------- */
+  /* ---------- 7. 一个客户多个项目（1.27） ---------- */
   const second = await api('POST', '/api/projects', {
-    name: '一客户一项目：第二个当前项目', customer_id: created.customer
+    name: '阶段三测试：第二个进行中项目', customer_id: created.customer, contract_amount: 88000
   });
-  check(7, '同一客户已有当前项目时，再建第二个被拒绝（一客户一项目）',
-    second.status === 400 && second.json.code === 'PROJECT_EXISTS',
-    `HTTP ${second.status} code=${second.json && second.json.code}`);
+  const twoActive = await api('GET', `/api/projects?customer_id=${created.customer}&pageSize=10&status=all`);
+  check(7, '同一客户可以再建第二个进行中项目（1:N）',
+    second.status === 200 && second.data.created === true
+      && second.data.id !== created.project
+      && twoActive.data.stats.active_count === 2,
+    `HTTP ${second.status}，进行中 ${twoActive.data.stats.active_count} 个`);
+  /* 清理第二个项目：后续用例继续围绕第一个项目验证回款/成本口径 */
+  await api('DELETE', `/api/projects/${second.data.id}`);
 
   /* ---------- 8. 必填校验 ---------- */
   const bad1 = await api('POST', '/api/projects', { name: '' });
@@ -363,24 +368,33 @@ const created = {};
       && delArchived.status === 400 && delArchived.json.code === 'ARCHIVED_READONLY',
     `普通接口 HTTP ${editArchived.status} ${editArchived.json && editArchived.json.code}；客户接口 HTTP ${delArchived.status} ${delArchived.json && delArchived.json.code}`);
 
-  /* ---------- 34. 归档后可再建新当前项目 ---------- */
+  /* ---------- 34. 归档后可再建新进行中项目 ---------- */
   const p2 = await api('PUT', `/api/customers/${created.customer}/project`, {
-    name: '一客户一项目：第二个项目（新当前档案）', stage: '技术交流', contract_amount: 250000
+    name: '阶段三测试：归档后新项目', stage: '技术交流', contract_amount: 250000
   });
   const listAfter = await api('GET', '/api/customers?q=' + encodeURIComponent('塔河炼化'));
   const rowAfter = (listAfter.data.list || []).find((x) => x.id === created.customer);
-  check(34, '归档后可以建立新的当前项目（仍然一客户一项目）',
+  check(34, '归档后可以建立新的进行中项目（多项目，列表项目数 1）',
     p2.data.created === true && p2.data.id !== created.project
       && rowAfter && rowAfter.project_count === 1,
-    `新当前项目 id=${p2.data.id}，列表项目数=${rowAfter && rowAfter.project_count}`);
+    `新进行中项目 id=${p2.data.id}，列表项目数=${rowAfter && rowAfter.project_count}`);
   created.project2 = p2.data.id;
 
-  /* 历史项目的实收仍计入客户财务（换档案不丢账） */
+  /* 1.27 财务口径：客户汇总按进行中项目合计，历史项目不计入但仍可查看 */
   const finAfter = await api('GET', `/api/customers/${created.customer}/finance`);
-  check(35, '换项目档案后，历史项目的实收与成本仍计入客户财务',
-    finAfter.data.received_amount === 1860000 && finAfter.data.profit === 952000
-      && finAfter.data.contract_amount === 250000,
-    `合同额（新档案）=${finAfter.data.contract_amount}，已收=${finAfter.data.received_amount}，毛利=${finAfter.data.profit}`);
+  const sumAfter = await api('GET', `/api/customers/${created.customer}/projects`);
+  const archivedDetail = await api('GET', `/api/projects/${created.project}`);
+  check('34b', '客户财务只算进行中项目合计；历史项目仍可只读查看',
+    finAfter.data.contract_amount === 250000 && finAfter.data.received_amount === 0
+      && finAfter.data.total_cost === 0 && finAfter.data.profit === 0
+      && finAfter.data.active_project_count === 1 && finAfter.data.archived_project_count === 1
+      && sumAfter.data.totals.contract_amount === 250000
+      && sumAfter.data.archived.length === 1
+      && archivedDetail.status === 200
+      && archivedDetail.data.archived === 1
+      && archivedDetail.data.received_amount === 1860000,
+    `进行中合计 合同额=${finAfter.data.contract_amount} 已收=${finAfter.data.received_amount}；`
+      + `历史项目已收=${archivedDetail.data.received_amount}`);
 
   /* ---------- 36. 第一次登记回款自动建档案 ---------- */
   const custB = await api('POST', '/api/customers', {
@@ -463,7 +477,7 @@ const created = {};
 
   /* ---------- 44. 项目白名单 ---------- */
   await api('PUT', `/api/projects/${created.project2}`, {
-    name: '一客户一项目：第二个项目（新当前档案）',
+    name: '阶段三测试：归档后新项目',
     received_amount: 999999, deleted_at: '2020-01-01T00:00:00', archived: 1, created_at: '1999-01-01'
   });
   const afterHack = await api('GET', `/api/projects/${created.project2}`);

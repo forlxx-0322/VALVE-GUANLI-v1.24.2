@@ -142,9 +142,9 @@ async function get(pathname, init) {
     const fixedTags = db.prepare(
       "SELECT COUNT(*) AS n FROM tags WHERE name IN ('重点客户','老客户','待回访','已成交','暂停合作')"
     ).get().n;
-    check('7a', '项目表有 archived 列 + 一客户一项目唯一索引 + 5 个固定标签',
-      projCols.includes('archived') && !!uq && fixedTags === 5,
-      `archived=${projCols.includes('archived')} 唯一索引=${!!uq} 固定标签=${fixedTags}/5`);
+    check('7a', '项目表有 archived 列 + v16 已删除一客户一项目唯一索引 + 5 个固定标签',
+      projCols.includes('archived') && !uq && fixedTags === 5,
+      `archived=${projCols.includes('archived')} 唯一索引=${!!uq}（应为 false） 固定标签=${fixedTags}/5`);
 
     db.close();
   } catch (e) {

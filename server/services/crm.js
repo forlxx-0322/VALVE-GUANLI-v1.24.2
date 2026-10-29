@@ -1,10 +1,10 @@
 /**
  * 业务服务层 —— 客户 / 联系人 / 标签 / 跟进记录
  *
- * 1.23 起客户模型精简（一客户一项目）：
+ * 1.23 起客户模型精简；1.27 起一个客户可以同时有多个进行中项目（1:N）：
  *   - 客户表只保留 21 个基础列 + 6 个新增列（无 type/level/status/phone 等旧字段）
  *   - 主联系人内嵌在 customers.contact_* 四个列里，同时同步到 contacts 表（is_primary=1）
- *   - 项目档案（1:1）在 services/pm.js；客户详情里的财务汇总在本文件 getCustomerFinance
+ *   - 项目列表（1:N）在 services/pm.js；客户详情的财务汇总取「进行中项目合计」
  *
  * 设计要点：
  *   1. 字段白名单写入：前端多传的字段一律忽略，避免写坏数据库
@@ -295,64 +295,66 @@ function listCustomers(db, q) {
 /* ------------------------------------------------------------------ */
 
 /**
- * 客户财务汇总（1.23）
+ * 客户财务汇总（1.27：按「进行中项目合计」）
  *
  * 口径（与界面上的说明一致）：
- *   合同额   = 当前项目档案上的 contract_amount
- *   已收     = Σ payments.type='实收'（该客户所有未删除项目）
- *   应收     = Σ 回款计划 − 已收，负数按 0 显示
- *   采购成本 = Σ costs 分类=采购成本
- *   维护成本 = Σ costs 分类=维护成本
- *   其他成本 = Σ costs 分类=差旅 + 其他
- *   毛利     = 已收 − 采购成本 − 维护成本 − 其他成本（实际口径，不是合同额）
+ *   合同额   = Σ 进行中项目（archived=0）的 contract_amount
+ *   已收     = Σ 进行中项目的 payments.type='实收'
+ *   应收     = Σ 进行中项目的回款计划 − 已收，负数按 0 显示
+ *   成本     = Σ 进行中项目的成本台账（采购 / 维护 / 差旅 / 其他）
+ *   毛利     = 已收 − 成本（实际口径，不是合同额）
  *   毛利率   = 毛利 ÷ 已收（已收为 0 时为 null，界面显示「—」）
  *   预计毛利 = 合同额 − 采购成本（报价/投标时看这个）
+ *
+ * 历史（已归档）项目不计入上述合计，但仍可在客户详情里只读查看；
+ * 数字与 GET /api/customers/:id/projects 的 totals 完全一致。
  */
 function getCustomerFinance(db, customerId) {
   const cid = Number(customerId);
   const cust = db.prepare('SELECT id FROM customers WHERE id = ? AND deleted_at IS NULL').get(cid);
   if (!cust) throw notFound('客户不存在或已删除');
 
-  const project = db.prepare(
-    `SELECT id, name, stage, progress, contract_amount FROM projects
-     WHERE customer_id = ? AND deleted_at IS NULL AND archived = 0
-     ORDER BY id DESC LIMIT 1`
-  ).get(cid);
+  /* 延迟 require：pm 也 require 本文件，顶层互相 require 会拿到半成品 exports */
+  const pm = require('./pm');
+  const summary = pm.projectsSummary(db, cid);
+  const totals = summary.totals;
+  const latest = summary.active[0] || null;
 
   const pay = db.prepare(`
-    SELECT
-      COALESCE(SUM(CASE WHEN pm.type = '实收' THEN pm.amount ELSE 0 END), 0) AS received,
-      COALESCE(SUM(CASE WHEN pm.type = '计划' THEN pm.amount ELSE 0 END), 0) AS planned
-    FROM payments pm
-    JOIN projects p ON p.id = pm.project_id AND p.deleted_at IS NULL
-    WHERE p.customer_id = ?
+    SELECT COALESCE(SUM(CASE WHEN pm2.type = '计划' THEN pm2.amount ELSE 0 END), 0) AS planned
+    FROM payments pm2
+    JOIN projects p ON p.id = pm2.project_id AND p.deleted_at IS NULL
+    WHERE p.customer_id = ? AND p.archived = 0
   `).get(cid);
 
   const costRows = db.prepare(`
     SELECT ct.category, COALESCE(SUM(ct.amount), 0) AS amount
     FROM costs ct
-    WHERE ct.deleted_at IS NULL
-      AND (ct.customer_id = ?
-           OR ct.project_id IN (SELECT id FROM projects WHERE customer_id = ? AND deleted_at IS NULL))
+    JOIN projects p ON p.id = ct.project_id AND p.deleted_at IS NULL
+    WHERE ct.deleted_at IS NULL AND p.customer_id = ? AND p.archived = 0
     GROUP BY ct.category
-  `).all(cid, cid);
+  `).all(cid);
   const costOf = (name) => {
     const hit = costRows.find((r) => r.category === name);
     return round2(hit ? hit.amount : 0);
   };
 
-  const contract = round2(project ? project.contract_amount : 0);
-  const received = round2(pay.received);
+  const contract = round2(totals.contract_amount);
+  const received = round2(totals.received_amount);
   const planned = round2(pay.planned);
   const purchase = costOf('采购成本');
   const maintain = costOf('维护成本');
   const other = round2(costOf('差旅') + costOf('其他'));
-  const totalCost = round2(purchase + maintain + other);
-  const profit = round2(received - totalCost);
+  const totalCost = round2(totals.cost_amount);
+  const profit = round2(totals.profit);
 
   return {
-    project_id: project ? project.id : null,
-    project_name: project ? project.name : '',
+    /* 兼容旧字段：取最近创建的进行中项目（多项目时仅供参考，汇总看 totals） */
+    project_id: latest ? latest.id : null,
+    project_name: latest ? latest.name : '',
+    project_count: totals.active_count,
+    active_project_count: totals.active_count,
+    archived_project_count: totals.archived_count,
     contract_amount: contract,
     planned_amount: planned,
     received_amount: received,
@@ -361,8 +363,9 @@ function getCustomerFinance(db, customerId) {
     maintain_cost: maintain,
     other_cost: other,
     total_cost: totalCost,
+    cost_amount: totalCost,
     profit,
-    margin: received > 0 ? Math.round((profit / received) * 1000) / 10 : null,
+    margin: totals.margin,
     expected_profit: round2(contract - purchase)
   };
 }
@@ -392,13 +395,13 @@ function getCustomer(db, id) {
      ORDER BY f.followed_at DESC, f.id DESC LIMIT 200`
   ).all(customer.id));
 
-  /* 1:1 当前项目档案（可能还没有） */
+  /* 进行中项目（1.27：可能有多个；这里给「最近创建的一个」做旧字段兼容） */
   const project = db.prepare(`
     SELECT p.*, COALESCE((SELECT SUM(pm.amount) FROM payments pm
                           WHERE pm.project_id = p.id AND pm.type = '实收'), 0) AS received
     FROM projects p
     WHERE p.customer_id = ? AND p.deleted_at IS NULL AND p.archived = 0
-    ORDER BY p.id DESC LIMIT 1
+    ORDER BY p.created_at DESC, p.id DESC LIMIT 1
   `).get(customer.id);
   customer.project = project ? plain(project) : null;
   if (customer.project) {
@@ -409,12 +412,31 @@ function getCustomer(db, id) {
       ? Math.round((customer.project.received / contract) * 1000) / 10 : 0;
   }
 
+  /* 进行中项目数量的轻量列表（详情页不用再额外查一次就能显示「进行中 N 个」） */
+  const activeProjects = plainAll(db.prepare(`
+    SELECT p.id, p.name, p.stage, p.progress, p.contract_amount, p.created_at,
+           COALESCE((SELECT SUM(pm.amount) FROM payments pm
+                     WHERE pm.project_id = p.id AND pm.type = '实收'), 0) AS received_amount
+    FROM projects p
+    WHERE p.customer_id = ? AND p.deleted_at IS NULL AND p.archived = 0
+    ORDER BY p.created_at DESC, p.id DESC
+  `).all(customer.id)).map((p) => Object.assign(p, {
+    received_amount: round2(p.received_amount),
+    debt_amount: round2((Number(p.contract_amount) || 0) - (Number(p.received_amount) || 0))
+  }));
+  customer.active_projects = activeProjects;
+
   /* 历史项目（已归档，只读） */
   customer.history_projects = plainAll(db.prepare(
-    `SELECT id, name, stage, progress, contract_amount, signed_at, archived, updated_at
-     FROM projects WHERE customer_id = ? AND deleted_at IS NULL AND archived = 1
-     ORDER BY updated_at DESC, id DESC`
-  ).all(customer.id));
+    `SELECT p.id, p.name, p.stage, p.progress, p.contract_amount, p.signed_at, p.archived,
+            p.created_at, p.updated_at,
+            COALESCE((SELECT SUM(pm.amount) FROM payments pm
+                      WHERE pm.project_id = p.id AND pm.type = '实收'), 0) AS received_amount
+     FROM projects p WHERE p.customer_id = ? AND p.deleted_at IS NULL AND p.archived = 1
+     ORDER BY p.updated_at DESC, p.id DESC`
+  ).all(customer.id)).map((p) => Object.assign(p, {
+    received_amount: round2(p.received_amount)
+  }));
 
   customer.tasks = plainAll(db.prepare(
     `SELECT id, title, due_at, priority, status, source FROM tasks
@@ -443,6 +465,8 @@ function getCustomer(db, id) {
     extra_contact_count: customer.contacts.filter((x) => !x.is_primary).length,
     follow_count: customer.follow_count || 0,
     task_count: customer.tasks.length,
+    project_count: customer.active_projects.length,
+    active_project_count: customer.active_projects.length,
     history_project_count: customer.history_projects.length
   };
 
@@ -902,6 +926,14 @@ function syncCustomerRegion(db, customerId) {
 /* 删除 / 还原                                                         */
 /* ------------------------------------------------------------------ */
 
+/**
+ * 删除客户（软删除，1.27 多项目级联）：
+ *   - 客户本身软删除；
+ *   - 该客户**所有**进行中/历史项目一起软删除（不再只处理一个项目）；
+ *   - 这些项目下的成本、以及只挂在客户上的成本一并软删除（回收站还原时按删除时间恢复）；
+ *   - 回款没有独立软删除列，随项目一起不可见（项目/客户还原后自动回来）。
+ * @returns {{count:number, names:string[], project_count:number, cost_count:number}}
+ */
 function deleteCustomers(db, ids) {
   const list = (Array.isArray(ids) ? ids : [ids]).map(Number).filter(Number.isInteger);
   if (!list.length) throw badRequest('未指定要删除的客户');
@@ -911,22 +943,48 @@ function deleteCustomers(db, ids) {
   try {
     const get = db.prepare('SELECT id, name FROM customers WHERE id = ? AND deleted_at IS NULL');
     const upd = db.prepare('UPDATE customers SET deleted_at = ?, updated_at = ? WHERE id = ?');
+    const updProjects = db.prepare(
+      'UPDATE projects SET deleted_at = ?, updated_at = ? WHERE customer_id = ? AND deleted_at IS NULL'
+    );
+    const updCosts = db.prepare(
+      `UPDATE costs SET deleted_at = ?, updated_at = ?
+       WHERE deleted_at IS NULL
+         AND (customer_id = ? OR project_id IN (SELECT id FROM projects WHERE customer_id = ?))`
+    );
     const undone = [];
+    let projectCount = 0;
+    let costCount = 0;
     for (const id of list) {
       const c = get.get(id);
       if (!c) continue;
+      /* 先记录本次要级联的项目/成本 ID，还原时按 ID 恢复（避免同秒删除的时间戳歧义） */
+      const projectIds = db.prepare(
+        'SELECT id FROM projects WHERE customer_id = ? AND deleted_at IS NULL'
+      ).all(id).map((r) => Number(r.id));
+      const costIds = db.prepare(
+        `SELECT id FROM costs WHERE deleted_at IS NULL
+           AND (customer_id = ? OR project_id IN (SELECT id FROM projects WHERE customer_id = ?))`
+      ).all(id, id).map((r) => Number(r.id));
       upd.run(ts, ts, id);
-      logActivity(db, 'customer', id, 'delete', `删除客户：${c.name}（可在回收站还原）`, null);
+      projectCount += Number(updProjects.run(ts, ts, id).changes || 0);
+      costCount += Number(updCosts.run(ts, ts, id, id).changes || 0);
+      logActivity(db, 'customer', id, 'delete',
+        `删除客户：${c.name}（项目与回款/成本一并移入回收站，可整体还原）`,
+        { cascade: 'customer_delete', project_ids: projectIds, cost_ids: costIds });
       undone.push(c.name);
     }
     db.exec('COMMIT');
-    return { count: undone.length, names: undone };
+    return { count: undone.length, names: undone, project_count: projectCount, cost_count: costCount };
   } catch (e) {
     try { db.exec('ROLLBACK'); } catch (_) { /* 忽略 */ }
     throw e;
   }
 }
 
+/**
+ * 还原客户（1.27）：客户 + 删除时一起级联软删的项目/成本按删除时间恢复；
+ * 单独删过的项目（删除时间不同）不跟着回来，保持回收站语义。
+ */
 function restoreCustomers(db, ids) {
   const list = (Array.isArray(ids) ? ids : [ids]).map(Number).filter(Number.isInteger);
   if (!list.length) throw badRequest('未指定要还原的客户');
@@ -934,18 +992,56 @@ function restoreCustomers(db, ids) {
 
   db.exec('BEGIN');
   try {
-    const get = db.prepare('SELECT id, name FROM customers WHERE id = ?');
+    const get = db.prepare('SELECT id, name, deleted_at FROM customers WHERE id = ?');
     const upd = db.prepare('UPDATE customers SET deleted_at = NULL, updated_at = ? WHERE id = ?');
+    const restoreProject = db.prepare(
+      'UPDATE projects SET deleted_at = NULL, updated_at = ? WHERE id = ? AND deleted_at IS NOT NULL'
+    );
+    const restoreCost = db.prepare(
+      'UPDATE costs SET deleted_at = NULL, updated_at = ? WHERE id = ? AND deleted_at IS NOT NULL'
+    );
+    const updCosts = db.prepare(
+      `UPDATE costs SET deleted_at = NULL, updated_at = ?
+       WHERE deleted_at = ?
+         AND (customer_id = ? OR project_id IN (SELECT id FROM projects WHERE customer_id = ?))`
+    );
+    const updProjects = db.prepare(
+      'UPDATE projects SET deleted_at = NULL, updated_at = ? WHERE customer_id = ? AND deleted_at = ?'
+    );
     let count = 0;
+    let projectCount = 0;
+    let costCount = 0;
     for (const id of list) {
       const c = get.get(id);
       if (!c) continue;
+      /* 删除时写进日志的级联 ID：精确还原，避免同秒删除的历史项目被一起拉回来 */
+      let projectIds = [];
+      let costIds = [];
+      try {
+        const log = db.prepare(
+          `SELECT detail FROM activity_logs WHERE entity_type = 'customer' AND entity_id = ?
+             AND action = 'delete' ORDER BY id DESC LIMIT 1`
+        ).get(id);
+        const d = log && log.detail ? JSON.parse(log.detail) : null;
+        if (d) {
+          if (Array.isArray(d.project_ids)) projectIds = d.project_ids.map(Number).filter(Number.isInteger);
+          if (Array.isArray(d.cost_ids)) costIds = d.cost_ids.map(Number).filter(Number.isInteger);
+        }
+      } catch (_) { projectIds = []; costIds = []; }
+
       upd.run(ts, id);
+      if (projectIds.length || costIds.length) {
+        for (const pid of projectIds) projectCount += Number(restoreProject.run(ts, pid).changes || 0);
+        for (const cid of costIds) costCount += Number(restoreCost.run(ts, cid).changes || 0);
+      } else if (c.deleted_at) {
+        projectCount += Number(updProjects.run(ts, id, c.deleted_at).changes || 0);
+        costCount += Number(updCosts.run(ts, c.deleted_at, id, id).changes || 0);
+      }
       logActivity(db, 'customer', id, 'restore', `还原客户：${c.name}`, null);
       count++;
     }
     db.exec('COMMIT');
-    return { count };
+    return { count, project_count: projectCount, cost_count: costCount };
   } catch (e) {
     try { db.exec('ROLLBACK'); } catch (_) { /* 忽略 */ }
     throw e;
