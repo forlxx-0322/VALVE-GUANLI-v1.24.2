@@ -1,11 +1,16 @@
 /**
  * 启动器生成器（只生成 启动.bat）
  *
- * 为什么用脚本生成而不用手写：
- *   .bat 必须保存为 **UTF-8 无 BOM** 才能在 chcp 65001 下正确显示中文；
- *   实测发现用 PowerShell 的 here-string 写文件会把中文全角冒号等字符破坏，
- *   导致 cmd 报 "'??：客户管理系统' is not recognized"。
- *   因此统一改由 Node 以 Buffer 精确写入（CRLF + UTF-8 无 BOM）。
+ * 为什么用脚本生成：
+ *   .bat 必须保存为 **UTF-8 无 BOM** 才能在 chcp 65001 下正确显示中文，
+ *   用 PowerShell here-string 写会破坏全角字符，导致 cmd 报
+ *   "'??：客户管理系统' is not recognized"。这里用 Buffer 精确写入（CRLF + UTF-8 无 BOM）。
+ *
+ * 1.25.5 起：启动后不再保留命令行窗口
+ *   · 双击时先用 PowerShell 把自己以 --hidden 重新拉起，然后原窗口立即退出；
+ *   · 隐藏模式里用 `start /b node server.js` 起服务，日志写到 data\server.log，
+ *     启动器自己留在后台做健康巡检（每 30 秒），服务停了就退出；
+ *   · 停止服务：设置页「关于 → 停止服务」按钮（POST /api/shutdown，仅本机）。
  *
  * 用法：node tools/make-bats.js
  */
@@ -17,15 +22,11 @@ const path = require('node:path');
 
 const ROOT = path.resolve(__dirname, '..');
 
-/* ------------------------------------------------------------------ */
-/* 启动.bat                                                            */
-/* ------------------------------------------------------------------ */
-
 const START_BAT = [
   '@echo off',
   'chcp 65001 >nul',
   'setlocal enabledelayedexpansion',
-  'title 客户管理系统 - 服务运行中（关闭本窗口即停止服务）',
+  'title 客户管理系统（后台运行）',
   '',
   'cd /d "%~dp0"',
   'set "ROOT=%~dp0"',
@@ -34,8 +35,27 @@ const START_BAT = [
   'set "PORT=8899"',
   'set "MAXPORT=8910"',
   '',
-  'rem Find a Chromium browser once (used by both branches below).',
-  'rem If none is found we simply open the default browser (still works).',
+  'rem ---------- 0. 隐藏命令行 ----------',
+  'rem 可见窗口双击时：把自己以 --hidden 重新拉起（无窗口），然后原窗口立即退出。',
+  'if /i not "%~1"=="--hidden" (',
+  '  where powershell >nul 2>nul',
+  '  if not errorlevel 1 (',
+  '    powershell -NoProfile -WindowStyle Hidden -Command "Start-Process -FilePath \'%~f0\' -ArgumentList \'--hidden\' -WindowStyle Hidden"',
+  '    exit /b 0',
+  '  )',
+  '  rem 极端情况下没有 PowerShell：继续以可见窗口运行（功能不受影响）',
+  ')',
+  '',
+  'rem 后台模式：所有提示写日志，不显示窗口。',
+  'if not exist "%ROOT%\\data" mkdir "%ROOT%\\data"',
+  'set "LOG=%ROOT%\\data\\server.log"',
+  'rem 日志超过 5MB 就轮转一次，避免无限增长',
+  'for %%A in ("%LOG%") do if %%~zA GTR 5242880 (',
+  '  if exist "%LOG%.1" del "%LOG%.1" >nul 2>nul',
+  '  move /y "%LOG%" "%LOG%.1" >nul 2>nul',
+  ')',
+  '',
+  'rem ---------- 1. 找浏览器（打开无地址栏窗口用） ----------',
   'set "BROWSER="',
   'for %%P in (',
   '  "%ProgramFiles(x86)%\\Microsoft\\Edge\\Application\\msedge.exe"',
@@ -46,75 +66,54 @@ const START_BAT = [
   '  if not defined BROWSER if exist %%P set "BROWSER=%%~P"',
   ')',
   '',
-  'echo.',
-  'echo   ==================================================',
-  'echo      客户管理系统  ·  本地服务启动器',
-  'echo   ==================================================',
-  'echo.',
-  '',
-  'rem ---------- 1. Check Node.js ----------',
+  'rem ---------- 2. Check Node.js ----------',
   'where node >nul 2>nul',
   'if errorlevel 1 (',
-  '  echo   [错误] 未检测到 Node.js。',
-  '  echo.',
-  '  echo   本软件需要 Node.js 22.5 或更高版本（依赖内置的 node:sqlite 模块）。',
-  '  echo   请前往 https://nodejs.org 下载安装 LTS 版本后重试。',
-  '  echo.',
-  '  pause',
+  '  echo [%date% %time%] [错误] 未检测到 Node.js，需要 22.5 或更高版本。 >> "%LOG%"',
   '  exit /b 1',
   ')',
-  '',
   'for /f "tokens=*" %%v in (\'node -v\') do set "NODEV=%%v"',
-  'echo   [1/4] Node.js 版本 %NODEV%',
   'node -e "const v=process.versions.node.split(\'.\').map(Number);process.exit((v[0]>22||(v[0]===22&&v[1]>=5))?0:1)" >nul 2>nul',
   'if errorlevel 1 (',
-  '  echo   [错误] Node.js 版本过低（%NODEV%），需要 22.5 或更高。',
-  '  echo   原因：本软件使用 Node 内置的 node:sqlite 模块，低版本不支持。',
-  '  echo.',
-  '  pause',
+  '  echo [%date% %time%] [错误] Node.js 版本过低（%NODEV%），需要 22.5 或更高。 >> "%LOG%"',
   '  exit /b 1',
   ')',
   '',
-  'rem ---------- 2. If the service is already running, just open the page ----------',
+  'rem ---------- 3. 已在运行则只打开应用窗口 ----------',
   'call :probe',
   'if "!RUNNING!"=="1" (',
-  '  echo   [2/4] 服务已在运行',
   '  call :openbrowser',
-  '  echo.',
-  '  echo   已为你打开浏览器：http://127.0.0.1:!FOUNDPORT!',
-  '  ping -n 4 127.0.0.1 >nul',
   '  exit /b 0',
   ')',
-  'echo   [2/4] 未发现运行中的服务，准备启动',
   '',
-  'rem ---------- 3. Port ----------',
-  'rem The server itself picks a free port: it scans %PORT% and the next',
-  'rem 11 ports, then writes the chosen port into data\\.run.json.',
-  'rem This launcher deliberately does NOT pre-check ports with',
-  'rem "netstat | findstr": that pipeline could hang under an inherited',
-  'rem handle and left the service never starting.',
-  'echo   [3/4] 端口 %PORT%（若被占用会自动顺延，服务端会记录实际端口）',
-  '',
-  'rem ---------- 4. Start the service ----------',
-  'echo   [4/4] 正在启动服务...',
-  'echo.',
+  'rem ---------- 4. Start the service (background, log to file) ----------',
   'set "CRM_ROOT=%ROOT%"',
   'set "CRM_PORT=%PORT%"',
+  'echo. >> "%LOG%"',
+  'echo [%date% %time%] 启动服务 >> "%LOG%"',
+  'start "" /b node "%ROOT%\\server\\server.js" >> "%LOG%" 2>&1',
   '',
-  'if defined BROWSER (',
-  '  rem Give the server ~2.5s to bind, then open the app window (no address bar).',
-  '  start "" /min powershell -NoProfile -WindowStyle Hidden -Command "Start-Sleep -Milliseconds 2500; Start-Process -FilePath \'%BROWSER%\' -ArgumentList \'--app=http://127.0.0.1:%PORT%/\'"',
-  ') else (',
-  '  start "" "http://127.0.0.1:%PORT%/"',
+  'rem 等它起来（端口可能被占用后顺延，用 :probe 读 .run.json/扫描）',
+  'set "UP="',
+  'for /l %%i in (1,1,40) do (',
+  '  if not defined UP (',
+  '    ping -n 2 127.0.0.1 >nul',
+  '    call :probe',
+  '    if "!RUNNING!"=="1" set "UP=1"',
+  '  )',
   ')',
-  'echo   --------------------------------------------------',
-  'echo    服务日志（关闭本窗口即停止服务）：',
-  'echo   --------------------------------------------------',
-  'node "%ROOT%\\server\\server.js"',
+  'if not defined UP (',
+  '  echo [%date% %time%] [错误] 服务 40 秒内未就绪，详见本日志。 >> "%LOG%"',
+  '  exit /b 1',
+  ')',
+  'call :openbrowser',
   '',
-  'echo.',
-  'echo   服务已停止。',
-  'ping -n 6 127.0.0.1 >nul',
+  'rem ---------- 5. 后台存活：每 30 秒巡检一次，服务停了就退出 ----------',
+  ':watch',
+  'ping -n 31 127.0.0.1 >nul',
+  'call :probe',
+  'if "!RUNNING!"=="1" goto watch',
+  'echo [%date% %time%] 服务已停止，启动器退出 >> "%LOG%"',
   'exit /b 0',
   '',
   'rem ================= subroutines =================',
@@ -130,9 +129,6 @@ const START_BAT = [
   'set "RECPORT="',
   '',
   'rem 1) Authoritative source: the port recorded in data\\.run.json.',
-  'rem The service enforces its single instance by that file regardless of',
-  'rem port, so scanning a different range would wrongly report "not running"',
-  'rem and then the new instance would refuse to start.',
   'if exist "%~dp0data\\.run.json" (',
   '  for /f "usebackq tokens=2 delims=:," %%a in (`findstr /i "\\"port\\"" "%~dp0data\\.run.json"`) do set "RECPORT=%%a"',
   '  set "RECPORT=!RECPORT: =!"',
@@ -173,10 +169,10 @@ const START_BAT = [
   ')',
   'exit /b 0',
   '',
-  'rem Open the app window (already-running branch uses the recorded port).',
+  'rem Open the app window (chrome-less). Falls back to default browser.',
   ':openbrowser',
   'if defined BROWSER (',
-  '  start "" "%BROWSER%" --app="http://127.0.0.1:!FOUNDPORT!/"',
+  '  start "" "!BROWSER!" --app="http://127.0.0.1:!FOUNDPORT!/"',
   ') else (',
   '  start "" "http://127.0.0.1:!FOUNDPORT!/"',
   ')',
@@ -184,11 +180,8 @@ const START_BAT = [
   ''
 ].join('\r\n');
 
-/* ------------------------------------------------------------------ */
-
 function writeBat(name, content) {
   const file = path.join(ROOT, name);
-  // CRLF + UTF-8 无 BOM：cmd 在 chcp 65001 下才能正确解析中文
   fs.writeFileSync(file, Buffer.from(content, 'utf8'));
   const buf = fs.readFileSync(file);
   const hasBom = buf[0] === 0xEF && buf[1] === 0xBB && buf[2] === 0xBF;
@@ -196,6 +189,5 @@ function writeBat(name, content) {
   return file;
 }
 
-/* 1.25.4 起只保留一个启动器：双击 启动.bat（关闭窗口即停止服务） */
 writeBat('启动.bat', START_BAT);
-console.log('\n完成。双击 启动.bat 即可运行；桌面快捷方式也指向它。');
+console.log('\n完成。双击 启动.bat（或桌面快捷方式）→ 后台起服务 + 打开应用窗口，不留命令行。');

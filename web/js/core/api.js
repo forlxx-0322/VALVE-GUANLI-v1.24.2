@@ -205,6 +205,8 @@ window.CRM = window.CRM || {};
     health: () => request('GET', '/api/health'),
     status: () => request('GET', '/api/status'),
     openDataDir: () => request('POST', '/api/open-data-dir'),
+    /* 停止服务（仅本机有效；用于"隐藏命令行"后的退出方式） */
+    shutdown: () => request('POST', '/api/shutdown'),
 
     /* 提醒 */
     remindersDue: () => request('GET', '/api/reminders/due'),

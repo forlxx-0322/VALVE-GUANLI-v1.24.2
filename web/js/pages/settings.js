@@ -32,6 +32,20 @@ window.CRM = window.CRM || {};
       async loadInfo() {
         try { this.info = await CRM.api.status(); } catch (_) { /* 忽略 */ }
       },
+      async stopService() {
+        const ok = await CRM.confirm({
+          title: '停止服务',
+          message: '停止后网页将无法访问，需要重新双击「CRM管理系统」才能再用。确定停止吗？',
+          okText: '停止', danger: true
+        });
+        if (!ok) return;
+        try {
+          await CRM.api.shutdown();
+        } catch (_) { /* 服务可能在返回前就关了，属正常 */ }
+        document.body.innerHTML = '<div style="min-height:100vh;display:grid;place-items:center;font-family:system-ui;color:#555">'
+          + '<div style="text-align:center"><div style="font-size:18px;margin-bottom:8px">服务已停止</div>'
+          + '<div style="font-size:13px;color:#888">可以关闭这个窗口了；下次双击桌面「CRM管理系统」即可重新启动。</div></div></div>';
+      },
       onImported() {
         CRM.toast('数据已更新，页面将刷新以显示最新内容', 'info');
         setTimeout(() => window.location.reload(), 900);
@@ -99,6 +113,12 @@ window.CRM = window.CRM || {};
               <button class="btn" @click="loadInfo">
                 <c-icon name="refresh" :size="14" /> 刷新信息
               </button>
+              <button class="btn ml-2" style="margin-left:10px" @click="stopService">
+                <c-icon name="power" :size="14" /> 停止服务
+              </button>
+              <div class="field-hint" style="margin-top:8px">
+                服务现在是后台运行（没有命令行窗口）。需要彻底退出时点这里；数据会先落盘再退出。
+              </div>
             </div>
           </c-card>
         </div>
