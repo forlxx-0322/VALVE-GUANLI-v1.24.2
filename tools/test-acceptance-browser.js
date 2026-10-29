@@ -963,8 +963,8 @@ const created = { customers: [], projects: [], tags: [], dict: [] };
       + `${prodUi.cats.includes('三偏心蝶阀') && prodUi.cats.includes('对夹') && prodUi.cats.includes('支耳')}）；`
       + `验收产品可见=${prodUi.hasProduct}；导航 ${prodUi.navCount} 项`);
 
-  check('29b', '产品表格列头为 1.24 口径（名称/编号/材质/压力/单价/货期/折扣/折后价/操作）',
-    ['名称', '编号', '材质', '压力', '单价', '货期', '折扣', '折后价', '操作']
+  check('29b', '产品表格列头为 1.26 口径（名称/编号/材质/压力/单价/货期(周)/折扣/折后价/操作）',
+    ['名称', '编号', '材质', '压力', '单价', '货期(周)', '折扣', '折后价', '操作']
       .every((h) => prodUi.headers.some((x) => x.includes(h))),
     prodUi.headers.join(' | '));
 
@@ -1005,9 +1005,9 @@ const created = { customers: [], projects: [], tags: [], dict: [] };
     await new Promise(r => setTimeout(r, 600));
     return { labels, net: net.trim(), catOptions };
   })()`);
-  check('29c', '产品抽屉字段齐全（分类/名称/单价/货期/材质/压力/折扣/备注/启用），折后价实时计算',
+  check('29c', '产品抽屉字段齐全（分类/名称/单价/货期（周）/材质/压力/折扣/备注/启用），折后价实时计算',
     !prodDrawer.err
-      && ['产品分类', '产品名称', '产品编号', '单位', '单价（元）', '货期（天）', '阀体材质',
+      && ['产品分类', '产品名称', '产品编号', '单位', '单价（元）', '货期（周）', '阀体材质',
         '压力等级', '设定折扣（%）', '备注', '启用'].every((l) => prodDrawer.labels.includes(l))
       && /840/.test(prodDrawer.net),
     prodDrawer.err || `折后价显示「${prodDrawer.net}」（1200 × 0.7 = 840）`);

@@ -393,7 +393,7 @@ window.CRM = window.CRM || {};
   CRM.importXlsx = {
     ENTITIES,
 
-    /** 生成并下载导入模板（含填写说明与可选值参考两页） */
+    /** 生成并下载导入模板（含填写说明 / 可选值参考；产品模板还含分类路径清单） */
     async downloadTemplate(entity) {
       const tpl = await CRM.api.getTemplate(entity);
       const XLSX = window.XLSX;
@@ -414,30 +414,49 @@ window.CRM = window.CRM || {};
       ws['!freeze'] = { xSplit: 0, ySplit: 1 };
 
       const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, ws, tpl.label + '导入模板');
+      XLSX.utils.book_append_sheet(wb, ws, tpl.sheetName || (tpl.label + '导入模板'));
 
-      const notes = [
-        ['填写说明'],
-        [''],
-        ['1. 请不要修改第一行表头文字；列顺序可以调整，多余的列会被忽略。'],
-        ['2. 带 * 的列为必填项；其余列可留空。'],
-        ['3. 第 2 行是完整示例，第 3 行只填了必填项——可直接照着改，也可删掉这两行再填。'],
-        ['4. 只填「是」或「否」的列请照此填写；留空按「否」处理。'],
-        ['5. 日期支持 2026-03-01、2026/3/1、2026年3月1日；带时间的列如「下次回访」写 2026-03-01 10:00。'],
-        ['6. 多值列（如阀门需求）用英文或中文逗号分隔，例如：球阀,闸阀,截止阀。'],
-        ['7. 数字列请只填数字，不要带单位（如回访周期填 30，不要写「30 天」）。'],
-        ['8. 带下拉选项的列，请优先使用「可选值参考」页里的写法；填了列表外的词也能导入，但会在字典里新增一个选项。'],
-        ['9. 「市/地区」决定客户在分布统计里的归属：填「克拉玛依市」「喀什地区」等标准名称即可自动归入统计；只填「市/地区」或只填「区/县」都能识别。'],
-        ['10. 客户编号留空会自动生成 KH-年份-序号；客户全称重复的行会被识别为重复客户，导入时可选择跳过或更新已有记录。'],
-        ['11. 导入前系统会先做校验并展示预览，不会直接写入数据库。'],
-        ['12. 单次最多导入 5000 行。']
-      ];
+      const notes = (Array.isArray(tpl.notes) && tpl.notes.length)
+        ? [['填写说明'], [''], ...tpl.notes.map((n) => [String(n)])]
+        : [
+          ['填写说明'],
+          [''],
+          ['1. 请不要修改第一行表头文字；列顺序可以调整，多余的列会被忽略。'],
+          ['2. 带 * 的列为必填项；其余列可留空。'],
+          ['3. 第 2 行是完整示例，第 3 行只填了必填项——可直接照着改，也可删掉这两行再填。'],
+          ['4. 只填「是」或「否」的列请照此填写；留空按「否」处理。'],
+          ['5. 日期支持 2026-03-01、2026/3/1、2026年3月1日；带时间的列如「下次回访」写 2026-03-01 10:00。'],
+          ['6. 多值列（如阀门需求）用英文或中文逗号分隔，例如：球阀,闸阀,截止阀。'],
+          ['7. 数字列请只填数字，不要带单位（如回访周期填 30，不要写「30 天」）。'],
+          ['8. 带下拉选项的列，请优先使用「可选值参考」页里的写法；填了列表外的词也能导入，但会在字典里新增一个选项。'],
+          ['9. 「市/地区」决定客户在分布统计里的归属：填「克拉玛依市」「喀什地区」等标准名称即可自动归入统计；只填「市/地区」或只填「区/县」都能识别。'],
+          ['10. 客户编号留空会自动生成 KH-年份-序号；客户全称重复的行会被识别为重复客户，导入时可选择跳过或更新已有记录。'],
+          ['11. 导入前系统会先做校验并展示预览，不会直接写入数据库。'],
+          ['12. 单次最多导入 5000 行。']
+        ];
       const ws2 = XLSX.utils.aoa_to_sheet(notes);
       ws2['!cols'] = [{ wch: 96 }];
       XLSX.utils.book_append_sheet(wb, ws2, '填写说明');
 
       const dictFields = tpl.fields.filter((f) => f.options && f.options.length);
-      if (dictFields.length) {
+      if (entity === 'product') {
+        /* 产品模板的「可选值参考」：字典值 + 当前分类全路径（最多 200 条） */
+        const ref = [['列名', '是否必填', '可选值 / 说明']];
+        for (const f of dictFields) {
+          ref.push([f.label, f.required ? '必填' : '可空', f.options.join('、')]);
+        }
+        ref.push(['启用', '可空', '是、否（留空按「是」；也接受 1 / 0）']);
+        ref.push([]);
+        ref.push(['分类路径', '必填', '格式：蝶阀 / 三偏心蝶阀 / 对夹，或 蝶阀>三偏心蝶阀>对夹；分类不存在时可在导入抽屉勾选自动创建']);
+        const paths = Array.isArray(tpl.categoryPaths) ? tpl.categoryPaths : [];
+        for (const p of paths) ref.push(['', '', p]);
+        if (tpl.categoryPathsTotal > paths.length) {
+          ref.push(['', '', `……仅列出前 ${paths.length} 条，共 ${tpl.categoryPathsTotal} 条；其余路径可照此格式填写`]);
+        }
+        const ws3 = XLSX.utils.aoa_to_sheet(ref);
+        ws3['!cols'] = [{ wch: 22 }, { wch: 10 }, { wch: 90 }];
+        XLSX.utils.book_append_sheet(wb, ws3, '可选值参考');
+      } else if (dictFields.length) {
         const ref = [['列名', '是否必填', '可选值（推荐照此填写）']];
         for (const f of dictFields) ref.push([f.label, f.required ? '必填' : '可空', f.options.join('、')]);
         ref.push([]);
@@ -453,9 +472,12 @@ window.CRM = window.CRM || {};
 
     /**
      * 解析用户选择的 Excel 文件并做预校验。
+     * @param {string} entity
+     * @param {File} file
+     * @param {object} [opts] 预校验选项（product：{ autoCreateCategories, duplicateMode }）
      * @returns {{ok:boolean, message?:string, missing?:string[], rows?:Array, preview?:object, fileName:string}}
      */
-    async parseFile(entity, file) {
+    async parseFile(entity, file, opts) {
       const name = (file && file.name) || '';
       if (!/\.(xlsx|xls|csv)$/i.test(name)) {
         return { ok: false, message: '请选择 .xlsx / .xls / .csv 文件', fileName: name };
@@ -495,17 +517,24 @@ window.CRM = window.CRM || {};
         rows.push(obj);
       }
       if (!rows.length) return { ok: false, message: '没有解析到数据行', fileName: name };
-      if (rows.length > 5000) {
-        return { ok: false, message: `文件有 ${rows.length} 行，超过单次 5000 行上限，请拆分后再导入`, fileName: name };
+      const maxRows = Number(tpl.maxRows) || (entity === 'product' ? 2000 : 5000);
+      if (rows.length > maxRows) {
+        return { ok: false, message: `文件有 ${rows.length} 行，超过单次 ${maxRows} 行上限，请拆分后再导入`, fileName: name };
       }
 
-      const preview = await CRM.api.previewImport(entity, rows);
+      const preview = await CRM.api.previewImport(entity, rows, opts || {});
       return { ok: true, rows, preview, missing: [], fileName: name };
     },
 
-    /** 执行导入（只提交校验通过的行） */
-    async run(entity, preview, opts) {
-      const raw = (preview.rows || []).map((r) => r.data);
+    /**
+     * 执行导入（只提交校验通过的行）。
+     * rawRows 可选：产品导入需要提交**原始行**而不是预览里归一化后的 data，
+     * 否则"表格留空"的信息会丢失，update 模式可能把未填的列覆盖成默认值。
+     */
+    async run(entity, preview, opts, rawRows) {
+      const raw = (Array.isArray(rawRows) && rawRows.length)
+        ? rawRows
+        : (preview.rows || []).map((r) => r.data);
       return CRM.api.runImport(entity, raw, opts || {});
     }
   };

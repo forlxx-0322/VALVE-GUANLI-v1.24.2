@@ -10,6 +10,7 @@
  * 口径与约定：
  *   · 全部软删除（deleted_at），列表与校验都不看已删除行
  *   · 折后价 net_price = round(price × (1 − discount/100), 2)，查询时计算、不落库
+ *   · 货期数据库存天（lead_time_days），界面 / 导入按周展示与录入，换算为天落库
  *   · 同一分类下产品不重名；编号非空时全库唯一（软删除的不算）
  *   · 分类 product_count 含所有子孙分类的产品（点一级分类能看到整族产品）
  *   · 所有写操作都写 activity_logs（entity_type = product / product_category）
@@ -21,6 +22,8 @@
 const { plainAll, now } = require('../db');
 
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+/** 天 → 周（最多一位小数）；数据库仍存天，界面/导入按周展示与录入 */
+const weeksFromDays = (days) => Math.round(((Number(days) || 0) / 7) * 10) / 10;
 const str = (v) => (v === null || v === undefined ? '' : String(v)).trim();
 
 /** 业务异常：带 HTTP 状态与错误码，路由层原样透出 */
@@ -331,6 +334,7 @@ function decorate(row, paths) {
   if (!row) return row;
   return Object.assign({}, row, {
     net_price: netPrice(row.price, row.discount),
+    lead_time_weeks: weeksFromDays(row.lead_time_days),
     category_path: paths.get(Number(row.category_id)) || row.category_name || ''
   });
 }
@@ -678,6 +682,7 @@ function exportData(db, q) {
     unit: r.unit || '',
     price: round2(r.price),
     lead_time_days: Number(r.lead_time_days) || 0,
+    lead_time_weeks: weeksFromDays(r.lead_time_days),
     body_material: r.body_material || '',
     pressure_rating: r.pressure_rating || '',
     discount: round2(r.discount),

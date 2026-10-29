@@ -241,11 +241,13 @@ module.exports = async function systemRoutes(ctx) {
       return ok(r);
     }
 
-    /* 导入：预校验（duplicate_mode 决定重名行算"跳过"还是"更新"） */
+    /* 导入：预校验（duplicate_mode 决定重名行算"跳过"还是"更新"；
+       auto_create_categories 控制产品导入时缺失分类是否自动创建） */
     if (sub === 'preview' && method === 'POST') {
       const payload = body || {};
       return ok(excel.validateRows(db, payload.entity || 'customer', payload.rows || [], {
-        duplicateMode: payload.duplicate_mode
+        duplicateMode: payload.duplicate_mode,
+        autoCreateCategories: payload.auto_create_categories
       }));
     }
 
@@ -253,7 +255,8 @@ module.exports = async function systemRoutes(ctx) {
     if (sub === 'import' && method === 'POST') {
       const payload = body || {};
       const report = excel.runImport(db, payload.entity || 'customer', payload.rows || [], {
-        duplicateMode: payload.duplicate_mode
+        duplicateMode: payload.duplicate_mode,
+        autoCreateCategories: payload.auto_create_categories
       });
       return ok(report);
     }

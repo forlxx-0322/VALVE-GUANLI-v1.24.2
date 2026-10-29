@@ -55,6 +55,13 @@ const PAGES = [
       return 'ok';
     })()` },
   { name: '03b-products', hash: '#/products', wait: 4200, full: true },
+  { name: '03c-products-import', hash: '#/products', wait: 4200, full: false,
+    prep: `(async () => {
+      const b = [...document.querySelectorAll('button')].find(x => x.textContent.includes('批量导入'));
+      if (b) b.click();
+      await new Promise(r => setTimeout(r, 1500));
+      return 'ok';
+    })()` },
   { name: '04-customer-detail', hash: null, wait: 4200, full: true,
     resolveHash: true },
   { name: '08-tasks', hash: '#/tasks', wait: 3800, full: true },

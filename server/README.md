@@ -9,12 +9,12 @@ server/
 │  ├─ crm.js          客户 / 联系人 / 标签 / 跟进 / 查重 / 客户编号 / 财务汇总
 │  ├─ pm.js           客户 1:1 项目档案、回款、待办、看板
 │  ├─ costs.js        成本台账（采购 / 维护 / 差旅 / 其他）
-│  ├─ products.js     产品分类树与产品、折后价、导出
+│  ├─ products.js     产品分类树与产品、折后价、货期（存天 / 展示周）、导出
 │  ├─ stats.js        客户分布、收入报表（月/年）、明细下钻、首页 v2
 │  ├─ dashboard.js    旧版首页数据（兼容保留）
 │  ├─ reminders.js    跟进提醒的只读查询（逾期/今天/临近）
 │  ├─ backup.js       备份、校验、恢复、镜像
-│  ├─ excel.js        导入导出（SheetJS 的表格结构在此定义）
+│  ├─ excel.js        导入导出（客户 / 联系人 / 项目 / 产品；SheetJS 的表格结构在此定义）
 │  ├─ attachments.js  附件存储与清理
 │  ├─ auth.js         登录：scrypt 密码、签名会话、防爆破、白名单、审计
 │  └─ logs.js         操作日志

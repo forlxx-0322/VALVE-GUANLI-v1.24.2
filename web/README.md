@@ -33,7 +33,7 @@ web/
    ├─ settings/            功能设置各面板
    │  ├─ settings-dict.js      字典管理
    │  ├─ settings-backup.js    备份与恢复
-   │  ├─ settings-data.js      导入/导出
+   │  ├─ settings-data.js      导入/导出（客户 / 联系人 / 项目 / 产品）
    │  ├─ settings-attachment.js 附件与存储
    │  ├─ settings-misc.js      提醒与偏好、标签等
    │  └─ settings-auth.js      登录与异地访问
@@ -41,7 +41,7 @@ web/
    │  ├─ home.js           首页总览
    │  ├─ customers.js      客户列表
    │  ├─ customer-detail.js 客户详情（资料/回访/项目与财务/附件日志）
-   │  ├─ products.js       产品价目表（三级分类）
+   │  ├─ products.js       产品价目表（三级分类、货期按周、Excel 批量导入）
    │  ├─ tasks.js          待办中心
    │  └─ settings.js       功能设置外壳
    ├─ app.js               Vue 应用启动、全局组件注册、Service Worker 注册

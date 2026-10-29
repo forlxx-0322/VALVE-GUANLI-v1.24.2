@@ -26,7 +26,8 @@ node tools\run-all-tests.js
 | `test-phase*.js`（阶段六已随地图模块删除） | — |
 | `test-migration.js` / `test-migration-full.js` | 结构迁移（v1 → 最新，含数据不丢/幂等） |
 | `test-customer-123.js` | 客户精简、一客户一项目、回款周期、财务口径 |
-| `test-products-124.js` | 产品三级分类、产品 CRUD、折后价、导出 |
+| `test-products-124.js` | 产品三级分类、产品 CRUD、折后价、导出、货期周数 |
+| `test-products-import.js` | 产品批量导入模板 / 校验 / 分类自动创建 / 重名与编号 / 货期按周（1.26） |
 | `test-stats-122.js` | 客户分布、收入报表、成本台账 |
 | `test-auth-125.js` | 登录/会话/锁定/白名单/监听范围（自带隔离实例） |
 | `test-region-*.js` | 行政区划归属与历史纠正 |

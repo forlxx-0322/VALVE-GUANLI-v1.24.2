@@ -17,13 +17,21 @@ window.CRM = window.CRM || {};
 
   const CAT_INDENT = 14;
 
+  /** 天 → 周（最多一位小数）：21 天 = 3 周，25 天 = 3.6 周；数据库仍存天 */
+  const daysToWeeks = (days) => Math.round(((Number(days) || 0) / 7) * 10) / 10;
+  const weeksToDays = (weeks) => Math.round((Number(weeks) || 0) * 7);
+  const fmtWeeks = (days) => {
+    const w = daysToWeeks(days);
+    return Number.isInteger(w) ? String(w) : w.toFixed(1);
+  };
+
   const columns = [
     { key: 'name', label: '名称', width: '230px' },
     { key: 'code', label: '编号', width: '112px' },
     { key: 'body_material', label: '材质', width: '120px' },
     { key: 'pressure_rating', label: '压力', width: '90px' },
     { key: 'price', label: '单价', width: '96px', align: 'right' },
-    { key: 'lead_time_days', label: '货期', width: '78px', align: 'right' },
+    { key: 'lead_time_days', label: '货期(周)', width: '84px', align: 'right' },
     { key: 'discount', label: '折扣', width: '72px', align: 'right' },
     { key: 'net_price', label: '折后价', width: '102px', align: 'right' },
     { key: 'ops', label: '操作', width: '168px', align: 'right' }
@@ -37,7 +45,7 @@ window.CRM = window.CRM || {};
       code: '',
       unit: '台',
       price: '',
-      lead_time_days: '',
+      lead_time_weeks: '',
       body_material: '',
       pressure_rating: '',
       discount: '',
@@ -74,7 +82,21 @@ window.CRM = window.CRM || {};
         drawerOpen: false,
         form: emptyForm(),
         saving: false,
-        catBusy: false
+        catBusy: false,
+
+        /* 批量导入（1.26） */
+        importOpen: false,
+        impStep: 1,                 // 1 选文件 → 2 预览 → 3 完成
+        impFileName: '',
+        impParsing: false,
+        impDragOver: false,
+        impRows: [],
+        impPreview: null,
+        impReport: null,
+        impImporting: false,
+        impMode: 'skip',
+        impAutoCreate: true,
+        tplBusy: false
       };
     },
     computed: {
@@ -111,11 +133,22 @@ window.CRM = window.CRM || {};
       subTitle() {
         if (!this.selectedCat) return `共 ${this.allCount} 个产品，按分类看更清楚`;
         return `${this.selectedCat.product_count} 个产品（含子分类）`;
+      },
+      /** 导入预览里有问题的行 */
+      impErrors() {
+        const rows = (this.impPreview && this.impPreview.rows) || [];
+        return rows.filter((r) => r.errors && r.errors.length);
+      },
+      /** 预览行里的提示（重名跳过/更新、分类将自动创建等） */
+      impWarnings() {
+        const rows = (this.impPreview && this.impPreview.rows) || [];
+        return rows.filter((r) => !(r.errors && r.errors.length) && (r.warnings || []).length);
       }
     },
     methods: {
       fmtMoney: CRM.util.fmtMoney,
       orDash: CRM.util.orDash,
+      fmtWeeks,
 
       /* ---------------- 数据加载 ---------------- */
       async loadTree() {
@@ -286,7 +319,9 @@ window.CRM = window.CRM || {};
         f.code = src.code || '';
         f.unit = src.unit || '台';
         f.price = src.price === null || src.price === undefined ? '' : src.price;
-        f.lead_time_days = src.lead_time_days === null || src.lead_time_days === undefined ? '' : src.lead_time_days;
+        f.lead_time_weeks = src.lead_time_days === null || src.lead_time_days === undefined || Number(src.lead_time_days) === 0
+          ? ''
+          : daysToWeeks(src.lead_time_days);
         f.body_material = src.body_material || '';
         f.pressure_rating = src.pressure_rating || '';
         f.discount = src.discount === null || src.discount === undefined ? '' : src.discount;
@@ -304,6 +339,20 @@ window.CRM = window.CRM || {};
         if (!name) { CRM.toast('请填写产品名称', 'error'); return; }
         if (!this.form.category_id) { CRM.toast('请选择产品分类', 'error'); return; }
 
+        /* 货期按周录入，保存时换算成天；最多一位小数 */
+        let leadWeeks = 0;
+        if (this.form.lead_time_weeks !== '' && this.form.lead_time_weeks !== null) {
+          leadWeeks = Number(this.form.lead_time_weeks);
+          if (!Number.isFinite(leadWeeks) || leadWeeks < 0) {
+            CRM.toast('货期(周)必须是不小于 0 的数字', 'error');
+            return;
+          }
+          if (Math.abs(Math.round(leadWeeks * 10) - leadWeeks * 10) > 1e-9) {
+            CRM.toast('货期(周)最多保留一位小数', 'error');
+            return;
+          }
+        }
+
         this.saving = true;
         try {
           const payload = {
@@ -312,7 +361,7 @@ window.CRM = window.CRM || {};
             code: this.form.code,
             unit: this.form.unit || '台',
             price: this.form.price === '' ? 0 : Number(this.form.price),
-            lead_time_days: this.form.lead_time_days === '' ? 0 : Number(this.form.lead_time_days),
+            lead_time_days: weeksToDays(leadWeeks),
             body_material: this.form.body_material,
             pressure_rating: this.form.pressure_rating,
             discount: this.form.discount === '' ? 0 : Number(this.form.discount),
@@ -360,6 +409,111 @@ window.CRM = window.CRM || {};
         }
       },
 
+      /* ---------------- 批量导入（1.26） ---------------- */
+      openImport() {
+        this.importOpen = true;
+        this.resetImport();
+        this.impMode = 'skip';
+        this.impAutoCreate = true;
+      },
+
+      closeImport() {
+        /* 实际导入时 doImport 已刷新过分类树与列表，这里只负责关闭 */
+        this.importOpen = false;
+      },
+
+      resetImport() {
+        this.impStep = 1;
+        this.impFileName = '';
+        this.impRows = [];
+        this.impPreview = null;
+        this.impReport = null;
+      },
+
+      async refreshAfterImport() {
+        await this.loadTree();
+        await this.load();
+      },
+
+      async downloadImportTemplate() {
+        this.tplBusy = true;
+        try {
+          await CRM.importXlsx.downloadTemplate('product');
+          CRM.toast('产品导入模板已下载（含填写说明与分类路径参考）', 'success', 4000);
+        } catch (e) {
+          CRM.toast(e.message || '下载模板失败', 'error');
+        } finally {
+          this.tplBusy = false;
+        }
+      },
+
+      onImportFile(e) {
+        const f = e.target.files && e.target.files[0];
+        if (f) this.handleImportFile(f);
+        e.target.value = '';
+      },
+
+      onImportDrop(e) {
+        this.impDragOver = false;
+        const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+        if (f) this.handleImportFile(f);
+      },
+
+      async handleImportFile(file) {
+        this.impParsing = true;
+        this.impFileName = (file && file.name) || '';
+        this.impReport = null;
+        try {
+          const r = await CRM.importXlsx.parseFile('product', file, {
+            duplicateMode: this.impMode,
+            autoCreateCategories: this.impAutoCreate
+          });
+          if (!r.ok) { CRM.toast(r.message, 'error', 6000); return; }
+          this.impRows = r.rows;
+          this.impPreview = r.preview;
+          this.impStep = 2;
+          CRM.toast(`已解析 ${r.preview.total} 行：可导入 ${r.preview.valid} 行，有问题 ${r.preview.invalid} 行`,
+            'success', 4000);
+        } catch (e) {
+          CRM.toast('解析文件失败：' + (e.message || ''), 'error');
+        } finally {
+          this.impParsing = false;
+        }
+      },
+
+      /** 切换「自动创建分类」或重复处理方式后重新预校验（不写库） */
+      async refreshPreview() {
+        if (!this.impRows.length) return;
+        try {
+          this.impPreview = await CRM.api.previewImport('product', this.impRows, {
+            duplicateMode: this.impMode,
+            autoCreateCategories: this.impAutoCreate
+          });
+        } catch (e) {
+          CRM.toast(e.message || '重新校验失败', 'error');
+        }
+      },
+
+      async doImport() {
+        if (!this.impPreview || !this.impRows.length) return;
+        this.impImporting = true;
+        try {
+          const rep = await CRM.importXlsx.run('product', this.impPreview, {
+            duplicate_mode: this.impMode,
+            auto_create_categories: this.impAutoCreate
+          }, this.impRows);
+          this.impReport = rep;
+          this.impStep = 3;
+          CRM.toast(`导入完成：新增 ${rep.imported} 个，更新 ${rep.updated} 个`
+            + (rep.categoriesCreated ? `，新建分类 ${rep.categoriesCreated} 个` : ''), 'success', 5000);
+          await this.refreshAfterImport();
+        } catch (e) {
+          CRM.toast(e.message || '导入失败', 'error');
+        } finally {
+          this.impImporting = false;
+        }
+      },
+
       /* ---------------- 导出 Excel ---------------- */
       async exportExcel() {
         try {
@@ -368,12 +522,12 @@ window.CRM = window.CRM || {};
           const rows = await CRM.api.productsExport(this.queryParams());
           if (!rows.length) { CRM.toast('当前筛选没有可导出的产品', 'warn'); return; }
 
-          const header = ['分类', '名称', '编号', '单位', '单价(元)', '货期(天)', '材质', '压力等级',
+          const header = ['分类', '名称', '编号', '单位', '单价(元)', '货期(周)', '材质', '压力等级',
             '折扣(%)', '折后价(元)', '备注', '启用'];
           const aoa = [header];
           for (const r of rows) {
             aoa.push([
-              r.category_path, r.name, r.code, r.unit, r.price, r.lead_time_days,
+              r.category_path, r.name, r.code, r.unit, r.price, fmtWeeks(r.lead_time_days),
               r.body_material, r.pressure_rating, r.discount, r.net_price, r.remark,
               r.enabled ? '是' : '否'
             ]);
@@ -404,7 +558,7 @@ window.CRM = window.CRM || {};
     template: `
       <div>
         <c-page-header title="产品价目表"
-          desc="分类树 + 产品价：单价 / 货期 / 材质 / 压力等级 / 设定折扣，折后价自动算；可导出 Excel 发给客户。" />
+          desc="分类树 + 产品价：单价 / 货期(周) / 材质 / 压力等级 / 设定折扣，折后价自动算；支持 Excel 批量导入与导出。" />
 
         <div class="prod-layout">
           <!-- ================= 左侧：分类树 ================= -->
@@ -489,12 +643,17 @@ window.CRM = window.CRM || {};
                   </select>
 
                   <div style="flex:1"></div>
-                  <button class="btn" title="按当前筛选导出 xlsx" @click="exportExcel">
-                    <c-icon name="file" :size="14" /> 导出 Excel
-                  </button>
-                  <button class="btn btn-primary" @click="openCreate">
-                    <c-icon name="plus" :size="14" /> 新增产品
-                  </button>
+                  <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end">
+                    <button class="btn" title="下载模板，填好后批量导入产品" @click="openImport">
+                      <c-icon name="file" :size="14" /> 批量导入
+                    </button>
+                    <button class="btn" title="按当前筛选导出 xlsx" @click="exportExcel">
+                      <c-icon name="file" :size="14" /> 导出 Excel
+                    </button>
+                    <button class="btn btn-primary" @click="openCreate">
+                      <c-icon name="plus" :size="14" /> 新增产品
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>
@@ -539,7 +698,7 @@ window.CRM = window.CRM || {};
                 </template>
 
                 <template #cell-lead_time_days="{ row }">
-                  <span v-if="row.lead_time_days">{{ row.lead_time_days }} 天</span>
+                  <span v-if="row.lead_time_days">{{ fmtWeeks(row.lead_time_days) }} 周</span>
                   <span v-else class="muted">按合同</span>
                 </template>
 
@@ -581,8 +740,8 @@ window.CRM = window.CRM || {};
             <c-field v-model="form.unit" label="单位" placeholder="台" />
 
             <c-field v-model="form.price" label="单价（元）" type="number" placeholder="0.00" />
-            <c-field v-model="form.lead_time_days" label="货期（天）" type="number"
-                     hint="0 或留空表示按合同" />
+            <c-field v-model="form.lead_time_weeks" label="货期（周）" type="number"
+                     placeholder="3.5" hint="按周填写，可一位小数；保存时换算为天（3.5 周 = 25 天）" />
 
             <c-select v-model="form.body_material" label="阀体材质"
                       :options="api.options('body_material')" category="body_material" allow-add
@@ -614,6 +773,219 @@ window.CRM = window.CRM || {};
             <button class="btn btn-primary" :disabled="saving" @click="save">
               {{ saving ? '保存中…' : '保存' }}
             </button>
+          </template>
+        </c-drawer>
+
+        <!-- ================= 产品批量导入抽屉（1.26） ================= -->
+        <c-drawer v-model="importOpen" title="批量导入产品"
+                  sub="下载模板 → 在 Excel 里填好 → 拖进来 → 校验预览 → 确认导入；导入前不会写入数据库"
+                  width="820px">
+          <div class="import-steps">
+            <div class="import-step" :class="{ on: impStep >= 1 }"><span class="idx">1</span>下载模板 / 选择文件</div>
+            <div class="import-step" :class="{ on: impStep >= 2 }"><span class="idx">2</span>校验预览</div>
+            <div class="import-step" :class="{ on: impStep >= 3 }"><span class="idx">3</span>确认导入</div>
+          </div>
+
+          <!-- 步骤 1：模板 + 文件 -->
+          <template v-if="impStep === 1">
+            <div class="note" style="margin-bottom:14px">
+              <c-icon name="alert" :size="16" />
+              <div style="font-size:var(--fs-sm)">
+                模板包含 <strong>导入模板 / 填写说明 / 可选值参考</strong> 三页：
+                分类路径支持 <code>蝶阀 / 三偏心蝶阀 / 对夹</code> 或 <code>蝶阀&gt;三偏心蝶阀&gt;对夹</code>，
+                可选值参考页列出现有分类路径与材质 / 压力等级。
+              </div>
+            </div>
+
+            <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px">
+              <button class="btn btn-primary" :disabled="tplBusy" @click="downloadImportTemplate">
+                <c-icon name="file" :size="14" /> {{ tplBusy ? '生成中…' : '下载产品导入模板（.xlsx）' }}
+              </button>
+              <button class="btn" @click="exportExcel">导出现有产品当作样例</button>
+            </div>
+
+            <div class="drop-zone" :class="{ over: impDragOver }"
+                 @dragover.prevent="impDragOver = true"
+                 @dragleave.prevent="impDragOver = false"
+                 @drop.prevent="onImportDrop">
+              <c-icon name="file" :size="30" />
+              <div class="mt-3">
+                {{ impParsing ? '正在解析…' : '把填好的 Excel 拖到这里，或' }}
+                <label v-if="!impParsing" class="link-btn">
+                  点击选择文件
+                  <input type="file" accept=".xlsx,.xls,.csv" style="display:none"
+                         @change="onImportFile" />
+                </label>
+              </div>
+              <div class="muted mt-3" style="font-size:var(--fs-xs)">
+                支持 .xlsx / .xls / .csv；单次最多 2000 行；空行会自动跳过
+              </div>
+            </div>
+            <div v-if="impFileName" class="muted mt-3" style="font-size:var(--fs-xs)">
+              已选择：{{ impFileName }}
+            </div>
+          </template>
+
+          <!-- 步骤 2：预览与设置 -->
+          <template v-else-if="impStep === 2 && impPreview">
+            <div class="stat-grid" style="margin-bottom:14px;grid-template-columns:repeat(auto-fit,minmax(120px,1fr))">
+              <div class="stat"><div class="n">{{ impPreview.total }}</div><div class="l">总行数</div></div>
+              <div class="stat"><div class="n" style="color:var(--c-success)">{{ impPreview.valid }}</div><div class="l">可导入</div></div>
+              <div class="stat"><div class="n" :style="impPreview.invalid ? 'color:var(--c-danger)' : ''">{{ impPreview.invalid }}</div><div class="l">有问题</div></div>
+              <div class="stat"><div class="n">{{ impPreview.blankSkipped || 0 }}</div><div class="l">空行跳过</div></div>
+            </div>
+
+            <c-card title="导入设置" sub="分类不存在时如何处理、同分类重名怎么处理" style="margin-bottom:16px">
+              <div class="form-grid">
+                <div class="field" style="grid-column:span 2">
+                  <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer">
+                    <input type="checkbox" v-model="impAutoCreate" style="margin-top:2px"
+                           @change="refreshPreview" />
+                    <span style="font-size:var(--fs-sm)">
+                      <strong>分类不存在时自动创建</strong>（默认勾选）
+                      <span class="muted" style="display:block;font-size:var(--fs-xs);margin-top:2px">
+                        缺失的层级按路径顺序创建（is_system=0），排在同级末尾；不勾选则这一行报错。
+                      </span>
+                    </span>
+                  </label>
+                </div>
+                <div class="field">
+                  <label class="field-label">遇到同分类同名产品</label>
+                  <select class="input" v-model="impMode" @change="refreshPreview">
+                    <option value="skip">跳过（保留库中已有资料）</option>
+                    <option value="update">更新已有记录（只覆盖表格里填了值的列）</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label class="field-label">当前解析文件</label>
+                  <div class="input" style="display:flex;align-items:center">{{ impFileName }}</div>
+                </div>
+              </div>
+            </c-card>
+
+            <div v-if="impErrors.length" class="note warn" style="margin-bottom:14px">
+              <c-icon name="alert" :size="16" />
+              <div style="font-size:var(--fs-sm)">
+                有 {{ impErrors.length }} 行存在问题，这些行<strong>不会被导入</strong>（前 30 行）：
+                <div class="table-wrap mt-3" style="max-height:220px;overflow:auto">
+                  <table class="data-table">
+                    <thead><tr><th style="width:70px">行号</th><th>问题</th></tr></thead>
+                    <tbody>
+                      <tr v-for="r in impErrors.slice(0, 30)" :key="'e' + r.index">
+                        <td>第 {{ r.index }} 行</td>
+                        <td>{{ r.errors.join('；') }}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+
+            <div v-if="impWarnings.length" class="note" style="margin-bottom:14px">
+              <c-icon name="alert" :size="16" />
+              <div style="font-size:var(--fs-sm)">
+                有 {{ impWarnings.length }} 行带提示（不影响导入）：
+                <div v-for="r in impWarnings.slice(0, 20)" :key="'w' + r.index"
+                     style="font-size:var(--fs-xs);margin-top:4px">
+                  第 {{ r.index }} 行：{{ r.warnings.join('；') }}
+                </div>
+                <div v-if="impWarnings.length > 20" class="muted mt-3" style="font-size:var(--fs-xs)">
+                  仅列出前 20 行
+                </div>
+              </div>
+            </div>
+
+            <div class="field-label" style="margin-bottom:6px">
+              文件预览（前 50 行，共 {{ impPreview.total }} 行）
+            </div>
+            <div class="table-wrap" style="max-height:360px;overflow:auto">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th style="width:56px">行号</th>
+                    <th style="width:64px">状态</th>
+                    <th>分类路径</th>
+                    <th>产品名称</th>
+                    <th style="width:88px;text-align:right">单价</th>
+                    <th style="width:74px;text-align:right">货期(周)</th>
+                    <th style="width:70px;text-align:right">折扣</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="r in impPreview.rows.slice(0, 50)" :key="'p' + r.index"
+                      :class="r.errors.length ? 'row-error' : (r.warnings.length ? 'row-warn' : '')">
+                    <td>{{ r.index }}</td>
+                    <td>
+                      <span v-if="r.errors.length" class="tag danger" style="font-size:10px">错误</span>
+                      <span v-else-if="r.warnings.length" class="tag warning" style="font-size:10px">提示</span>
+                      <span v-else class="tag success" style="font-size:10px">可导入</span>
+                    </td>
+                    <td class="muted" style="font-size:var(--fs-xs)">{{ r.data.category_path || '—' }}</td>
+                    <td>{{ r.data.name || '(无名称)' }}</td>
+                    <td style="text-align:right">{{ fmtMoney(r.data.price) }}</td>
+                    <td style="text-align:right">{{ fmtWeeks(r.data.lead_time_days) }}</td>
+                    <td style="text-align:right">{{ r.data.discount }}%</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </template>
+
+          <!-- 步骤 3：结果 -->
+          <template v-else-if="impStep === 3 && impReport">
+            <div class="stat-grid" style="margin-bottom:14px;grid-template-columns:repeat(auto-fit,minmax(120px,1fr))">
+              <div class="stat"><div class="n" style="color:var(--c-success)">{{ impReport.imported }}</div><div class="l">成功导入</div></div>
+              <div class="stat"><div class="n">{{ impReport.updated }}</div><div class="l">更新</div></div>
+              <div class="stat"><div class="n">{{ impReport.skipped }}</div><div class="l">跳过</div></div>
+              <div class="stat"><div class="n" :style="impReport.failed ? 'color:var(--c-danger)' : ''">{{ impReport.failed }}</div><div class="l">写入失败</div></div>
+              <div class="stat"><div class="n" :style="impReport.invalid ? 'color:var(--c-warning)' : ''">{{ impReport.invalid }}</div><div class="l">校验未通过</div></div>
+            </div>
+
+            <div v-if="impReport.categoriesCreated" class="note" style="margin-bottom:14px">
+              <c-icon name="check" :size="16" />
+              <div style="font-size:var(--fs-sm)">
+                导入过程中自动新建了 {{ impReport.categoriesCreated }} 个产品分类（is_system=0，已排到同级末尾）。
+                左侧分类树已刷新。
+              </div>
+            </div>
+
+            <div v-if="(impReport.errors || []).length" class="note warn">
+              <c-icon name="alert" :size="16" />
+              <div style="font-size:var(--fs-sm)">
+                未导入明细（前 50 条）：
+                <div class="table-wrap mt-3" style="max-height:260px;overflow:auto">
+                  <table class="data-table">
+                    <thead><tr><th style="width:70px">行号</th><th>原因</th></tr></thead>
+                    <tbody>
+                      <tr v-for="(e, i) in impReport.errors.slice(0, 50)" :key="'r' + i">
+                        <td>第 {{ e.index }} 行</td>
+                        <td style="color:var(--c-danger)">{{ e.message }}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+
+            <div v-if="!(impReport.errors || []).length" class="note">
+              <c-icon name="check" :size="16" />
+              <div style="font-size:var(--fs-sm)">全部行均处理完成，没有失败明细。</div>
+            </div>
+          </template>
+
+          <template #footer>
+            <span class="muted" style="font-size:var(--fs-xs);margin-right:auto">
+              <template v-if="impStep === 1">模板第 2、3 行是示例，正式填写前可以删掉</template>
+              <template v-else-if="impStep === 2">确认无误后点「确认导入」；写入前不会动数据</template>
+              <template v-else>已完成，可刷新列表查看</template>
+            </span>
+            <button class="btn" @click="closeImport">{{ impStep === 3 ? '关闭' : '取消' }}</button>
+            <button v-if="impStep === 2" class="btn btn-primary"
+                    :disabled="impImporting || !impPreview.valid" @click="doImport">
+              {{ impImporting ? '导入中…' : '确认导入（' + impPreview.valid + ' 行）' }}
+            </button>
+            <button v-if="impStep === 3" class="btn" @click="refreshAfterImport">刷新列表</button>
+            <button v-if="impStep === 3" class="btn btn-primary" @click="resetImport">继续导入</button>
           </template>
         </c-drawer>
       </div>`,

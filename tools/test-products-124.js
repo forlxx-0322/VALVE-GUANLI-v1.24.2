@@ -9,7 +9,8 @@
  *   · 分类：新增一级/子级、同级重名拒绝、改名、上移下移、有子分类/有产品拒绝删除、
  *           二级与三级自定义分类均可改名、可删除
  *   · 产品：CRUD、名称必填、分类必须存在、单价 ≥0 两位小数、折扣 0~100、
- *           货期非负整数、单位默认台、同分类不重名（跨分类可同名）、编号全库唯一
+ *           货期存储仍为非负整数（天），接口额外返回 lead_time_weeks（天/7，一位小数）、单位默认台、
+ *           同分类不重名（跨分类可同名）、编号全库唯一
  *   · 筛选：分类（默认含子孙，可关；一级筛选默认带出三级产品）、关键字（名称/编号/备注）、材质、压力、启用
  *   · 分页：page/pageSize、pageSize 上限 200
  *   · 折后价：0 / 50 / 100 折扣与小数折扣，net_price = round(price×(1−discount/100),2)
@@ -314,8 +315,9 @@ function findNode(nodes, id) {
   check('新增产品成功（折后价 840、分类名与全路径正确）',
     p1.ok && Number(p1.data.net_price) === 840
       && p1.data.category_name === TAG + '子类甲改'
-      && String(p1.data.category_path).includes(TAG + '根分类'),
-    p1.ok ? `#${p1.data.id} ${p1.data.category_path} / ${p1.data.price} × (1−${p1.data.discount}%) = ${p1.data.net_price}` : p1.message);
+      && String(p1.data.category_path).includes(TAG + '根分类')
+      && Number(p1.data.lead_time_weeks) === 2.1,
+    p1.ok ? `#${p1.data.id} ${p1.data.category_path} / ${p1.data.price} × (1−${p1.data.discount}%) = ${p1.data.net_price}，货期 ${p1.data.lead_time_days} 天 = ${p1.data.lead_time_weeks} 周` : p1.message);
 
   const p2 = await createProduct({
     category_id: catA.data.id, name: TAG + 'DN100 蝶阀', price: 100.555,
@@ -389,7 +391,7 @@ function findNode(nodes, id) {
   const badLead2 = await api('POST', '/api/products', {
     category_id: catA.data.id, name: TAG + '负货期', lead_time_days: -1
   });
-  check('货期必须是非负整数（1.5 与 −1 均拒绝）',
+  check('货期必须是非负整数（存储按天；1.5 与 −1 均拒绝）',
     badLead1.status === 400 && badLead1.code === 'BAD_LEAD_TIME'
       && badLead2.status === 400 && badLead2.code === 'BAD_LEAD_TIME',
     `${badLead1.status}/${badLead1.code} 与 ${badLead2.status}/${badLead2.code}`);
@@ -485,11 +487,11 @@ function findNode(nodes, id) {
   const upd = await api('PUT', `/api/products/${p6.data.id}`, {
     price: 200, discount: 12.5, remark: '改过备注', lead_time_days: 30
   });
-  check('修改产品生效（单价/折扣/货期/备注，折后价随动 175）',
+  check('修改产品生效（单价/折扣/货期/备注，折后价随动 175；30 天 = 4.3 周）',
     upd.ok && Number(upd.data.price) === 200 && Number(upd.data.discount) === 12.5
       && Number(upd.data.net_price) === 175 && upd.data.remark === '改过备注'
-      && Number(upd.data.lead_time_days) === 30,
-    upd.ok ? `net=${upd.data.net_price}` : upd.message);
+      && Number(upd.data.lead_time_days) === 30 && Number(upd.data.lead_time_weeks) === 4.3,
+    upd.ok ? `net=${upd.data.net_price}，货期=${upd.data.lead_time_days} 天=${upd.data.lead_time_weeks} 周` : upd.message);
 
   const detail = await api('GET', `/api/products/${p1.data.id}`);
   check('产品详情带 category_name / category_path / net_price',
@@ -505,12 +507,13 @@ function findNode(nodes, id) {
   /* ---------------- 8. 复制 ---------------- */
   const copy1 = await api('POST', `/api/products/${p1.data.id}/copy`);
   if (copy1.ok) made.products.push(copy1.data.id);
-  check('复制产品：名称加「（副本）」，字段原样复制，sort 排到末尾',
+  check('复制产品：名称加「（副本）」，字段原样复制（15 天 = 2.1 周），sort 排到末尾',
     copy1.ok && copy1.data.name === TAG + 'DN200 蝶阀（副本）'
       && Number(copy1.data.price) === 1200 && Number(copy1.data.discount) === 30
       && copy1.data.body_material === '碳钢 WCB' && Number(copy1.data.lead_time_days) === 15
+      && Number(copy1.data.lead_time_weeks) === 2.1
       && Number(copy1.data.sort) > Number(p1.data.sort),
-    copy1.ok ? `${copy1.data.name} sort=${copy1.data.sort}（原 ${p1.data.sort}）` : copy1.message);
+    copy1.ok ? `${copy1.data.name} sort=${copy1.data.sort}（原 ${p1.data.sort}），货期 ${copy1.data.lead_time_weeks} 周` : copy1.message);
 
   const copy2 = await api('POST', `/api/products/${p1.data.id}/copy`);
   if (copy2.ok) made.products.push(copy2.data.id);
@@ -564,11 +567,12 @@ function findNode(nodes, id) {
 
   const expRow = expRoot.ok ? expRoot.data.find((r) => r.code === 'T-CODE-1') : null;
   const EXP_FIELDS = ['category_path', 'name', 'code', 'unit', 'price', 'lead_time_days',
-    'body_material', 'pressure_rating', 'discount', 'net_price', 'remark', 'enabled'];
-  check('导出字段齐全（12 个）且折后价与接口一致',
+    'lead_time_weeks', 'body_material', 'pressure_rating', 'discount', 'net_price', 'remark', 'enabled'];
+  check('导出字段齐全（13 个，含货期周数）且折后价与接口一致',
     !!expRow && EXP_FIELDS.every((k) => Object.prototype.hasOwnProperty.call(expRow, k))
-      && Number(expRow.net_price) === 840 && Number(expRow.enabled) === 1,
-    expRow ? `${EXP_FIELDS.length} 个字段，net=${expRow.net_price}` : '未找到导出行的产品');
+      && Number(expRow.net_price) === 840 && Number(expRow.enabled) === 1
+      && Number(expRow.lead_time_weeks) === 2.1,
+    expRow ? `${EXP_FIELDS.length} 个字段，net=${expRow.net_price}，货期 ${expRow.lead_time_days} 天 = ${expRow.lead_time_weeks} 周` : '未找到导出行的产品');
 
   check('导出 category_path 为完整路径（…根分类 / …子类甲改）',
     !!expRow && expRow.category_path === TAG + '根分类 / ' + TAG + '子类甲改',

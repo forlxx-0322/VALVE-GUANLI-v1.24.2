@@ -312,7 +312,8 @@ window.CRM = window.CRM || {};
 
     getTemplate: (entity) => request('GET', '/api/data/template?' + toQuery({ entity })),
     exportData: (entity, filters) => request('POST', '/api/data/export', Object.assign({ entity }, filters || {})),
-    previewImport: (entity, rows) => request('POST', '/api/data/preview', { entity, rows }),
+    previewImport: (entity, rows, opts) =>
+      request('POST', '/api/data/preview', Object.assign({ entity, rows }, opts || {})),
     runImport: (entity, rows, opts) =>
       request('POST', '/api/data/import', Object.assign({ entity, rows }, opts || {})),
 
