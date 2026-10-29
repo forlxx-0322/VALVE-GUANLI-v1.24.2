@@ -99,10 +99,10 @@ async function get(pathname, init) {
       WHERE deleted_at IS NULL AND parent_id = ? AND name = '三偏心蝶阀'`).get(sanBian.id);
     const sanLinks = sanId ? db.prepare(`SELECT name FROM product_categories
       WHERE deleted_at IS NULL AND parent_id = ? ORDER BY sort, id`).all(sanId.id).map((r) => r.name) : [];
-    check('3a', '产品价目表结构完整（分类 8 列 / 产品 16 列）且三级分类种子 6 + 22 + 46 = 74 已灌入',
-      catCols.length === 8 && prodCols.length === 16
+    check('3a', '产品价目表结构完整（分类 8 列 / 产品 17 列）且三级分类种子 6 + 22 + 46 = 74 已灌入',
+      catCols.length === 8 && prodCols.length === 17
         && catCols.includes('parent_id') && catCols.includes('is_system')
-        && ['category_id', 'name', 'price', 'lead_time_days', 'body_material',
+        && ['category_id', 'name', 'price', 'lead_time_days', 'lead_time_weeks', 'body_material',
           'pressure_rating', 'discount', 'code', 'enabled', 'sort'].every((c) => prodCols.includes(c))
         && builtinRoots === 6 && customSecond === 22 && customThird === 46
         && systemTotal === 6 && catTotal === 74

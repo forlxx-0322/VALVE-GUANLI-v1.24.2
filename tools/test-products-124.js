@@ -9,7 +9,7 @@
  *   · 分类：新增一级/子级、同级重名拒绝、改名、上移下移、有子分类/有产品拒绝删除、
  *           二级与三级自定义分类均可改名、可删除
  *   · 产品：CRUD、名称必填、分类必须存在、单价 ≥0 两位小数、折扣 0~100、
- *           货期存储仍为非负整数（天），接口额外返回 lead_time_weeks（天/7，一位小数）、单位默认台、
+ *           货期按周精确保存（lead_time_weeks，3.5 周 → 25 天且读回 3.5 周）、单位默认台、
  *           同分类不重名（跨分类可同名）、编号全库唯一
  *   · 筛选：分类（默认含子孙，可关；一级筛选默认带出三级产品）、关键字（名称/编号/备注）、材质、压力、启用
  *   · 分页：page/pageSize、pageSize 上限 200
@@ -137,12 +137,12 @@ function findNode(nodes, id) {
 
   const CAT_COLS = ['id', 'parent_id', 'name', 'sort', 'is_system', 'created_at', 'updated_at', 'deleted_at'];
   const PROD_COLS = ['id', 'category_id', 'name', 'code', 'unit', 'price', 'lead_time_days',
-    'body_material', 'pressure_rating', 'discount', 'remark', 'enabled', 'sort',
+    'lead_time_weeks', 'body_material', 'pressure_rating', 'discount', 'remark', 'enabled', 'sort',
     'created_at', 'updated_at', 'deleted_at'];
   check('product_categories 列齐全（8 列）',
     CAT_COLS.every((c) => struct.catCols.includes(c)) && struct.catCols.length === CAT_COLS.length,
     struct.catCols.join(', '));
-  check('products 列齐全（16 列）',
+  check('products 列齐全（17 列，v15 加 lead_time_weeks）',
     PROD_COLS.every((c) => struct.prodCols.includes(c)) && struct.prodCols.length === PROD_COLS.length,
     `${struct.prodCols.length} 列：${struct.prodCols.join(', ')}`);
 
@@ -319,6 +319,21 @@ function findNode(nodes, id) {
       && Number(p1.data.lead_time_weeks) === 2.1,
     p1.ok ? `#${p1.data.id} ${p1.data.category_path} / ${p1.data.price} × (1−${p1.data.discount}%) = ${p1.data.net_price}，货期 ${p1.data.lead_time_days} 天 = ${p1.data.lead_time_weeks} 周` : p1.message);
 
+  /* 1.26.1：按周精确保存 —— 3.5 周不能变成 3.6 周 */
+  const pWeek = await createProduct({
+    category_id: catA.data.id, name: TAG + '3.5周精度', price: 1, lead_time_weeks: 3.5
+  });
+  const pWeekDetail = pWeek.ok ? await api('GET', `/api/products/${pWeek.data.id}`) : {};
+  check('货期按周精确保存：3.5 周 → weeks=3.5 / days=25，读回仍是 3.5 周',
+    pWeek.ok && Number(pWeek.data.lead_time_weeks) === 3.5
+      && Number(pWeek.data.lead_time_days) === 25
+      && pWeekDetail.ok && Number(pWeekDetail.data.lead_time_weeks) === 3.5
+      && Number(pWeekDetail.data.lead_time_days) === 25,
+    pWeek.ok ? `创建返回 ${pWeek.data.lead_time_weeks} 周 / ${pWeek.data.lead_time_days} 天，详情读回 ${pWeekDetail.data && pWeekDetail.data.lead_time_weeks} 周` : pWeek.message);
+
+  /* 精度产品已完成验证，立即软删除，避免影响后续按 6 个产品的计数断言 */
+  if (pWeek.ok) await api('DELETE', `/api/products/${pWeek.data.id}`);
+
   const p2 = await createProduct({
     category_id: catA.data.id, name: TAG + 'DN100 蝶阀', price: 100.555,
     lead_time_days: 0, body_material: '不锈钢 304', pressure_rating: 'PN16', discount: 0
@@ -385,16 +400,20 @@ function findNode(nodes, id) {
       && badDiscountLo.status === 400 && badDiscountLo.code === 'BAD_DISCOUNT',
     `${badDiscountHi.status}/${badDiscountHi.code} 与 ${badDiscountLo.status}/${badDiscountLo.code}`);
 
-  const badLead1 = await api('POST', '/api/products', {
-    category_id: catA.data.id, name: TAG + '小数货期', lead_time_days: 1.5
+  const badWeekNeg = await api('POST', '/api/products', {
+    category_id: catA.data.id, name: TAG + '负周货期', lead_time_weeks: -1
   });
-  const badLead2 = await api('POST', '/api/products', {
-    category_id: catA.data.id, name: TAG + '负货期', lead_time_days: -1
+  const badWeekDec = await api('POST', '/api/products', {
+    category_id: catA.data.id, name: TAG + '两位小数货期', lead_time_weeks: 1.55
   });
-  check('货期必须是非负整数（存储按天；1.5 与 −1 均拒绝）',
-    badLead1.status === 400 && badLead1.code === 'BAD_LEAD_TIME'
-      && badLead2.status === 400 && badLead2.code === 'BAD_LEAD_TIME',
-    `${badLead1.status}/${badLead1.code} 与 ${badLead2.status}/${badLead2.code}`);
+  const badWeekMax = await api('POST', '/api/products', {
+    category_id: catA.data.id, name: TAG + '超限货期', lead_time_weeks: 521
+  });
+  check('货期(周)校验：负数 / 两位小数 / 超过 520 周均拒绝（400 BAD_LEAD_TIME）',
+    badWeekNeg.status === 400 && badWeekNeg.code === 'BAD_LEAD_TIME'
+      && badWeekDec.status === 400 && badWeekDec.code === 'BAD_LEAD_TIME'
+      && badWeekMax.status === 400 && badWeekMax.code === 'BAD_LEAD_TIME',
+    `${badWeekNeg.status}/${badWeekNeg.code}、${badWeekDec.status}/${badWeekDec.code}、${badWeekMax.status}/${badWeekMax.code}`);
 
   const dupName = await api('POST', '/api/products', {
     category_id: catA.data.id, name: TAG + 'DN200 蝶阀'

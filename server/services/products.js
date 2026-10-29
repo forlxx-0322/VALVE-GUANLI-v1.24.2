@@ -10,7 +10,7 @@
  * 口径与约定：
  *   · 全部软删除（deleted_at），列表与校验都不看已删除行
  *   · 折后价 net_price = round(price × (1 − discount/100), 2)，查询时计算、不落库
- *   · 货期数据库存天（lead_time_days），界面 / 导入按周展示与录入，换算为天落库
+ *   · 货期精确存周（lead_time_weeks），同时冗余存天（lead_time_days）供旧字段/导出兼容
  *   · 同一分类下产品不重名；编号非空时全库唯一（软删除的不算）
  *   · 分类 product_count 含所有子孙分类的产品（点一级分类能看到整族产品）
  *   · 所有写操作都写 activity_logs（entity_type = product / product_category）
@@ -22,8 +22,16 @@
 const { plainAll, now } = require('../db');
 
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
-/** 天 → 周（最多一位小数）；数据库仍存天，界面/导入按周展示与录入 */
+/** 天 → 周（最多一位小数）；仅用于只传旧字段 lead_time_days 的调用方兼容 */
 const weeksFromDays = (days) => Math.round(((Number(days) || 0) / 7) * 10) / 10;
+/** 读产品行上的周数：以 lead_time_weeks 列为准；旧数据没有该列时才从天数换算 */
+const weeksOf = (row) => {
+  if (!row) return 0;
+  if (row.lead_time_weeks === undefined || row.lead_time_weeks === null) {
+    return weeksFromDays(row.lead_time_days);
+  }
+  return Math.round((Number(row.lead_time_weeks) || 0) * 10) / 10;
+};
 const str = (v) => (v === null || v === undefined ? '' : String(v)).trim();
 
 /** 业务异常：带 HTTP 状态与错误码，路由层原样透出 */
@@ -334,7 +342,7 @@ function decorate(row, paths) {
   if (!row) return row;
   return Object.assign({}, row, {
     net_price: netPrice(row.price, row.discount),
-    lead_time_weeks: weeksFromDays(row.lead_time_days),
+    lead_time_weeks: weeksOf(row),
     category_path: paths.get(Number(row.category_id)) || row.category_name || ''
   });
 }
@@ -486,12 +494,35 @@ function normalize(db, data, current) {
     }
   }
 
-  if (has('lead_time_days')) {
-    if (d.lead_time_days === null || d.lead_time_days === '') out.lead_time_days = 0;
-    else {
+  /* 货期：优先按「周」保存（1.26.1）；同时写一份天用于兼容旧字段/导出。
+     只传旧字段 lead_time_days 的调用方，自动换算周数。 */
+  if (has('lead_time_weeks')) {
+    if (d.lead_time_weeks === null || d.lead_time_weeks === '') {
+      out.lead_time_weeks = 0;
+      out.lead_time_days = 0;
+    } else {
+      const n = Number(d.lead_time_weeks);
+      if (!Number.isFinite(n) || n < 0 || n > 520) {
+        bad(400, 'BAD_LEAD_TIME', '货期必须是不小于 0、不超过 520 的数字（周）');
+      }
+      if (Math.abs(Math.round(n * 10) - n * 10) > 1e-9) {
+        bad(400, 'BAD_LEAD_TIME', '货期最多保留一位小数（周）');
+      }
+      out.lead_time_weeks = Math.round(n * 10) / 10;
+      out.lead_time_days = Math.round(out.lead_time_weeks * 7);
+    }
+  } else if (has('lead_time_days')) {
+    if (d.lead_time_days === null || d.lead_time_days === '') {
+      out.lead_time_weeks = 0;
+      out.lead_time_days = 0;
+    } else {
       const n = Number(d.lead_time_days);
-      if (!Number.isInteger(n) || n < 0) bad(400, 'BAD_LEAD_TIME', '货期必须是不小于 0 的整数（天）');
-      out.lead_time_days = n;
+      if (!Number.isFinite(n) || n < 0 || n > 3640) {
+        bad(400, 'BAD_LEAD_TIME', '货期必须是不小于 0、不超过 3640 的天数');
+      }
+      /* 旧调用方可能传小数天：归一到整数天，再从天数换算周 */
+      out.lead_time_days = Math.round(n);
+      out.lead_time_weeks = weeksFromDays(out.lead_time_days);
     }
   }
 
@@ -548,6 +579,7 @@ function create(db, data) {
     unit: v.unit || '台',
     price: v.price === undefined ? 0 : v.price,
     lead_time_days: v.lead_time_days === undefined ? 0 : v.lead_time_days,
+    lead_time_weeks: v.lead_time_weeks === undefined ? 0 : v.lead_time_weeks,
     body_material: v.body_material || '',
     pressure_rating: v.pressure_rating || '',
     discount: v.discount === undefined ? 0 : v.discount,
@@ -558,12 +590,12 @@ function create(db, data) {
 
   const ts = now();
   const r = db.prepare(`INSERT INTO products
-    (category_id, name, code, unit, price, lead_time_days, body_material,
+    (category_id, name, code, unit, price, lead_time_days, lead_time_weeks, body_material,
      pressure_rating, discount, remark, enabled, sort, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
     row.category_id, row.name, row.code, row.unit, row.price, row.lead_time_days,
-    row.body_material, row.pressure_rating, row.discount, row.remark, row.enabled,
-    row.sort, ts, ts
+    row.lead_time_weeks, row.body_material, row.pressure_rating, row.discount, row.remark,
+    row.enabled, row.sort, ts, ts
   );
   const id = Number(r.lastInsertRowid);
 
@@ -646,11 +678,11 @@ function copy(db, id) {
 
   const ts = now();
   const r = db.prepare(`INSERT INTO products
-    (category_id, name, code, unit, price, lead_time_days, body_material,
+    (category_id, name, code, unit, price, lead_time_days, lead_time_weeks, body_material,
      pressure_rating, discount, remark, enabled, sort, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
     Number(cur.category_id), name, code, cur.unit, cur.price, cur.lead_time_days,
-    cur.body_material, cur.pressure_rating, cur.discount, cur.remark, cur.enabled,
+    weeksOf(cur), cur.body_material, cur.pressure_rating, cur.discount, cur.remark, cur.enabled,
     maxProductSort(db, cur.category_id) + 10, ts, ts
   );
   const newId = Number(r.lastInsertRowid);
@@ -667,7 +699,7 @@ function copy(db, id) {
 function exportData(db, q) {
   const { whereSql, params } = buildWhere(db, q);
   const rows = plainAll(db.prepare(`
-    SELECT p.category_id, p.name, p.code, p.unit, p.price, p.lead_time_days,
+    SELECT p.category_id, p.name, p.code, p.unit, p.price, p.lead_time_days, p.lead_time_weeks,
            p.body_material, p.pressure_rating, p.discount, p.remark, p.enabled, p.sort, p.id
     FROM products p
     ${whereSql}
@@ -682,7 +714,7 @@ function exportData(db, q) {
     unit: r.unit || '',
     price: round2(r.price),
     lead_time_days: Number(r.lead_time_days) || 0,
-    lead_time_weeks: weeksFromDays(r.lead_time_days),
+    lead_time_weeks: weeksOf(r),
     body_material: r.body_material || '',
     pressure_rating: r.pressure_rating || '',
     discount: round2(r.discount),

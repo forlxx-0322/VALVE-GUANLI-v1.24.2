@@ -74,7 +74,7 @@ const NEW_COLUMNS = ['customer_no', 'contact_name', 'contact_position', 'contact
 
   check('迁移被正确识别并逐级执行',
     info.migrated === true && info.fromVersion === 1 && info.schemaVersion === SCHEMA_VERSION,
-    `v${info.fromVersion} → v${info.schemaVersion}，执行 ${info.migrations.length} 步（v1→v10 共 9 步）`);
+    `v${info.fromVersion} → v${info.schemaVersion}，执行 ${info.migrations.length} 步`);
 
   check('迁移前自动备份了旧库',
     !!info.backedUpTo && fs.existsSync(info.backedUpTo),
@@ -144,6 +144,11 @@ const NEW_COLUMNS = ['customer_no', 'contact_name', 'contact_position', 'contact
       return FIXED_TAG_NAMES.every((n) => rows.includes(n)) && rows.length === 5;
     })(),
     FIXED_TAG_NAMES.join('、'));
+
+  const migratedProdCols = db.prepare('PRAGMA table_info(products)').all().map((c) => c.name);
+  check('v15 产品表已增加 lead_time_weeks 列（按周精确存储）',
+    migratedProdCols.includes('lead_time_weeks'),
+    `products ${migratedProdCols.length} 列，lead_time_weeks=${migratedProdCols.includes('lead_time_weeks')}`);
 
   check('版本号已更新为代码当前版本',
     afterVer === SCHEMA_VERSION,

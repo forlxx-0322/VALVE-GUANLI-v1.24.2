@@ -16,7 +16,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
 
-const SCHEMA_VERSION = 14;
+const SCHEMA_VERSION = 15;
 
 /* ------------------------------------------------------------------ */
 /* 17 张表结构                                                          */
@@ -282,6 +282,7 @@ const TABLES = [
     unit            TEXT NOT NULL DEFAULT '台',
     price           REAL NOT NULL DEFAULT 0,
     lead_time_days  INTEGER NOT NULL DEFAULT 0,
+    lead_time_weeks REAL NOT NULL DEFAULT 0,
     body_material   TEXT NOT NULL DEFAULT '',
     pressure_rating TEXT NOT NULL DEFAULT '',
     discount        REAL NOT NULL DEFAULT 0,
@@ -1282,6 +1283,30 @@ const MIGRATIONS = [
       const ts = now();
       for (const r of rows) upd.run(alias[String(r.status || '').trim()] || '待办', ts, r.id);
       return `修正待办状态 ${rows.length} 条`;
+    }
+  },
+
+  /* v14 → v15：产品货期按周精确存储（1.26.1）
+   *
+   * 背景：1.26.0 只存整天 lead_time_days，3.5 周写入 25 天后回显 25/7=3.6 周，
+   * 与用户按周填写的值对不上。加一列 lead_time_weeks 原样保存周数；
+   * lead_time_days 保留（兼容旧字段/导出），仍由周数换算。
+   * 老数据按 ROUND(days / 7.0, 1) 回填，例如 15 天→2.1、28 天→4。
+   * 迁移可重入：列已存在时不重复 ALTER，只做回填。 */
+  {
+    version: 15,
+    note: '产品货期增加按周精确存储 lead_time_weeks，并用旧 lead_time_days 回填',
+    run(db) {
+      const cols = db.prepare('PRAGMA table_info(products)').all().map((c) => c.name);
+      let added = false;
+      if (!cols.includes('lead_time_weeks')) {
+        db.exec('ALTER TABLE products ADD COLUMN lead_time_weeks REAL NOT NULL DEFAULT 0');
+        added = true;
+      }
+      const info = db.prepare(`UPDATE products
+        SET lead_time_weeks = ROUND(lead_time_days / 7.0, 1)
+        WHERE lead_time_weeks = 0 AND lead_time_days > 0`).run();
+      return `新增列 ${added ? 'lead_time_weeks' : '已存在'}，回填周数 ${Number(info.changes) || 0} 条`;
     }
   }
 ];

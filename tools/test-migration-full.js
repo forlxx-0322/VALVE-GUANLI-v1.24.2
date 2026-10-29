@@ -150,6 +150,8 @@ function insertProduct(db, categoryId, name, code, ts) {
   const vBefore = before.prepare('SELECT MAX(version) AS v FROM schema_version').get().v;
   const countsBefore = counts(before);
   const tablesBefore = before.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((r) => r.name);
+  const productsBefore = tablesBefore.includes('products')
+    ? before.prepare('SELECT COUNT(*) AS n FROM products').get().n : 0;
   const projectsColsBefore = before.prepare('PRAGMA table_info(projects)').all().map((c) => c.name);
   const customersColsBefore = before.prepare('PRAGMA table_info(customers)').all().map((c) => c.name);
   const sample = before.prepare('SELECT id, name FROM customers ORDER BY id LIMIT 1').get();
@@ -268,11 +270,11 @@ function insertProduct(db, categoryId, name, code, ts) {
   if (TARGET >= 11) {
     const CAT_COLS = ['id', 'parent_id', 'name', 'sort', 'is_system', 'created_at', 'updated_at', 'deleted_at'];
     const PROD_COLS = ['id', 'category_id', 'name', 'code', 'unit', 'price', 'lead_time_days',
-      'body_material', 'pressure_rating', 'discount', 'remark', 'enabled', 'sort',
+      'lead_time_weeks', 'body_material', 'pressure_rating', 'discount', 'remark', 'enabled', 'sort',
       'created_at', 'updated_at', 'deleted_at'];
     const catCols = after.prepare('PRAGMA table_info(product_categories)').all().map((c) => c.name);
     const prodCols = after.prepare('PRAGMA table_info(products)').all().map((c) => c.name);
-    check('v11 已建产品价目表两张表且列齐全（8 + 16）',
+    check('v11 已建产品价目表两张表且列齐全（8 + 17，v15 加 lead_time_weeks）',
       tablesAfter.includes('product_categories') && tablesAfter.includes('products')
         && CAT_COLS.every((c) => catCols.includes(c)) && catCols.length === CAT_COLS.length
         && PROD_COLS.every((c) => prodCols.includes(c)) && prodCols.length === PROD_COLS.length,
@@ -329,9 +331,10 @@ function insertProduct(db, categoryId, name, code, ts) {
       NEED_IDX.filter((n) => !prodIdx.includes(n)).join('、') || NEED_IDX.join('、'));
 
     const prodCount = after.prepare('SELECT COUNT(*) AS n FROM products').get().n;
-    check('v11 为纯新增迁移：产品表迁移后为空，既有业务数据不受影响',
-      prodCount === 0 && countsAfter.customers === countsBefore.customers,
-      `products ${prodCount} 条；客户 ${countsBefore.customers} → ${countsAfter.customers}`);
+    const expectedProdCount = vBefore >= 11 ? productsBefore : 0;
+    check('v11 产品表迁移不丢数据（v1 起点为空；旧库则保留原产品数），既有业务数据不受影响',
+      prodCount === expectedProdCount && countsAfter.customers === countsBefore.customers,
+      `products ${prodCount} 条（迁移前 ${productsBefore}）；客户 ${countsBefore.customers} → ${countsAfter.customers}`);
 
     /* ---------- v12：二级分类降级为自定义（可删除） ---------- */
     check('v12 二级/三级分类均为自定义（is_system=0，可删除），一级仍为系统分类',
@@ -591,6 +594,84 @@ function insertProduct(db, categoryId, name, code, ts) {
   } finally {
     if (dbV12b) { try { dbMod.closeDatabase(dbV12b); } catch (_) { /* 忽略 */ } }
     try { fs.rmSync(tmpV12b, { recursive: true, force: true }); } catch (_) { /* 忽略 */ }
+  }
+
+  /* ---------- v14 → v15：产品货期按周精确存储 ----------
+   * 构造一个真实 v14 库（当前代码建库后删掉 lead_time_weeks 列、版本降回 14、
+   * 放 3 条只有天数的老产品），再走 initDatabase 自动迁移，验证：
+   *   · 自动备份 v14 旧库；
+   *   · 新增 lead_time_weeks 列；
+   *   · 老数据回填：15 天→2.1 周、28 天→4 周、0 天→0 周。 */
+  const tmpV14 = fs.mkdtempSync(path.join(os.tmpdir(), 'migv15-'));
+  let dbV14 = null;
+  try {
+    const dataDir = path.join(tmpV14, 'data');
+    const dbFile = path.join(dataDir, 'crm.db');
+    const backupDir = path.join(dataDir, 'backups');
+    fs.mkdirSync(backupDir, { recursive: true });
+
+    const boot = dbMod.initDatabase({ dataDir, dbFile, backupDir });
+    dbMod.closeDatabase(boot.db);
+
+    const raw = new DatabaseSync(dbFile);
+    raw.exec('ALTER TABLE products DROP COLUMN lead_time_weeks');
+    const jia = raw.prepare(`SELECT id FROM product_categories
+      WHERE deleted_at IS NULL AND name = '对夹' LIMIT 1`).get();
+    const ts = new Date().toISOString();
+    const insOld = raw.prepare(`INSERT INTO products
+      (category_id, name, code, unit, price, lead_time_days, body_material, pressure_rating,
+       discount, remark, enabled, sort, created_at, updated_at)
+      VALUES (?, ?, ?, '台', 100, ?, '', '', 0, '', 1, 10, ?, ?)`);
+    insOld.run(jia.id, 'V14 15天', 'V14-15', 15, ts, ts);
+    insOld.run(jia.id, 'V14 28天', 'V14-28', 28, ts, ts);
+    insOld.run(jia.id, 'V14 0天', 'V14-0', 0, ts, ts);
+    raw.prepare('DELETE FROM schema_version WHERE version >= 15').run();
+    raw.prepare(`INSERT OR REPLACE INTO schema_version (version, applied_at, note)
+      VALUES (14, ?, 'v14 fixture')`).run(ts);
+    raw.close();
+
+    const mig = dbMod.initDatabase({ dataDir, dbFile, backupDir });
+    dbV14 = mig.db;
+    const cols = dbV14.prepare('PRAGMA table_info(products)').all().map((c) => c.name);
+    const rows = dbV14.prepare(
+      'SELECT name, lead_time_days, lead_time_weeks FROM products ORDER BY name'
+    ).all();
+    const byName = {};
+    for (const r of rows) byName[r.name] = r;
+    check('v14 → v15 自动迁移：执行 1 步、新增 lead_time_weeks，老数据回填 15天→2.1 / 28天→4 / 0天→0',
+      mig.fromVersion === 14 && mig.schemaVersion === dbMod.SCHEMA_VERSION
+        && mig.migrations.length === dbMod.SCHEMA_VERSION - 14
+        && cols.includes('lead_time_weeks')
+        && !!byName['V14 15天'] && Number(byName['V14 15天'].lead_time_weeks) === 2.1
+        && !!byName['V14 28天'] && Number(byName['V14 28天'].lead_time_weeks) === 4
+        && !!byName['V14 0天'] && Number(byName['V14 0天'].lead_time_weeks) === 0
+        && Number(byName['V14 15天'].lead_time_days) === 15,
+      `v${mig.fromVersion} → v${mig.schemaVersion}（${mig.migrations.length} 步）；`
+        + `15天=${byName['V14 15天'] && byName['V14 15天'].lead_time_weeks} 周，`
+        + `28天=${byName['V14 28天'] && byName['V14 28天'].lead_time_weeks} 周，`
+        + `0天=${byName['V14 0天'] && byName['V14 0天'].lead_time_weeks} 周`);
+
+    let bakCols = [];
+    let bakCount = -1;
+    if (mig.backedUpTo && fs.existsSync(mig.backedUpTo)) {
+      const bak = new DatabaseSync(mig.backedUpTo, { readOnly: true });
+      bakCols = bak.prepare('PRAGMA table_info(products)').all().map((c) => c.name);
+      bakCount = bak.prepare('SELECT COUNT(*) AS n FROM products').get().n;
+      bak.close();
+    }
+    check('v14→v15 迁移前自动备份，备份保留 v14 结构（无 lead_time_weeks）且数据齐全',
+      !!mig.backedUpTo && fs.existsSync(mig.backedUpTo)
+        && /before-migrate-v14-/.test(path.basename(mig.backedUpTo))
+        && !bakCols.includes('lead_time_weeks') && bakCount === 3,
+      mig.backedUpTo
+        ? `${path.basename(mig.backedUpTo)}（${Math.round(fs.statSync(mig.backedUpTo).size / 1024)} KB），`
+          + `备份 products ${bakCols.length} 列 / ${bakCount} 条，含 weeks=${bakCols.includes('lead_time_weeks')}`
+        : '未生成备份');
+  } catch (e) {
+    check('v14 → v15 迁移（专项）', false, e.message);
+  } finally {
+    if (dbV14) { try { dbMod.closeDatabase(dbV14); } catch (_) { /* 忽略 */ } }
+    try { fs.rmSync(tmpV14, { recursive: true, force: true }); } catch (_) { /* 忽略 */ }
   }
 
   try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (_) { /* 忽略 */ }

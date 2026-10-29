@@ -222,16 +222,18 @@ const OPTIONS = { duplicate_mode: 'skip', auto_create_categories: false };
           AND c.deleted_at IS NULL`).get();
       return { a: find(TAG + '甲'), b: find(TAG + '乙'), c: find(TAG + '丙'), jia };
     });
-    check('落库口径：单价两位小数、货期换算为天、折扣 / 材质 / 启用正确',
+    check('落库口径：单价两位小数、货期按周精确保存（3.5 周 / 25 天）、折扣 / 材质 / 启用正确',
       !!dbState.a && !!dbState.jia && Number(dbState.a.category_id) === Number(dbState.jia.id)
         && Number(dbState.a.price) === 1200.56 && Number(dbState.a.lead_time_days) === 25
+        && Number(dbState.a.lead_time_weeks) === 3.5
         && Number(dbState.a.discount) === 10 && dbState.a.body_material === '碳钢 WCB'
         && Number(dbState.a.enabled) === 1,
-      dbState.a ? `分类=${dbState.jia.name}，单价=${dbState.a.price}，货期=${dbState.a.lead_time_days} 天，折扣=${dbState.a.discount}%` : '未找到产品甲');
+      dbState.a ? `分类=${dbState.jia.name}，单价=${dbState.a.price}，货期=${dbState.a.lead_time_weeks} 周 / ${dbState.a.lead_time_days} 天，折扣=${dbState.a.discount}%` : '未找到产品甲');
     check('单位留空默认「台」、启用留空默认是、货期 0.5 周落 4 天',
       !!dbState.b && dbState.b.unit === '台' && Number(dbState.b.enabled) === 1
-        && Number(dbState.b.price) === 0 && Number(dbState.b.lead_time_days) === 4,
-      dbState.b ? `单位=${dbState.b.unit}，启用=${dbState.b.enabled}，货期=${dbState.b.lead_time_days} 天` : '未找到产品乙');
+        && Number(dbState.b.price) === 0 && Number(dbState.b.lead_time_days) === 4
+        && Number(dbState.b.lead_time_weeks) === 0.5,
+      dbState.b ? `单位=${dbState.b.unit}，启用=${dbState.b.enabled}，货期=${dbState.b.lead_time_weeks} 周 / ${dbState.b.lead_time_days} 天` : '未找到产品乙');
     check('启用=否 落库为 0，折扣 100 正确，空货期为 0',
       !!dbState.c && Number(dbState.c.enabled) === 0 && Number(dbState.c.discount) === 100
         && Number(dbState.c.lead_time_days) === 0,
@@ -240,17 +242,17 @@ const OPTIONS = { duplicate_mode: 'skip', auto_create_categories: false };
     /* ---------------- 3. 列表 / 导出 / 折后价 ---------------- */
     const list = await api('GET', `/api/products?keyword=${encodeURIComponent(TAG)}&pageSize=50`);
     const listA = list.ok ? (list.data.list || []).find((r) => r.name === TAG + '甲') : null;
-    check('导入后列表能查到 3 个产品，接口返回货期周数（25 天 → 3.6 周）',
+    check('导入后列表能查到 3 个产品，接口按列返回精确周数（3.5 周不再变 3.6）',
       list.ok && list.data.total === 3 && !!listA
-        && Number(listA.lead_time_weeks) === 3.6 && Number(listA.lead_time_days) === 25,
+        && Number(listA.lead_time_weeks) === 3.5 && Number(listA.lead_time_days) === 25,
       list.ok ? `total=${list.data.total}，甲货期=${listA && listA.lead_time_weeks} 周` : list.message);
 
     const exp = await api('GET', `/api/products/export-data?keyword=${encodeURIComponent(TAG)}`);
     const expA = exp.ok ? (exp.data || []).find((r) => r.name === TAG + '甲') : null;
-    check('导出接口能查到，含 category_path 与货期周数，折后价 1080.5',
+    check('导出接口能查到，含 category_path 与精确货期周数，折后价 1080.5',
       exp.ok && (exp.data || []).length === 3 && !!expA
         && expA.category_path === '蝶阀 / 三偏心蝶阀 / 对夹'
-        && Number(expA.lead_time_weeks) === 3.6 && Number(expA.lead_time_days) === 25
+        && Number(expA.lead_time_weeks) === 3.5 && Number(expA.lead_time_days) === 25
         && Number(expA.net_price) === 1080.5,
       expA ? `${expA.category_path}，${expA.lead_time_weeks} 周，折后价 ${expA.net_price}` : '未找到导出行');
 
@@ -288,12 +290,13 @@ const OPTIONS = { duplicate_mode: 'skip', auto_create_categories: false };
     const repUpd = await api('POST', '/api/data/import',
       Object.assign({ entity: 'product', rows: updRows }, OPTIONS, { duplicate_mode: 'update' }));
     const afterUpd = withDb((db) => db.prepare('SELECT * FROM products WHERE name = ?').get(TAG + '甲'));
-    check('update 模式：价格 / 货期 / 折扣 / 单位 / 启用被更新（1 周 = 7 天）',
+    check('update 模式：价格 / 货期(周) / 折扣 / 单位 / 启用被更新（1 周 = 7 天）',
       repUpd.ok && repUpd.data.updated === 1
-        && Number(afterUpd.price) === 88.8 && Number(afterUpd.lead_time_days) === 7
+        && Number(afterUpd.price) === 88.8 && Number(afterUpd.lead_time_weeks) === 1
+        && Number(afterUpd.lead_time_days) === 7
         && Number(afterUpd.discount) === 20 && afterUpd.unit === '只'
         && Number(afterUpd.enabled) === 0,
-      `更新 ${repUpd.data && repUpd.data.updated}，价格=${afterUpd.price}，货期=${afterUpd.lead_time_days} 天`);
+      `更新 ${repUpd.data && repUpd.data.updated}，价格=${afterUpd.price}，货期=${afterUpd.lead_time_weeks} 周 / ${afterUpd.lead_time_days} 天`);
     check('update 模式：表格留空的列保持原值（材质 / 备注 / 编号不被清空）',
       afterUpd.body_material === '碳钢 WCB' && afterUpd.remark === '导入测试甲'
         && afterUpd.code === `PI${UID}A`,
@@ -417,8 +420,9 @@ const OPTIONS = { duplicate_mode: 'skip', auto_create_categories: false };
     check('产品落在自动创建的新二级分类下',
       !!newCats.product && !!newCats.second
         && Number(newCats.product.category_id) === Number(newCats.second.id)
+        && Number(newCats.product.lead_time_weeks) === 2
         && Number(newCats.product.lead_time_days) === 14,
-      newCats.product ? `产品分类=${newCats.product.category_id}，货期 2 周=${newCats.product.lead_time_days} 天` : '未找到产品庚');
+      newCats.product ? `产品分类=${newCats.product.category_id}，货期 ${newCats.product.lead_time_weeks} 周=${newCats.product.lead_time_days} 天` : '未找到产品庚');
 
     /* ---------------- 9. 审计日志 ---------------- */
     const logs = await api('GET', '/api/logs?entity_type=product&action=import&pageSize=100');

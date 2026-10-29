@@ -17,11 +17,10 @@ window.CRM = window.CRM || {};
 
   const CAT_INDENT = 14;
 
-  /** 天 → 周（最多一位小数）：21 天 = 3 周，25 天 = 3.6 周；数据库仍存天 */
-  const daysToWeeks = (days) => Math.round(((Number(days) || 0) / 7) * 10) / 10;
-  const weeksToDays = (weeks) => Math.round((Number(weeks) || 0) * 7);
-  const fmtWeeks = (days) => {
-    const w = daysToWeeks(days);
+  /** 周数保留一位小数；数据库 lead_time_weeks 为准，界面不再从天数反算 */
+  const round1 = (n) => Math.round((Number(n) || 0) * 10) / 10;
+  const fmtWeeks = (weeks) => {
+    const w = Number(weeks) || 0;
     return Number.isInteger(w) ? String(w) : w.toFixed(1);
   };
 
@@ -31,7 +30,7 @@ window.CRM = window.CRM || {};
     { key: 'body_material', label: '材质', width: '120px' },
     { key: 'pressure_rating', label: '压力', width: '90px' },
     { key: 'price', label: '单价', width: '96px', align: 'right' },
-    { key: 'lead_time_days', label: '货期(周)', width: '84px', align: 'right' },
+    { key: 'lead_time_weeks', label: '货期(周)', width: '84px', align: 'right' },
     { key: 'discount', label: '折扣', width: '72px', align: 'right' },
     { key: 'net_price', label: '折后价', width: '102px', align: 'right' },
     { key: 'ops', label: '操作', width: '168px', align: 'right' }
@@ -319,9 +318,11 @@ window.CRM = window.CRM || {};
         f.code = src.code || '';
         f.unit = src.unit || '台';
         f.price = src.price === null || src.price === undefined ? '' : src.price;
-        f.lead_time_weeks = src.lead_time_days === null || src.lead_time_days === undefined || Number(src.lead_time_days) === 0
-          ? ''
-          : daysToWeeks(src.lead_time_days);
+        /* 1.26.1 起以 lead_time_weeks 为准；旧接口只有天数时兜底换算 */
+        const weeks = src.lead_time_weeks !== undefined && src.lead_time_weeks !== null
+          ? round1(src.lead_time_weeks)
+          : round1((Number(src.lead_time_days) || 0) / 7);
+        f.lead_time_weeks = weeks === 0 ? '' : weeks;
         f.body_material = src.body_material || '';
         f.pressure_rating = src.pressure_rating || '';
         f.discount = src.discount === null || src.discount === undefined ? '' : src.discount;
@@ -339,12 +340,16 @@ window.CRM = window.CRM || {};
         if (!name) { CRM.toast('请填写产品名称', 'error'); return; }
         if (!this.form.category_id) { CRM.toast('请选择产品分类', 'error'); return; }
 
-        /* 货期按周录入，保存时换算成天；最多一位小数 */
+        /* 货期按周录入并原样提交（后端同时换算天数）；最多一位小数 */
         let leadWeeks = 0;
         if (this.form.lead_time_weeks !== '' && this.form.lead_time_weeks !== null) {
           leadWeeks = Number(this.form.lead_time_weeks);
           if (!Number.isFinite(leadWeeks) || leadWeeks < 0) {
             CRM.toast('货期(周)必须是不小于 0 的数字', 'error');
+            return;
+          }
+          if (leadWeeks > 520) {
+            CRM.toast('货期(周)不能超过 520 周', 'error');
             return;
           }
           if (Math.abs(Math.round(leadWeeks * 10) - leadWeeks * 10) > 1e-9) {
@@ -361,7 +366,7 @@ window.CRM = window.CRM || {};
             code: this.form.code,
             unit: this.form.unit || '台',
             price: this.form.price === '' ? 0 : Number(this.form.price),
-            lead_time_days: weeksToDays(leadWeeks),
+            lead_time_weeks: leadWeeks,
             body_material: this.form.body_material,
             pressure_rating: this.form.pressure_rating,
             discount: this.form.discount === '' ? 0 : Number(this.form.discount),
@@ -527,7 +532,7 @@ window.CRM = window.CRM || {};
           const aoa = [header];
           for (const r of rows) {
             aoa.push([
-              r.category_path, r.name, r.code, r.unit, r.price, fmtWeeks(r.lead_time_days),
+              r.category_path, r.name, r.code, r.unit, r.price, fmtWeeks(r.lead_time_weeks),
               r.body_material, r.pressure_rating, r.discount, r.net_price, r.remark,
               r.enabled ? '是' : '否'
             ]);
@@ -697,8 +702,8 @@ window.CRM = window.CRM || {};
                   <span>{{ fmtMoney(row.price) }}</span>
                 </template>
 
-                <template #cell-lead_time_days="{ row }">
-                  <span v-if="row.lead_time_days">{{ fmtWeeks(row.lead_time_days) }} 周</span>
+                <template #cell-lead_time_weeks="{ row }">
+                  <span v-if="row.lead_time_weeks">{{ fmtWeeks(row.lead_time_weeks) }} 周</span>
                   <span v-else class="muted">按合同</span>
                 </template>
 
@@ -741,7 +746,7 @@ window.CRM = window.CRM || {};
 
             <c-field v-model="form.price" label="单价（元）" type="number" placeholder="0.00" />
             <c-field v-model="form.lead_time_weeks" label="货期（周）" type="number"
-                     placeholder="3.5" hint="按周填写，可一位小数；保存时换算为天（3.5 周 = 25 天）" />
+                     placeholder="3.5" hint="按周填写，可一位小数；3.5 周保存后仍回显 3.5 周（同时换算天数供导出）" />
 
             <c-select v-model="form.body_material" label="阀体材质"
                       :options="api.options('body_material')" category="body_material" allow-add
@@ -923,7 +928,7 @@ window.CRM = window.CRM || {};
                     <td class="muted" style="font-size:var(--fs-xs)">{{ r.data.category_path || '—' }}</td>
                     <td>{{ r.data.name || '(无名称)' }}</td>
                     <td style="text-align:right">{{ fmtMoney(r.data.price) }}</td>
-                    <td style="text-align:right">{{ fmtWeeks(r.data.lead_time_days) }}</td>
+                    <td style="text-align:right">{{ fmtWeeks(r.data.lead_time_weeks) }}</td>
                     <td style="text-align:right">{{ r.data.discount }}%</td>
                   </tr>
                 </tbody>

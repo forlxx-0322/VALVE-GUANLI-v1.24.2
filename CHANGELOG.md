@@ -8,6 +8,41 @@
 
 ---
 
+## [1.26.1] — 2026-10-29
+
+本次归档：**货期按周精确存储**，修复 1.26.0「3.5 周 → 25 天 → 回显 3.6 周」的精度瑕疵。
+数据库结构 **v14 → v15**（自动迁移 + 迁移前自动备份）。
+
+### 一、问题
+
+1.26.0 只存整天 `lead_time_days`：3.5 周 × 7 = 24.5 天，四舍五入存 25 天；展示时 25 ÷ 7 = 3.6 周，
+用户按周填的值被改写。产品价目表是报价依据，回显必须与输入一致。
+
+### 二、改了什么
+
+| 文件 | 说明 |
+|---|---|
+| `server/db.js` | `SCHEMA_VERSION = 15`；`products` 加 `lead_time_weeks REAL NOT NULL DEFAULT 0`；迁移 v15：`ALTER TABLE products ADD COLUMN` + `UPDATE ... SET lead_time_weeks = ROUND(lead_time_days / 7.0, 1)`（15 天→2.1、28 天→4、0 天→0）；迁移可重入（列已存在时只回填） |
+| `server/services/products.js` | 保存优先接收 `lead_time_weeks`（≥0、最多一位小数、≤520），同时写 `lead_time_days = Math.round(周 × 7)`；只传旧字段 `lead_time_days` 的调用方自动换算周数；列表 / 详情 / 复制 / 导出统一返回两者，**周数以 `lead_time_weeks` 列为准** |
+| `server/services/excel.js` | 产品导入 / 更新同时写 `lead_time_weeks` 与 `lead_time_days`；导入模板列名 / 报告字段不变；导出数据周数取列 |
+| `web/js/pages/products.js` | 表单提交 `lead_time_weeks`（不再自己换算成天）；列表 / 导出 / 导入预览直接显示 `lead_time_weeks`；校验仍为一位小数并加上限 520 周 |
+| `tools/test-products-124.js` | 删掉「只允许整数天」旧断言；新增 3.5 周 → weeks=3.5 / days=25、读回仍 3.5 周；改为周负数 / 两位小数 / >520 周的非法校验 |
+| `tools/test-products-import.js` | 3.5 周行断言 weeks=3.5、days=25；列表 / 导出断言 3.5 周（不再是 3.6） |
+| `tools/test-migration.js` / `test-migration-full.js` | 新增 v15 列断言；专项构造真实 v14 库 → v15，验证自动加列、15天→2.1 / 28天→4 / 0天→0 回填、迁移前自动备份保留 v14 结构 |
+| `tools/test-phase1.js` | 产品表列数 16 → 17，含 `lead_time_weeks` |
+
+### 三、验证
+
+- **3.5 周往返**：`POST /api/products` 传 `lead_time_weeks: 3.5` → 创建返回、详情、列表、导出均为
+  `lead_time_weeks = 3.5`、`lead_time_days = 25`；不再出现 3.6 周。
+- **v14 → v15 迁移**：用真实 v14 库副本实测，执行 1 步迁移，products 16 → 17 列；
+  15 天→2.1、28 天→4、0 天→0；迁移前自动备份 `before-migrate-v14-*.db`，备份仍为 16 列且数据齐全。
+- 产品专项 **78 / 78**、产品批量导入 **35 / 35**、迁移套件 **16 / 16 + 38 / 38** 全部通过。
+- 全量回归：**844 / 844 通过**（29 个套件，沙箱空库起跑，真实 `data/` 未读写）。
+- 既有 `lead_time_days` 保留，旧调用 / 旧导出仍可用；老产品数据自动回填，无需手工迁移。
+
+---
+
 ## [1.26.0] — 2026-10-29
 
 本次归档：**产品价目表批量导入** + **货期单位改为周**（存储仍为天）。数据库结构不变（**v14**）。

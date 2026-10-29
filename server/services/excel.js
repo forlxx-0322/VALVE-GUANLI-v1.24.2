@@ -419,7 +419,7 @@ function exportData(db, entity, options) {
         code: r.code || '',
         unit: r.unit || '',
         price: round2(r.price),
-        lead_time_weeks: round1((Number(r.lead_time_days) || 0) / 7),
+        lead_time_weeks: round1(r.lead_time_weeks),
         body_material: r.body_material || '',
         pressure_rating: r.pressure_rating || '',
         discount: round2(r.discount),
@@ -663,6 +663,7 @@ function normalizeProductValues(raw, errors, provided) {
       } else {
         const weeks = Number(leadRaw);
         if (!Number.isFinite(weeks) || weeks < 0) errors.push('「货期(周)」必须是不小于 0 的数字');
+        else if (weeks > 520) errors.push('「货期(周)」不能超过 520 周');
         else {
           data.lead_time_weeks = round1(weeks);
           data.lead_time_days = Math.round(weeks * 7);
@@ -1123,11 +1124,11 @@ function insertProduct(db, d, ts) {
   const maxSort = db.prepare(`SELECT COALESCE(MAX(sort), 0) AS s FROM products
     WHERE deleted_at IS NULL AND category_id = ?`).get(categoryId).s;
   db.prepare(`INSERT INTO products
-    (category_id, name, code, unit, price, lead_time_days, body_material,
+    (category_id, name, code, unit, price, lead_time_days, lead_time_weeks, body_material,
      pressure_rating, discount, remark, enabled, sort, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
     categoryId, d.name, d.code || '', d.unit || '台',
-    round2(d.price || 0), Number(d.lead_time_days) || 0,
+    round2(d.price || 0), Number(d.lead_time_days) || 0, round1(d.lead_time_weeks),
     d.body_material || '', d.pressure_rating || '', round2(d.discount || 0),
     d.remark || '', Number(d.enabled) === 0 ? 0 : 1,
     Number(maxSort) + 10, ts, ts
@@ -1136,7 +1137,7 @@ function insertProduct(db, d, ts) {
 
 /** 导入更新产品：只覆盖表格里实际填了值的列（匹配键 name / 分类不覆盖） */
 function updateImportedProduct(db, id, d, provided, ts) {
-  const keys = ['code', 'unit', 'price', 'lead_time_days', 'body_material',
+  const keys = ['code', 'unit', 'price', 'lead_time_days', 'lead_time_weeks', 'body_material',
     'pressure_rating', 'discount', 'remark', 'enabled'];
   const sets = [];
   const params = [];
