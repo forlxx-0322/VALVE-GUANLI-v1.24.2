@@ -1,0 +1,11 @@
+#!/bin/sh
+# pre-commit 钩子：阻止把数据库 / 备份 / 导出内容提交进仓库
+# 安装：node tools/install-git-hooks.js（或手工复制到 .git/hooks/pre-commit）
+
+cd "$(git rev-parse --show-toplevel)" || exit 1
+
+if command -v node >/dev/null 2>&1; then
+  node tools/check-repo-safe.js --staged || exit 1
+fi
+
+exit 0
